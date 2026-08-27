@@ -1,0 +1,19 @@
+{
+  "id": "msg-marketing",
+  "threadId": "thread-marketing",
+  "labelIds": ["CATEGORY_PROMOTIONS"],
+  "snippet": "Big Sale",
+  "internalDate": "1787654400000",
+  "sizeEstimate": 4096,
+  "payload": {
+    "partId": "",
+    "mimeType": "text/html",
+    "headers": [
+      {"name": "From", "value": "Sales <offers@shop.example>"},
+      {"name": "To", "value": "alice@example.com"},
+      {"name": "Subject", "value": "Big Sale"},
+      {"name": "Content-Type", "value": "text/html; charset=windows-1252"}
+    ],
+    "body": {"size": 264, "data": "PGh0bWw-PGJvZHk-PHRhYmxlIHJvbGU9InByZXNlbnRhdGlvbiI-PHRyPjx0ZD48dGFibGU-PHRyPjx0ZD48cD6TQmlnIFNhbGWUPC9wPjxpbWcgYWx0PSJTYWxlIGJhbm5lciIgd2lkdGg9IjYwMCIgc3JjPSJodHRwczovL3Nob3AuZXhhbXBsZS9iYW5uZXIuanBnIj48aW1nIGFsdD0iIiB3aWR0aD0iMzAwIiBzcmM9Imh0dHBzOi8vc2hvcC5leGFtcGxlL3NwYWNlci5qcGciPjwvdGQ-PC90cj48L3RhYmxlPjwvdGQ-PC90cj48L3RhYmxlPjwvYm9keT48L2h0bWw-"}
+  }
+}

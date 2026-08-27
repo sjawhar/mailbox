@@ -1,0 +1,19 @@
+{
+  "id": "msg-github",
+  "threadId": "thread-github",
+  "labelIds": ["INBOX", "CATEGORY_UPDATES"],
+  "snippet": "Pull request #5 needs your review.",
+  "internalDate": "1787653200000",
+  "sizeEstimate": 2048,
+  "payload": {
+    "partId": "",
+    "mimeType": "text/html",
+    "headers": [
+      {"name": "From", "value": "notifications@github.com"},
+      {"name": "To", "value": "alice@example.com"},
+      {"name": "Subject", "value": "[o/r] Pull request #5 needs review"},
+      {"name": "Content-Type", "value": "text/html; charset=utf-8"}
+    ],
+    "body": {"size": 250, "data": "PGh0bWw-PGJvZHk-PHA-UHVsbCByZXF1ZXN0ICM1IG5lZWRzIHlvdXIgcmV2aWV3LjwvcD48cD48YSBocmVmPSJodHRwczovL2dpdGh1Yi5jb20vby9yL3B1bGwvNSI-VmlldyBQUjwvYT48L3A-PHNwYW4gc3R5bGU9ImRpc3BsYXk6bm9uZSI-cHJlaGVhZGVyOiByZXZpZXcgcmVxdWVzdGVkPC9zcGFuPjxpbWcgc3JjPSJodHRwczovL2dpdGh1Yi5jb20vdHJhY2tpbmcuZ2lmIiB3aWR0aD0iMSIgaGVpZ2h0PSIxIj48L2JvZHk-PC9odG1sPg"}
+  }
+}

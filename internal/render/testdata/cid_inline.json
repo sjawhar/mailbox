@@ -1,0 +1,44 @@
+{
+  "id": "msg-cid",
+  "threadId": "thread-cid",
+  "labelIds": ["INBOX"],
+  "snippet": "Quarterly report",
+  "internalDate": "1787655600000",
+  "sizeEstimate": 12288,
+  "payload": {
+    "partId": "",
+    "mimeType": "multipart/related",
+    "headers": [
+      {"name": "From", "value": "Reports <reports@corp.example>"},
+      {"name": "To", "value": "alice@example.com"},
+      {"name": "Subject", "value": "Quarterly report"},
+      {"name": "Content-Type", "value": "multipart/related; boundary=mailbox-related"}
+    ],
+    "body": {"size": 0},
+    "parts": [
+      {
+        "partId": "0",
+        "mimeType": "text/html",
+        "headers": [{"name": "Content-Type", "value": "text/html; charset=UTF-8"}],
+        "body": {"size": 93, "data": "PGh0bWw-PGJvZHk-PHA-UXVhcnRlcmx5IHJlcG9ydDwvcD48aW1nIHNyYz0iY2lkOmxvZ29AY29ycCIgYWx0PSJDb21wYW55IGxvZ28iPjwvYm9keT48L2h0bWw-"}
+      },
+      {
+        "partId": "1",
+        "mimeType": "image/png",
+        "filename": "logo.png",
+        "headers": [
+          {"name": "Content-Type", "value": "image/png"},
+          {"name": "Content-ID", "value": "<logo@corp>"}
+        ],
+        "body": {"size": 16, "data": "iVBORw0KGgoAAAANSUhEUg"}
+      },
+      {
+        "partId": "2",
+        "mimeType": "application/pdf",
+        "filename": "report.pdf",
+        "headers": [{"name": "Content-Type", "value": "application/pdf"}],
+        "body": {"attachmentId": "att-1", "size": 10240}
+      }
+    ]
+  }
+}
