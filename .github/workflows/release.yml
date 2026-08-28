@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-mailbox
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      should_release: ${{ steps.bump.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Determine version bump
+        id: bump
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_tag=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -z "$latest_tag" ]; then
+            current=$(tr -d '[:space:]' < VERSION)
+            version=$(.github/scripts/release-bump.sh "$current" HEAD --bootstrap)
+            echo "Bootstrapping initial release v${version}"
+          else
+            current=${latest_tag#v}
+            current=${current%%-*}
+            commit_range="${latest_tag}..HEAD"
+            version=$(.github/scripts/release-bump.sh "$current" "$commit_range")
+            if [ "$version" = "empty" ]; then
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "No commits to release"
+              exit 0
+            fi
+            if [ "$version" = "none" ]; then
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "::notice title=No release published::No version-bumping commits since $latest_tag"
+              echo "**No release published** — No version-bumping commits since $latest_tag" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+
+          tag="v${version}"
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "should_release=true"
+          } >> "$GITHUB_OUTPUT"
+          echo "Bumping $current → $version"
+
+  build:
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build release archive
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target="${GOOS}-${GOARCH}"
+          mkdir -p "dist/${target}"
+          go build -buildvcs=false -ldflags "-X main.version=${VERSION}" -o "dist/${target}/mailbox" ./cmd/mailbox
+          tar -C "dist/${target}" -czf "dist/mailbox-${target}.tar.gz" mailbox
+
+          if [ "$target" = "linux-amd64" ]; then
+            "./dist/${target}/mailbox" --version | grep -Fx "mailbox ${VERSION}"
+          fi
+      - name: Attest ${{ matrix.goos }}-${{ matrix.goarch }} archive
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: dist/mailbox-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/mailbox-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          fetch-depth: 0
+      - name: Commit release version and tag
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf '%s\n' "$VERSION" > VERSION
+          grep -Fx "$VERSION" VERSION
+          .github/scripts/release-push.sh tag VERSION "chore: release ${TAG} [skip ci]" "$TAG"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          merge-multiple: true
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum mailbox-*.tar.gz > SHA256SUMS
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" mailbox-*.tar.gz SHA256SUMS --clobber
+          else
+            gh release create "$TAG" mailbox-*.tar.gz SHA256SUMS --generate-notes
+          fi
+      - name: Push release version to main
+        shell: bash
+        run: .github/scripts/release-push.sh push-main

@@ -1,0 +1,34 @@
+{
+  "id": "msg-alternative",
+  "threadId": "thread-human",
+  "labelIds": ["INBOX"],
+  "snippet": "Thanks for the update.",
+  "internalDate": "1787652000000",
+  "sizeEstimate": 1024,
+  "payload": {
+    "partId": "",
+    "mimeType": "multipart/alternative",
+    "headers": [
+      {"name": "From", "value": "Alice Example <alice@example.com>"},
+      {"name": "To", "value": "Bob Example <bob@x.com>"},
+      {"name": "Subject", "value": "Project update"},
+      {"name": "Date", "value": "Wed, 26 Aug 2026 09:14:00 -0700"},
+      {"name": "Content-Type", "value": "multipart/alternative; boundary=mailbox-alt"}
+    ],
+    "body": {"size": 0},
+    "parts": [
+      {
+        "partId": "0",
+        "mimeType": "text/plain",
+        "headers": [{"name": "Content-Type", "value": "text/plain; charset=UTF-8"}],
+        "body": {"size": 33, "data": "SGkgQWxpY2UsCgpUaGFua3MgZm9yIHRoZSB1cGRhdGUu"}
+      },
+      {
+        "partId": "1",
+        "mimeType": "text/html",
+        "headers": [{"name": "Content-Type", "value": "text/html; charset=UTF-8"}],
+        "body": {"size": 188, "data": "PGRpdj48cD5IaSBBbGljZSw8L3A-PHA-VGhhbmtzIGZvciB0aGUgdXBkYXRlLjwvcD48ZGl2IGNsYXNzPSJnbWFpbF9xdW90ZSI-T24gVHVlLCBBdWcgMjUsIDIwMjYgYXQgOToxNCBBTSBCb2IgJmx0O2JvYkB4LmNvbSZndDsgd3JvdGU6PGJsb2NrcXVvdGU-RWFybGllciBtZXNzYWdlLjwvYmxvY2txdW90ZT48L2Rpdj48L2Rpdj4"}
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "id": "msg-nested-quotes",
+  "threadId": "thread-nested-quotes",
+  "labelIds": ["INBOX"],
+  "snippet": "Newest reply.",
+  "internalDate": "1787656800000",
+  "sizeEstimate": 1024,
+  "payload": {
+    "partId": "",
+    "mimeType": "text/html",
+    "headers": [
+      {"name": "From", "value": "Alice Example <alice@example.com>"},
+      {"name": "To", "value": "Bob Example <bob@example.com>"},
+      {"name": "Subject", "value": "Re: Project update"},
+      {"name": "Content-Type", "value": "text/html; charset=UTF-8"}
+    ],
+    "body": {"size": 136, "data": "PGRpdj48cD5OZXdlc3QgcmVwbHkuPC9wPjxkaXYgY2xhc3M9ImdtYWlsX3F1b3RlIj5GaXJzdCBxdW90ZWQgcmVwbHkuPGRpdiBjbGFzcz0iZ21haWxfcXVvdGUiPk9yaWdpbmFsIHF1b3RlZCBtZXNzYWdlLjwvZGl2PjwvZGl2PjwvZGl2Pg"}
+  }
+}

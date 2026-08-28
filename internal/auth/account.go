@@ -1,5 +1,5 @@
-// Package auth resolves Gmail credentials for mailbox, mirroring the gws shim
-// doctrine: fail loud, no fallbacks, no silent identity switches.
+// Package auth resolves Gmail credentials for mailbox. It selects work or
+// personal accounts explicitly and fails rather than silently switching identity.
 package auth
 
 import (
