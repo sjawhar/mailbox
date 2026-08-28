@@ -96,7 +96,10 @@ func (cc *cmdCtx) start() (auth.Account, *auth.Source, *gmail.Client, int) {
 	if err := source.EnsureEnv(cc.rawArgs); err != nil {
 		return "", nil, nil, cc.runtimeError(account, source, err)
 	}
-	return account, source, gmail.NewClient(source), 0
+	client := gmail.NewClient(source)
+	client.Mutation = source.MutationCredentials()
+	client.Account = string(account)
+	return account, source, client, 0
 }
 
 func (cc *cmdCtx) runtimeError(account auth.Account, source *auth.Source, err error) int {

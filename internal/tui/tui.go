@@ -50,9 +50,12 @@ var newAccountCtx = func(account auth.Account) (*accountCtx, error) {
 	if _, err := source.Resolve(context.Background()); err != nil {
 		return nil, err
 	}
+	client := gmail.NewClient(source)
+	client.Mutation = source.MutationCredentials()
+	client.Account = string(account)
 	return &accountCtx{
 		account:   account,
-		api:       gmail.NewClient(source),
+		api:       client,
 		lastRoute: source.LastRoute,
 	}, nil
 }
