@@ -20,7 +20,7 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 	if err := requireArity(pos, 1, -1, action); err != nil {
 		return failUsage(cc.stderr, err)
 	}
-	account, source, client, code := next.start()
+	account, source, client, code := next.startMutation()
 	if code != 0 {
 		return code
 	}
@@ -57,7 +57,7 @@ func runMark(cc *cmdCtx, args []string) int {
 	if mode != "read" && mode != "unread" {
 		return failUsage(cc.stderr, fmt.Errorf("mark mode must be read or unread"))
 	}
-	account, source, client, code := next.start()
+	account, source, client, code := next.startMutation()
 	if code != 0 {
 		return code
 	}
@@ -90,7 +90,7 @@ func runLabel(cc *cmdCtx, args []string) int {
 	if mode != "add" && mode != "rm" {
 		return failUsage(cc.stderr, fmt.Errorf("label mode must be add or rm"))
 	}
-	account, source, client, code := next.start()
+	account, source, client, code := next.startMutation()
 	if code != 0 {
 		return code
 	}
