@@ -52,18 +52,21 @@ Run `mailbox` without a subcommand in a terminal to open the interactive TUI. Fo
 Every one-shot command accepts `--json`. It writes one JSON value to standard output and reserves standard error for diagnostics. A listing has this shape:
 
 ```json
-[
-  {
-    "n": 1,
-    "id": "GMAIL_THREAD_ID",
-    "subject": "Subject",
-    "from": "Sender <sender@example.com>",
-    "date": "2026-08-27T01:02:03Z",
-    "snippet": "Preview text",
-    "unread": true,
-    "labels": ["INBOX", "UNREAD"]
-  }
-]
+{
+  "account": "work",
+  "threads": [
+    {
+      "n": 1,
+      "id": "GMAIL_THREAD_ID",
+      "subject": "Subject",
+      "from": "Sender <sender@example.com>",
+      "date": "2026-08-27T01:02:03Z",
+      "snippet": "Preview text",
+      "unread": true,
+      "labels": ["INBOX", "UNREAD"]
+    }
+  ]
+}
 ```
 
 ## Authentication
@@ -76,7 +79,7 @@ Mailbox resolves credentials for the selected account in this order: `MAILBOX_TO
 | `GWS_WORK_MAIL_OAUTH` | An `authorized_user` OAuth credential for the work account. |
 | `GWS_PERSONAL_MAIL_OAUTH` | An `authorized_user` OAuth credential for the personal account. |
 | `MAILBOX_BROKER` | Optional path to the broker executable. It has highest precedence for broker discovery; otherwise mailbox looks for `google-user-token` on `PATH`. |
-| `MAILBOX_CACHE_DIR` | Optional access-token cache directory; the default is `~/.cache/mailbox/`. |
+| `MAILBOX_CACHE_DIR` | Optional access-token cache directory. The default is the OS user-cache directory plus `mailbox`: `$XDG_CACHE_HOME/mailbox` when set, otherwise `~/.cache/mailbox` on Linux; `~/Library/Caches/mailbox` on macOS. |
 
 Set an OAuth variable directly or have any secret manager inject it into the mailbox process. Google OAuth consent with the `https://www.googleapis.com/auth/gmail.modify` scope produces an `authorized_user` credential with this shape:
 
