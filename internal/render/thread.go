@@ -108,16 +108,24 @@ func (thread *RenderedThread) Markdown() string {
 
 const terminalLinkDisplayLimit = 96
 
-// TerminalMarkdown replaces only generated link-table URLs with safe display
-// values. RenderedMessage retains its original Markdown and Link URLs for JSON
-// consumers and opening links.
+// TerminalMarkdown replaces only generated trailing link-table definitions
+// with safe display values. RenderedMessage retains its original Markdown and
+// Link URLs for JSON consumers and opening links.
 func TerminalMarkdown(markdown string, links []Link) string {
-	for _, link := range links {
-		source := fmt.Sprintf("[%d]: %s", link.N, link.URL)
-		replacement := fmt.Sprintf("[%d]: %s", link.N, terminalLinkDisplayURL(link.URL))
-		markdown = strings.Replace(markdown, source, replacement, 1)
+	if len(links) == 0 {
+		return markdown
 	}
-	return markdown
+
+	var source, display strings.Builder
+	for _, link := range links {
+		fmt.Fprintf(&source, "[%d]: %s\n", link.N, link.URL)
+		fmt.Fprintf(&display, "[%d]: %s\n", link.N, terminalLinkDisplayURL(link.URL))
+	}
+	definitions := source.String()
+	if !strings.HasSuffix(markdown, definitions) {
+		return markdown
+	}
+	return strings.TrimSuffix(markdown, definitions) + display.String()
 }
 
 func terminalLinkDisplayURL(raw string) string {

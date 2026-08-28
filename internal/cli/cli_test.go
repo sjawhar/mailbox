@@ -283,6 +283,38 @@ func TestInboxExcludesThreadsWithoutInboxMessage(t *testing.T) {
 	}
 }
 
+func TestInboxUsesMatchingListSnippetAfterFilter(t *testing.T) {
+	g := newGmailTestServer(t)
+	g.listIDs = []string{"first", "sent", "last"}
+	first := metadataThread("first")
+	first["snippet"] = ""
+	sent := metadataThread("sent")
+	sent["messages"].([]map[string]any)[0]["labelIds"] = []string{"SENT"}
+	last := metadataThread("last")
+	last["snippet"] = ""
+	g.metadata = map[string]map[string]any{
+		"first": first,
+		"sent":  sent,
+		"last":  last,
+	}
+
+	code, value, stderr := runJSON(t, g, "inbox", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("inbox = (%d, %q), want success", code, stderr)
+	}
+	threads := value["threads"].([]any)
+	if len(threads) != 2 {
+		t.Fatalf("inbox threads = %#v, want two INBOX rows", threads)
+	}
+	lastRow := threads[1].(map[string]any)
+	if got, want := lastRow["id"], "last"; got != want {
+		t.Fatalf("second row ID = %q, want %q", got, want)
+	}
+	if got, want := lastRow["snippet"], "snippet last"; got != want {
+		t.Fatalf("second row snippet = %q, want matching listed snippet %q", got, want)
+	}
+}
+
 func TestEmptyInboxJSONUsesArray(t *testing.T) {
 	g := newGmailTestServer(t)
 	g.listIDs = []string{}

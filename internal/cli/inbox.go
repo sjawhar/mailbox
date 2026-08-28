@@ -98,10 +98,21 @@ func runListing(cc *cmdCtx, options gmail.ListOptions) int {
 
 func threadRows(metadata, listed []*gmail.Thread) []threadRow {
 	rows := make([]threadRow, 0, len(metadata))
+	var listedByID map[string]*gmail.Thread
 	for index, thread := range metadata {
 		row := threadRow{N: index + 1, ID: thread.ID, Snippet: thread.Snippet, Labels: []string{}}
-		if index < len(listed) && row.Snippet == "" {
-			row.Snippet = listed[index].Snippet
+		if row.Snippet == "" {
+			if listedByID == nil {
+				listedByID = make(map[string]*gmail.Thread, len(listed))
+				for _, listedThread := range listed {
+					if listedThread != nil {
+						listedByID[listedThread.ID] = listedThread
+					}
+				}
+			}
+			if listedThread := listedByID[thread.ID]; listedThread != nil {
+				row.Snippet = listedThread.Snippet
+			}
 		}
 		if message := gmail.LatestMessage(thread); message != nil {
 			row.Subject = message.Header("Subject")

@@ -108,12 +108,13 @@ func TestRenderedThreadMarkdownFormat(t *testing.T) {
 	}
 }
 
-func TestTerminalLinkTableElidesQueriesButJSONKeepsFullURLs(t *testing.T) {
+func TestTerminalLinkTableElidesOnlyGeneratedDefinitions(t *testing.T) {
 	fullURL := "https://example.test/private/path?email_token=secret"
 	longURL := "https://example.test/" + strings.Repeat("directory/", 20) + "?email_token=secret"
+	literal := "Literal source text: [1]: " + fullURL
 	thread := &RenderedThread{
 		Messages: []RenderedMessage{{
-			Markdown: "[1]: " + fullURL + "\n[2]: " + longURL + "\n",
+			Markdown: literal + "\n\n[1]: " + fullURL + "\n[2]: " + longURL + "\n",
 			Links: []Link{
 				{N: 1, URL: fullURL},
 				{N: 2, URL: longURL},
@@ -122,7 +123,10 @@ func TestTerminalLinkTableElidesQueriesButJSONKeepsFullURLs(t *testing.T) {
 	}
 
 	terminal := thread.Markdown()
-	if strings.Contains(terminal, "email_token=secret") {
+	if !strings.Contains(terminal, literal) {
+		t.Fatalf("terminal text = %q, want literal body URL preserved", terminal)
+	}
+	if strings.Contains(terminal, "\n[1]: "+fullURL+"\n") {
 		t.Fatalf("terminal link table leaked query parameters: %q", terminal)
 	}
 	if !strings.Contains(terminal, "https://example.test/private/path…") {
