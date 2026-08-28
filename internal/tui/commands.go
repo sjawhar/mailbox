@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -133,6 +132,33 @@ func getThreadCmd(request asyncRequest, id string) tea.Cmd {
 	}
 }
 
+
+const mintStderrTailLimit = 8 << 10
+
+// mintStderrTail retains only the last mint stderr bytes so a noisy child
+// cannot grow the TUI process before its status note is rendered.
+type mintStderrTail struct {
+	data []byte
+}
+
+func (b *mintStderrTail) Write(p []byte) (int, error) {
+	if b.data == nil {
+		b.data = make([]byte, 0, mintStderrTailLimit)
+	}
+	if len(p) >= mintStderrTailLimit {
+		b.data = b.data[:mintStderrTailLimit]
+		copy(b.data, p[len(p)-mintStderrTailLimit:])
+		return len(p), nil
+	}
+	if overflow := len(b.data) + len(p) - mintStderrTailLimit; overflow > 0 {
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:len(b.data)-overflow]
+	}
+	b.data = append(b.data, p...)
+	return len(p), nil
+}
+
+func (b *mintStderrTail) String() string { return string(b.data) }
 const previewDebounce = 125 * time.Millisecond
 
 func previewDebounceCmd(request asyncRequest, threadID string) tea.Cmd {
@@ -173,7 +199,7 @@ func trashThreadsCmd(request asyncRequest, ids []string) tea.Cmd {
 // tail alongside the outcome.
 func mintCmd(request asyncRequest) tea.Cmd {
 	return func() tea.Msg {
-		var stderr bytes.Buffer
+		var stderr mintStderrTail
 		err := request.ctx.mint(context.Background(), &stderr)
 		return mintDoneMsg{request: request, note: mintNote(stderr.String()), err: err}
 	}

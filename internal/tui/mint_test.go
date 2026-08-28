@@ -277,3 +277,19 @@ func TestReaderStatusDuringMintKeepsAttribution(t *testing.T) {
 	}
 	_ = mint
 }
+
+// TestMintStderrTailIsBounded catches child stderr growing without bound
+// before terminal sanitization and status truncation.
+func TestMintStderrTailIsBounded(t *testing.T) {
+	var stderr mintStderrTail
+	input := strings.Repeat("discarded\n", mintStderrTailLimit) + "tail note\n"
+	if written, err := stderr.Write([]byte(input)); err != nil || written != len(input) {
+		t.Fatalf("Write = (%d, %v), want (%d, nil)", written, err, len(input))
+	}
+	if len(stderr.data) > mintStderrTailLimit {
+		t.Fatalf("stored stderr bytes = %d, want at most %d", len(stderr.data), mintStderrTailLimit)
+	}
+	if !strings.HasSuffix(string(stderr.data), "tail note\n") {
+		t.Fatalf("stderr tail = %q, want final child note", stderr.data)
+	}
+}
