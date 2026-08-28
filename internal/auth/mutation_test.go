@@ -233,7 +233,7 @@ func TestMutationResolutionTouchesNothingElse(t *testing.T) {
 
 	before := hashDir(t, cache)
 	source := NewSource(AccountWork)
-	token, err := source.MutationToken(context.Background(), EnvOnlyMinter{Argv: []string{"archive", "1"}})
+	token, err := source.MutationToken(context.Background(), EnvOnlyMinter{})
 	if err != nil || token != "env-mut-tok" {
 		t.Fatalf("MutationToken = %q, %v", token, err)
 	}
@@ -248,7 +248,7 @@ func TestMutationResolutionTouchesNothingElse(t *testing.T) {
 func TestEnvOnlyMinterMissingKeyIsTyped(t *testing.T) {
 	clearCredentialEnv(t)
 	source := NewSource(AccountPersonal)
-	_, err := source.MutationToken(context.Background(), EnvOnlyMinter{Argv: []string{"--account", "personal", "trash", "1 2"}})
+	_, err := source.MutationToken(context.Background(), EnvOnlyMinter{})
 	var needs *NeedsMutationCredError
 	if !errors.As(err, &needs) {
 		t.Fatalf("error = %v, want NeedsMutationCredError", err)
@@ -256,13 +256,8 @@ func TestEnvOnlyMinterMissingKeyIsTyped(t *testing.T) {
 	if needs.Account != AccountPersonal || needs.Key != "GWS_PERSONAL_MODIFY_OAUTH" {
 		t.Fatalf("NeedsMutationCredError = %+v", needs)
 	}
-	wantCommand := `secrets GWS_PERSONAL_MODIFY_OAUTH -- mailbox --account personal trash '1 2'`
-	if needs.Command() != wantCommand {
-		t.Fatalf("Command() = %q, want %q", needs.Command(), wantCommand)
-	}
-	wantError := "mutation credentials for personal are human-tier; run: " + wantCommand
-	if needs.Error() != wantError {
-		t.Fatalf("Error() = %q, want %q", needs.Error(), wantError)
+	if needs.Error() != "mutation credentials for personal are human-tier" {
+		t.Fatalf("Error() = %q", needs.Error())
 	}
 }
 

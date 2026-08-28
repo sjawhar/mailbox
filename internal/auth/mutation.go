@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -38,47 +37,28 @@ func ModifyEnvKey(account Account) string {
 	return "GWS_WORK_MODIFY_OAUTH"
 }
 
-// NeedsMutationCredError is returned by EnvOnlyMinter when the human-tier
-// credential is absent. Its rendering is the exact remedy command (spec §6).
+// NeedsMutationCredError reports the absent human-tier credential. The CLI
+// owns rendering its invocation-specific remedy.
 type NeedsMutationCredError struct {
 	Account Account
 	Key     string
-	Argv    []string
 }
 
 func (e *NeedsMutationCredError) Error() string {
-	return fmt.Sprintf("mutation credentials for %s are human-tier; run: %s", e.Account, e.Command())
-}
-
-func (e *NeedsMutationCredError) Command() string {
-	parts := make([]string, 0, len(e.Argv)+4)
-	parts = append(parts, "secrets", e.Key, "--", "mailbox")
-	for _, arg := range e.Argv {
-		parts = append(parts, shellQuote(arg))
-	}
-	return strings.Join(parts, " ")
-}
-
-func shellQuote(arg string) string {
-	if arg != "" && !strings.ContainsAny(arg, " \t\n\"'\\$`*?[](){}<>|&;#~") {
-		return arg
-	}
-	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+	return fmt.Sprintf("mutation credentials for %s are human-tier", e.Account)
 }
 
 // EnvOnlyMinter resolves the mutation credential from this process's own
-// environment or fails with a typed error. It has no subprocess capability:
-// the CLI surface is structurally unable to cause a secretsd request (the C
-// ruling, F10).
-type EnvOnlyMinter struct{ Argv []string }
+// environment or fails with a typed error. It has no subprocess capability.
+type EnvOnlyMinter struct{}
 
-func (m EnvOnlyMinter) Mint(ctx context.Context, account Account) (Token, error) {
+func (EnvOnlyMinter) Mint(ctx context.Context, account Account) (Token, error) {
 	token, found, err := mintFromEnv(ctx, account)
 	if err != nil {
 		return Token{}, err
 	}
 	if !found {
-		return Token{}, &NeedsMutationCredError{Account: account, Key: ModifyEnvKey(account), Argv: m.Argv}
+		return Token{}, &NeedsMutationCredError{Account: account, Key: ModifyEnvKey(account)}
 	}
 	return token, nil
 }

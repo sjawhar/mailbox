@@ -121,7 +121,7 @@ func (cc *cmdCtx) startMutation() (auth.Account, *auth.Source, *gmail.Client, in
 		return "", nil, nil, cc.runtimeError("", nil, err)
 	}
 	source := auth.NewSource(account)
-	if _, err := source.MutationToken(context.Background(), auth.EnvOnlyMinter{Argv: cc.rawArgs}); err != nil {
+	if _, err := source.MutationToken(context.Background(), auth.EnvOnlyMinter{}); err != nil {
 		var needs *auth.NeedsMutationCredError
 		if errors.As(err, &needs) {
 			return "", nil, nil, cc.needsMutationCredential(needs)
@@ -144,17 +144,33 @@ type mutationCredEnvelope struct {
 }
 
 func (cc *cmdCtx) needsMutationCredential(needs *auth.NeedsMutationCredError) int {
-	fmt.Fprintf(cc.stderr, "mailbox: %v\n", needs)
+	command := cc.mutationCredentialCommand(needs.Key)
+	fmt.Fprintf(cc.stderr, "mailbox: mutation credentials for %s are human-tier; run: %s\n", needs.Account, command)
 	if cc.json {
 		var envelope mutationCredEnvelope
 		envelope.Error.Code = "needs_mutation_credential"
 		envelope.Error.Key = needs.Key
-		envelope.Error.Command = needs.Command()
+		envelope.Error.Command = command
 		if err := writeJSON(cc.stdout, envelope); err != nil {
 			fmt.Fprintf(cc.stderr, "mailbox: %v\n", wrapError("write JSON", err))
 		}
 	}
 	return 1
+}
+
+func (cc *cmdCtx) mutationCredentialCommand(key string) string {
+	parts := append([]string{"secrets", key, "--", "mailbox"}, cc.rawArgs...)
+	for index, part := range parts {
+		parts[index] = shellQuote(part)
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(arg string) string {
+	if arg != "" && !strings.ContainsAny(arg, " \t\n\"'\\$`*?[](){}<>|&;#~") {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 }
 
 func (cc *cmdCtx) runtimeError(account auth.Account, source *auth.Source, err error) int {
