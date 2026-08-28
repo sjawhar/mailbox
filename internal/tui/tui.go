@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -357,7 +358,7 @@ func (m *app) setSize(width, height int) {
 }
 
 func (m *app) clearStatus() {
-	if m.minting {
+	if !m.canSurfaceStatus() {
 		return
 	}
 	m.status = ""
@@ -376,7 +377,7 @@ func (m app) usesEnvToken() bool {
 }
 
 func (m *app) surfaceError(err error) {
-	if m.minting {
+	if !m.canSurfaceStatus() {
 		return
 	}
 	m.status = render.SanitizeTerminal(err.Error())
@@ -391,6 +392,21 @@ func (m *app) surfaceError(err error) {
 	}
 }
 
+func (m app) canSurfaceStatus() bool { return !m.minting }
+
+// deflectMint preserves the unlock attribution while telling the user why the
+// requested transition cannot run until the child minter returns.
+func (m *app) deflectMint() bool {
+	if !m.minting {
+		return false
+	}
+	const waiting = "waiting for unlock…"
+	if !strings.Contains(m.status, waiting) {
+		m.status += " · " + waiting
+	}
+	m.statusError = false
+	return true
+}
 func (m app) statusView() string {
 	status := m.status
 	if m.loading {
@@ -406,6 +422,12 @@ func (m app) statusView() string {
 }
 
 func (m app) updateKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if message.String() == "ctrl+c" {
+		if m.deflectMint() {
+			return m, nil
+		}
+		return m, tea.Quit
+	}
 	switch m.view {
 	case listView:
 		return m.updateListKey(message)
@@ -423,8 +445,7 @@ func (m app) updateKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m app) switchAccount() (tea.Model, tea.Cmd) {
-	if m.minting {
-		m.status += " · waiting for unlock…"
+	if m.deflectMint() {
 		return m, nil
 	}
 	target := auth.AccountWork

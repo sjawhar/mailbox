@@ -221,6 +221,31 @@ func TestAccountSwitchDuringMintKeepsMintAttribution(t *testing.T) {
 	_ = retry
 }
 
+// TestQuitDuringMintKeepsAttribution catches a quit path abandoning the
+// status that identifies a still-running credential prompt.
+func TestQuitDuringMintKeepsAttribution(t *testing.T) {
+	model, _, recorder, _ := newMintApp(t, testThreads(1))
+
+	model, mint := update(t, model, key("e"))
+	unlockStatus := model.status
+	model, quit := update(t, model, key(keyQuit))
+	if quit != nil {
+		t.Fatal("quit command ran while minting")
+	}
+	if model.status != unlockStatus+" · waiting for unlock…" {
+		t.Fatalf("status = %q, want preserved unlock attribution with waiting feedback", model.status)
+	}
+
+	model, _ = update(t, model, runCmd(t, mint))
+	if recorder.calls != 1 {
+		t.Fatalf("mints = %d, want one", recorder.calls)
+	}
+	_, quit = update(t, model, key(keyQuit))
+	if quit == nil {
+		t.Fatal("quit command missing after mint completed")
+	}
+}
+
 // TestMintSuccessNoteIsSurfaced catches loss of the child stderr note after a
 // successful keypress-initiated mint.
 func TestMintSuccessNoteIsSurfaced(t *testing.T) {

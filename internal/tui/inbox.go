@@ -266,6 +266,9 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		request := m.beginRequest(listOperation)
 		return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
 	case keyQuit:
+		if m.deflectMint() {
+			return m, nil
+		}
 		return m, tea.Quit
 	}
 	return m, nil
@@ -276,9 +279,8 @@ func (m app) startAction(action string, ids, add, remove []string, advance bool)
 		return m, nil
 	}
 	if m.pending != nil {
-		if m.minting {
-			m.status += " · waiting for unlock…"
-			m.statusError = false
+		if m.deflectMint() {
+			return m, nil
 		}
 		return m, nil
 	}
