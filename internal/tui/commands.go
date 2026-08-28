@@ -132,7 +132,6 @@ func getThreadCmd(request asyncRequest, id string) tea.Cmd {
 	}
 }
 
-
 const mintStderrTailLimit = 8 << 10
 
 // mintStderrTail retains only the last mint stderr bytes so a noisy child
@@ -159,6 +158,7 @@ func (b *mintStderrTail) Write(p []byte) (int, error) {
 }
 
 func (b *mintStderrTail) String() string { return string(b.data) }
+
 const previewDebounce = 125 * time.Millisecond
 
 func previewDebounceCmd(request asyncRequest, threadID string) tea.Cmd {

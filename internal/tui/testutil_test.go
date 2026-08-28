@@ -31,8 +31,8 @@ type fakeAPI struct {
 	getErr      error
 	modifyErr   error
 	trashErr    error
-	modifyErrs []error
-	trashErrs  []error
+	modifyErrs  []error
+	trashErrs   []error
 	labelsErr   error
 
 	attachments map[string][]byte

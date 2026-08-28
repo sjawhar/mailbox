@@ -39,15 +39,15 @@ type gmailAPI interface {
 }
 
 type accountCtx struct {
-	account              auth.Account
-	api                  gmailAPI
-	lastRoute            func() auth.Route
-	mutationRoute        func() auth.Route
-	mutationReady        func() bool
-	invalidateMutation   func()
-	mint                 func(ctx context.Context, stderr io.Writer) error
-	labels               []gmail.Label
-	labelNameByID        map[string]string
+	account            auth.Account
+	api                gmailAPI
+	lastRoute          func() auth.Route
+	mutationRoute      func() auth.Route
+	mutationReady      func() bool
+	invalidateMutation func()
+	mint               func(ctx context.Context, stderr io.Writer) error
+	labels             []gmail.Label
+	labelNameByID      map[string]string
 }
 
 var newAccountCtx = func(account auth.Account) (*accountCtx, error) {
@@ -60,10 +60,10 @@ var newAccountCtx = func(account auth.Account) (*accountCtx, error) {
 	client.Mutation = mutation
 	client.Account = string(account)
 	return &accountCtx{
-		account:            account,
-		api:                client,
-		lastRoute:          source.LastRoute,
-		mutationRoute:      source.MutationRoute,
+		account:       account,
+		api:           client,
+		lastRoute:     source.LastRoute,
+		mutationRoute: source.MutationRoute,
 		mutationReady: func() bool {
 			_, err := mutation.AccessToken(context.Background())
 			return err == nil
@@ -87,12 +87,12 @@ const (
 )
 
 type pendingAction struct {
-	action   string
-	ids      []string
-	add      []string
-	remove   []string
-	advance  bool
-	retried  bool
+	action  string
+	ids     []string
+	add     []string
+	remove  []string
+	advance bool
+	retried bool
 }
 
 type app struct {

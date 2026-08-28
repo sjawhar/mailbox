@@ -170,6 +170,7 @@ func TestAsyncCompletionDuringMintKeepsAttribution(t *testing.T) {
 	}
 	_ = mint
 }
+
 // TestAccountSwitchDuringMintKeepsMintAttribution catches an account switch
 // clearing the status that attributes an in-flight secrets request.
 func TestAccountSwitchDuringMintKeepsMintAttribution(t *testing.T) {

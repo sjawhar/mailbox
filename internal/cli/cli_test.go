@@ -862,7 +862,6 @@ func TestJSONStdoutPurity(t *testing.T) {
 	}
 }
 
-
 func firstMarkdown(value map[string]any) string {
 	return value["messages"].([]any)[0].(map[string]any)["markdown"].(string)
 }
