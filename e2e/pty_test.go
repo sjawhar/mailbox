@@ -4,12 +4,14 @@ package e2e
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -116,16 +118,34 @@ type tmuxSession struct {
 	name string
 }
 
-func newTmuxSession(t *testing.T, env []string, command string) *tmuxSession {
+func newTmuxSession(t *testing.T, env map[string]string, args ...string) *tmuxSession {
 	t.Helper()
 	session := &tmuxSession{t: t, tmux: findTmux(t), name: fmt.Sprintf("mailbox-e2e-%d", time.Now().UnixNano())}
-	full := "env -i " + strings.Join(env, " ") + " " + command
-	run := exec.Command(session.tmux, "new-session", "-d", "-s", session.name, "-x", "160", "-y", "45", full)
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	words := make([]string, 0, len(env)+len(args)+2)
+	words = append(words, "env", "-i")
+	for _, key := range keys {
+		words = append(words, key+"="+env[key])
+	}
+	words = append(words, args...)
+	quoted := make([]string, len(words))
+	for i, word := range words {
+		quoted[i] = shellQuote(word)
+	}
+	run := exec.Command(session.tmux, "new-session", "-d", "-s", session.name, "-x", "160", "-y", "45", strings.Join(quoted, " "))
 	if output, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("tmux new-session: %v: %s", err, output)
 	}
 	t.Cleanup(func() { _ = exec.Command(session.tmux, "kill-session", "-t", session.name).Run() })
 	return session
+}
+
+func shellQuote(word string) string {
+	return "'" + strings.ReplaceAll(word, "'", "'\"'\"'") + "'"
 }
 
 func (s *tmuxSession) SendKeys(keys string) {
@@ -159,6 +179,26 @@ func (s *tmuxSession) WaitFor(substr string, timeout time.Duration) string {
 	return ""
 }
 
+func secretsInvocations(t *testing.T, argvFile string) [][]string {
+	t.Helper()
+	data, err := os.ReadFile(argvFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	if len(records) == 1 && records[0] == "" {
+		return nil
+	}
+	invocations := make([][]string, len(records))
+	for i, record := range records {
+		invocations[i] = strings.Split(strings.TrimSuffix(record, "\t"), "\t")
+	}
+	return invocations
+}
+
 // The whole mint path in a real terminal, no human, no real secretsd: a stub
 // `secrets` injects a decoy modify credential and execs the REAL __mint
 // child, which refreshes against the fake token endpoint.
@@ -168,12 +208,16 @@ func TestTUIMintFlowInRealPTY(t *testing.T) {
 	stubs := t.TempDir()
 	argvFile := filepath.Join(stubs, "secrets-argv")
 	oauth := `{"client_id":"client","client_secret":"secret","refresh_token":"refresh"}`
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %s\nkey=\"$1\"; shift; [ \"$1\" = \"--\" ] && shift\nvalue='%s'\nexport \"$key=$value\"\nexec \"$@\"\n", argvFile, oauth)
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\t' \"$@\" >> %s\nprintf '\\n' >> %s\nkey=\"$1\"; shift; [ \"$1\" = \"--\" ] && shift\nvalue='%s'\nexport \"$key=$value\"\nexec \"$@\"\n", argvFile, argvFile, oauth)
 	if err := os.WriteFile(filepath.Join(stubs, "secrets"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	cache := t.TempDir()
+	cacheRoot := t.TempDir()
+	cache := filepath.Join(cacheRoot, "cache with spaces")
+	if err := os.Mkdir(cache, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	// Seed a valid READ token so startup resolves from cache in-process: the
 	// token endpoint then serves ONLY the __mint child, and the read/mutation
 	// bearer tokens stay distinguishable.
@@ -182,35 +226,44 @@ func TestTUIMintFlowInRealPTY(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cache, "work.token.json"), []byte(readCache), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	env := []string{
-		"HOME=" + os.Getenv("HOME"),
-		"TERM=xterm-256color",
-		"PATH=" + stubs + ":/usr/bin:/bin",
-		"MAILBOX_GMAIL_BASE_URL=" + gmail.server.URL,
-		"MAILBOX_TOKEN_URL=" + gmail.tokenServer.URL,
-		"MAILBOX_CACHE_DIR=" + cache,
-		"MAILBOX_DMI_SYS_VENDOR=/nonexistent",
+	env := map[string]string{
+		"HOME":                   os.Getenv("HOME"),
+		"TERM":                   "xterm-256color",
+		"PATH":                   stubs + ":/usr/bin:/bin",
+		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
+		"MAILBOX_TOKEN_URL":      gmail.tokenServer.URL,
+		"MAILBOX_CACHE_DIR":      cache,
+		"MAILBOX_DMI_SYS_VENDOR": "/nonexistent",
 	}
 	session := newTmuxSession(t, env, binary)
 	session.WaitFor("Mailbox — work inbox", 15*time.Second)
 	session.WaitFor("PTY smoke", 15*time.Second)
+	if got := secretsInvocations(t, argvFile); len(got) != 0 {
+		t.Fatalf("secrets invocations before the mutation keypress = %q, want none", got)
+	}
 
 	session.SendKeys("e")
 	session.WaitFor("archive completed", 15*time.Second)
 
-	argv, err := os.ReadFile(argvFile)
-	if err != nil {
-		t.Fatalf("stub secrets never ran: %v", err)
+	got := secretsInvocations(t, argvFile)
+	if len(got) != 1 {
+		t.Fatalf("secrets invocations after the mutation keypress = %q, want exactly one", got)
 	}
-	got := strings.Split(strings.TrimSpace(string(argv)), "\n")
+	argv := got[0]
 	want := []string{"GWS_WORK_MODIFY_OAUTH", "--", binary, "__mint", "--account", "work"}
-	if len(got) != len(want) {
-		t.Fatalf("secrets argv = %q, want %q", got, want)
+	if len(argv) != len(want) {
+		t.Fatalf("secrets argv = %q, want %q", argv, want)
 	}
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("secrets argv[%d] = %q, want %q", i, got[i], want[i])
+		if argv[i] != want[i] {
+			t.Fatalf("secrets argv[%d] = %q, want %q", i, argv[i], want[i])
 		}
+	}
+
+	session.SendKeys("e")
+	time.Sleep(250 * time.Millisecond)
+	if got := secretsInvocations(t, argvFile); len(got) != 1 {
+		t.Fatalf("secrets invocations after the second mutation keypress = %q, want exactly one", got)
 	}
 	auths := gmail.mutationAuths()
 	if len(auths) != 1 || auths[0] != "Bearer pty-mut-tok" {
