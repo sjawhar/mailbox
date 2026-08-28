@@ -283,7 +283,7 @@ func ScrubbedEnviron() []string {
 }
 
 func isCredentialEnvironment(name string) bool {
-	if name == "MAILBOX_TOKEN" || name == "MAILBOX_SECRETS_REEXEC" || name == "SECRETSD_SESSION_TOKEN_FILE" {
+	if name == "MAILBOX_TOKEN" || name == "MAILBOX_TOKEN_URL" || name == "MAILBOX_SECRETS_REEXEC" || name == "SECRETSD_SESSION_TOKEN_FILE" {
 		return true
 	}
 	return strings.HasPrefix(name, "GWS_") && strings.HasSuffix(name, "_OAUTH")

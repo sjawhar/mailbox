@@ -219,7 +219,7 @@ func TestTUIMintFlowInRealPTY(t *testing.T) {
 	stubs := t.TempDir()
 	argvFile := filepath.Join(stubs, "secrets-argv")
 	oauth := `{"client_id":"client","client_secret":"secret","refresh_token":"refresh"}`
-	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\t' \"$@\" >> %s\nprintf '\\n' >> %s\nkey=\"$1\"; shift; [ \"$1\" = \"--\" ] && shift\nvalue='%s'\nexport \"$key=$value\"\nexec \"$@\"\n", argvFile, argvFile, oauth)
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\t' \"$@\" >> %s\nprintf '\\n' >> %s\nkey=\"$1\"; shift; [ \"$1\" = \"--\" ] && shift\nvalue='%s'\nexport \"$key=$value\"\nexport \"MAILBOX_TOKEN_URL=$STUB_TOKEN_URL\"\nexec \"$@\"\n", argvFile, argvFile, oauth)
 	if err := os.WriteFile(filepath.Join(stubs, "secrets"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestTUIMintFlowInRealPTY(t *testing.T) {
 		"TERM":                   "xterm-256color",
 		"PATH":                   stubs + ":/usr/bin:/bin",
 		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
-		"MAILBOX_TOKEN_URL":      gmail.tokenServer.URL,
+		"STUB_TOKEN_URL":         gmail.tokenServer.URL,
 		"MAILBOX_CACHE_DIR":      cache,
 		"MAILBOX_DMI_SYS_VENDOR": "/nonexistent",
 	}

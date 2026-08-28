@@ -96,12 +96,15 @@ func TestExecMinterSpawnShapeAndRealChildEnv(t *testing.T) {
 		`printf '%s\n' "$0" "$@" > `+argvFile+`
 key="$1"; shift; [ "$1" = "--" ] && shift
 export "$key=$STUB_SECRET_VALUE"
+export "MAILBOX_TOKEN_URL=$STUB_MINT_TOKEN_URL"
 exec "$@"`)
 	execMinterEnv(t, stubs)
 	envFile := filepath.Join(t.TempDir(), "mint-child-env")
 	t.Setenv("PROBE_MINT_ENV_FILE", envFile)
 	t.Setenv("STUB_SECRET_VALUE", oauthJSON())
-	t.Setenv("MAILBOX_TOKEN_URL", tokenServer(t, http.StatusOK, `{"access_token":"minted-tok","expires_in":3600}`))
+	t.Setenv("MAILBOX_TOKEN_URL", "http://parent-decoy.invalid")
+	mintTokenURL := tokenServer(t, http.StatusOK, `{"access_token":"minted-tok","expires_in":3600}`)
+	t.Setenv("STUB_MINT_TOKEN_URL", mintTokenURL)
 	t.Setenv("SECRETSD_SESSION_TOKEN_FILE", "/run/user/1000/secretsd/session")
 	for _, name := range mintChildBannedNames {
 		t.Setenv(name, "decoy-should-not-leak")
@@ -144,6 +147,12 @@ exec "$@"`)
 	}
 	if !strings.Contains(childEnv, "\nGWS_PERSONAL_MODIFY_OAUTH="+oauthJSON()+"\n") {
 		t.Fatal("mint child env lacks the secrets-injected modify key: exec chain broken")
+	}
+	if strings.Contains(childEnv, "\nMAILBOX_TOKEN_URL=http://parent-decoy.invalid\n") {
+		t.Fatal("mint child env inherited the parent MAILBOX_TOKEN_URL")
+	}
+	if !strings.Contains(childEnv, "\nMAILBOX_TOKEN_URL="+mintTokenURL+"\n") {
+		t.Fatal("mint child env lacks the stub-injected MAILBOX_TOKEN_URL")
 	}
 	for _, name := range mintChildBannedNames {
 		if strings.Contains(childEnv, "\n"+name+"=") {

@@ -109,6 +109,7 @@ echo "SHOULD-NOT-RUN" >&2; exit 99`)
 key="$1"; shift; [ "$1" = "--" ] && shift
 if [ -z "$STUB_SECRET_VALUE" ]; then echo "stub secrets: no value for $key" >&2; exit 1; fi
 export "$key=$STUB_SECRET_VALUE"
+if [ -n "$STUB_TOKEN_URL" ]; then export "MAILBOX_TOKEN_URL=$STUB_TOKEN_URL"; fi
 exec "$@"`)
 	return probeEnv{stubs: stubs, cache: cache, dmi: dmi, leakFile: leak, extra: map[string]string{}}
 }
@@ -338,7 +339,7 @@ printf 'override-tok\n'`)
 		pe.extra["PROBE_ACCOUNT"] = string(AccountPersonal)
 		pe.extra["PROBE_ENSURE_ENV"] = "1"
 		pe.extra["STUB_SECRET_VALUE"] = oauthJSON()
-		pe.extra["MAILBOX_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"reexec-tok","expires_in":3600}`)
+		pe.extra["STUB_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"reexec-tok","expires_in":3600}`)
 		got := execProbe(t, pe)
 		assertProbeSuccess(t, got, RouteOAuthRefresh, "reexec-tok")
 		if !strings.Contains(got.stdout, "REEXEC=1\n") {
@@ -356,7 +357,7 @@ printf 'override-tok\n'`)
 				pe.extra[name] = "decoy-should-not-leak"
 			}
 		}
-		pe.extra["MAILBOX_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"reexec-tok","expires_in":3600}`)
+		pe.extra["STUB_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"reexec-tok","expires_in":3600}`)
 		got := execProbe(t, pe)
 		assertProbeSuccess(t, got, RouteOAuthRefresh, "reexec-tok")
 		if leaks := readLeaks(t, pe.leakFile); len(leaks) != 1 || leaks[0] != "LEAK=" {
@@ -415,6 +416,7 @@ printf 'override-tok\n'`)
 func TestScrubbedEnvironDropsCredentials(t *testing.T) {
 	credentialNames := append([]string{
 		"MAILBOX_TOKEN",
+		"MAILBOX_TOKEN_URL",
 		"MAILBOX_SECRETS_REEXEC",
 		"SECRETSD_SESSION_TOKEN_FILE",
 		"GWS_WORK_MODIFY_OAUTH",
