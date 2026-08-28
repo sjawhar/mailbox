@@ -36,7 +36,7 @@ func runOpen(cc *cmdCtx, args []string) int {
 	if err := render.OpenURL(path); err != nil {
 		return next.runtimeError(account, source, fmt.Errorf("open HTML file: %w", err))
 	}
-	fmt.Fprintf(next.stderr, "opened %s\n", path)
+	fmt.Fprintf(next.stderr, "handed to opener: %s\n", path)
 	if next.json {
 		output := struct {
 			Account   string `json:"account"`

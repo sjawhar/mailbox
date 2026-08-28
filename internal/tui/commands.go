@@ -106,6 +106,9 @@ func listThreadsCmd(request asyncRequest, query string) tea.Cmd {
 		if err != nil {
 			return errMsg{request: request, err: err}
 		}
+		if query == "" {
+			threads = gmail.FilterThreadsWithLabel(threads, "INBOX")
+		}
 		return threadsMsg{request: request, threads: threads}
 	}
 }

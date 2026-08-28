@@ -97,6 +97,36 @@ func TestTabSwitchLazyContext(t *testing.T) {
 	}
 }
 
+func TestEnvTokenRouteMarksHeaderAndTabShowsIdentityNotice(t *testing.T) {
+	workAPI := &fakeAPI{threads: testThreads(1)}
+	personalAPI := &fakeAPI{threads: testThreads(1)}
+	model := newTestModel(workAPI, auth.AccountWork)
+	model.ctx.lastRoute = func() auth.Route { return auth.RouteEnvToken }
+	originalFactory := newAccountCtx
+	t.Cleanup(func() { newAccountCtx = originalFactory })
+	newAccountCtx = func(account auth.Account) (*accountCtx, error) {
+		if account != auth.AccountPersonal {
+			t.Fatalf("factory account = %q, want personal", account)
+		}
+		return &accountCtx{account: account, api: personalAPI, lastRoute: func() auth.Route { return auth.RouteEnvToken }}, nil
+	}
+
+	if view := model.View(); !strings.Contains(view, "Mailbox — work inbox [env token]") {
+		t.Fatalf("env-token work header = %q, want marker", view)
+	}
+	model, command := update(t, model, key("tab"))
+	model, _ = update(t, model, runCmd(t, command))
+	if model.account != auth.AccountPersonal {
+		t.Fatalf("active account = %q, want personal", model.account)
+	}
+	if view := model.View(); !strings.Contains(view, "Mailbox — personal inbox [env token]") {
+		t.Fatalf("env-token personal header = %q, want marker", view)
+	}
+	if !strings.Contains(model.status, "MAILBOX_TOKEN pins one identity for all accounts") {
+		t.Fatalf("status = %q, want environment-token identity notice", model.status)
+	}
+}
+
 func TestTabSwitchAuthFailureStaysPut(t *testing.T) {
 	workAPI := &fakeAPI{threads: testThreads(1)}
 	model := newTestModel(workAPI, auth.AccountWork)

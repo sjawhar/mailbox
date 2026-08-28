@@ -529,7 +529,7 @@ func TestSingleRequestRetriesAnyTooManyRequests(t *testing.T) {
 					writeJSON(t, w, http.StatusTooManyRequests, test.body)
 					return
 				}
-				writeJSON(t, w, http.StatusOK, map[string]string{"emailAddress": "sami@example.com"})
+				writeJSON(t, w, http.StatusOK, map[string]string{"emailAddress": "user@example.com"})
 			}, "token")
 			client.sleep = func(ctx context.Context, delay time.Duration) error {
 				slept = append(slept, delay)
@@ -541,8 +541,8 @@ func TestSingleRequestRetriesAnyTooManyRequests(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetProfile: %v", err)
 			}
-			if profile.EmailAddress != "sami@example.com" {
-				t.Fatalf("EmailAddress = %q, want sami@example.com", profile.EmailAddress)
+			if profile.EmailAddress != "user@example.com" {
+				t.Fatalf("EmailAddress = %q, want user@example.com", profile.EmailAddress)
 			}
 			if requestCount != 2 {
 				t.Fatalf("requests = %d, want 2", requestCount)
@@ -629,7 +629,7 @@ func TestSingleRequestRateLimitRetries(t *testing.T) {
 			writeJSON(t, w, http.StatusTooManyRequests, googleError(http.StatusTooManyRequests, "rateLimitExceeded", "Rate Limit Exceeded"))
 			return
 		}
-		writeJSON(t, w, http.StatusOK, map[string]string{"emailAddress": "sami@example.com"})
+		writeJSON(t, w, http.StatusOK, map[string]string{"emailAddress": "user@example.com"})
 	}, "token")
 	client.sleep = func(ctx context.Context, delay time.Duration) error {
 		slept = append(slept, delay)
@@ -641,8 +641,8 @@ func TestSingleRequestRateLimitRetries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProfile: %v", err)
 	}
-	if profile.EmailAddress != "sami@example.com" {
-		t.Fatalf("EmailAddress = %q, want sami@example.com", profile.EmailAddress)
+	if profile.EmailAddress != "user@example.com" {
+		t.Fatalf("EmailAddress = %q, want user@example.com", profile.EmailAddress)
 	}
 	if requestCount != 2 {
 		t.Fatalf("requests = %d, want 2", requestCount)

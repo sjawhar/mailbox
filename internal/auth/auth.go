@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -201,15 +200,12 @@ func (s *Source) EnsureEnv(argv []string) error {
 func ProvisioningHint(account Account, route Route) string {
 	switch route {
 	case RouteBroker:
-		return "the machine identity lacks gmail.modify: add https://www.googleapis.com/auth/gmail.modify to the machine-identity service account's domain-wide delegation grant in the Workspace admin console (Security → API Controls → Domain-wide Delegation), then retry"
+		return "the broker token lacks the gmail.modify scope; MAILBOX_BROKER selects the broker executable; see README"
 	case RouteEnvToken:
-		return "MAILBOX_TOKEN lacks the gmail.modify scope: mint one with `google-user-token --scopes gmail.modify` or unset MAILBOX_TOKEN to use the normal route"
+		return "MAILBOX_TOKEN lacks the gmail.modify scope; see README"
 	default:
-		key := "GWS_WORK_MAIL_OAUTH"
-		if account == AccountPersonal {
-			key = "GWS_PERSONAL_MAIL_OAUTH"
-		}
-		return fmt.Sprintf("the %s account's OAuth credential lacks gmail.modify: run the consent flow in the mailbox README (gws auth login --scopes gmail.modify) and store the exported authorized_user JSON in secretsd as %s", account, key)
+		key := oauthEnvKey(account)
+		return fmt.Sprintf("%s lacks the gmail.modify scope; see README", key)
 	}
 }
 
@@ -262,15 +258,7 @@ func findSecrets() (string, error) {
 	if secrets, err := exec.LookPath("secrets"); err == nil {
 		return secrets, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("find secrets: %w", err)
-	}
-	fallback := filepath.Join(home, ".mise", "installs", "secrets", "latest", "bin", "secrets")
-	if info, err := os.Stat(fallback); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-		return fallback, nil
-	}
-	return "", fmt.Errorf("secrets not found on PATH or in ~/.mise/installs/secrets/latest/bin")
+	return "", fmt.Errorf("secrets executable not found on PATH")
 }
 
 // ScrubbedEnviron returns the process environment without credentials or

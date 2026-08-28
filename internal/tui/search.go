@@ -3,7 +3,7 @@ package tui
 import tea "github.com/charmbracelet/bubbletea"
 
 func (m app) searchScreen() string {
-	return m.list.View(m.account, m.layout.width, m.layout.searchListHeight, m.ctx.labelNameByID) + "\n" + m.search.View() + "\n" + m.statusView()
+	return m.list.View(m.account, m.layout.width, m.layout.searchListHeight, m.ctx.labelNameByID, m.usesEnvToken()) + "\n" + m.search.View() + "\n" + m.statusView()
 }
 
 func (m app) updateSearchKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {

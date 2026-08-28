@@ -264,6 +264,38 @@ type Thread struct {
 	Messages []*Message `json:"messages,omitempty"`
 }
 
+// FilterThreadsWithLabel returns threads containing at least one message with
+// labelID. It returns the original slice without allocating when all threads
+// match.
+func FilterThreadsWithLabel(threads []*Thread, labelID string) []*Thread {
+	for index, thread := range threads {
+		if threadHasLabel(thread, labelID) {
+			continue
+		}
+		filtered := make([]*Thread, 0, len(threads)-1)
+		filtered = append(filtered, threads[:index]...)
+		for _, remaining := range threads[index+1:] {
+			if threadHasLabel(remaining, labelID) {
+				filtered = append(filtered, remaining)
+			}
+		}
+		return filtered
+	}
+	return threads
+}
+
+func threadHasLabel(thread *Thread, labelID string) bool {
+	if thread == nil {
+		return false
+	}
+	for _, message := range thread.Messages {
+		if message != nil && message.HasLabel(labelID) {
+			return true
+		}
+	}
+	return false
+}
+
 // LatestMessage returns the newest message in a thread by Gmail internal date.
 func LatestMessage(thread *Thread) *Message {
 	var newest *Message

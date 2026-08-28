@@ -83,6 +83,8 @@ Mailbox resolves credentials for the selected account in this order: `MAILBOX_TO
 
 Set an OAuth variable directly or have any secret manager inject it into the mailbox process. Google OAuth consent with the `https://www.googleapis.com/auth/gmail.modify` scope produces an `authorized_user` credential with this shape:
 
+When the selected OAuth environment variable is unset and a `secrets` CLI is available on `PATH`, mailbox re-execs itself under `secrets <KEY> --` so the CLI can provide that credential.
+
 ```json
 {
   "type": "authorized_user",

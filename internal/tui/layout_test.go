@@ -138,15 +138,15 @@ func TestSplitViewConstrainsLongPreviewToPaneHeight(t *testing.T) {
 }
 
 func TestMiddleTruncatePreservesAddressTailOrder(t *testing.T) {
-	sender := "legion-implementer[bot] <notifications@github.com>"
-	if got, want := truncateSender(sender, 45), "legion-implementer[bot] <notificati…thub.com>"; got != want {
+	sender := "synthetic-notifier[bot] <notifications@github.com>"
+	if got, want := truncateSender(sender, 45), "synthetic-notifier[bot] <notificati…thub.com>"; got != want {
 		t.Fatalf("truncateSender() = %q, want %q", got, want)
 	}
 }
 
 func TestSplitListRowsNeverWrapDateColumn(t *testing.T) {
 	rows := testThreads(1)
-	rows[0].Messages[0].Payload.Headers[0].Value = "legion-implementer[bot] <notifications@github.com>"
+	rows[0].Messages[0].Payload.Headers[0].Value = "synthetic-notifier[bot] <notifications@github.com>"
 	rows[0].Messages[0].Payload.Headers[2].Value = strings.Repeat("Long subject ", 12)
 	model, _ := newTestApp(rows)
 	model.setSize(160, 45)

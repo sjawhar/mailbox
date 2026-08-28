@@ -39,6 +39,21 @@ func TestInitStartsListingAndSpinner(t *testing.T) {
 	}
 }
 
+func TestInboxListingExcludesThreadsWithoutInboxMessage(t *testing.T) {
+	threads := testThreads(2)
+	threads[1].Messages[0].LabelIDs = []string{"SENT"}
+	model, _ := newTestApp(threads)
+
+	message := runCmd(t, listThreadsCmd(model.currentRequest(listOperation), ""))
+	listing, ok := message.(threadsMsg)
+	if !ok {
+		t.Fatalf("listThreadsCmd() = %T, want threadsMsg", message)
+	}
+	if got, want := threadIDs(listing.threads), []string{threads[0].ID}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("listed IDs = %v, want %v", got, want)
+	}
+}
+
 func TestTruncatePreservesGraphemesAndDisplayWidth(t *testing.T) {
 	tests := []struct {
 		width int
@@ -146,8 +161,10 @@ func TestErrorSurfacesInStatusBar(t *testing.T) {
 	err := &gmail.APIError{Status: 403, Reason: "insufficientPermissions", Message: "scope missing"}
 
 	model, cmd := update(t, model, errMsg{request: model.currentRequest(listOperation), err: err})
-	if !strings.Contains(model.status, "provision:") || !strings.Contains(model.status, "domain-wide delegation") {
-		t.Fatalf("status = %q, want route-specific broker provisioning hint", model.status)
+	for _, want := range []string{"provision:", "gmail.modify", "MAILBOX_BROKER"} {
+		if !strings.Contains(model.status, want) {
+			t.Fatalf("status = %q, want broker provisioning hint to contain %q", model.status, want)
+		}
 	}
 	if cmd != nil {
 		t.Fatal("error handling returned a quit command")

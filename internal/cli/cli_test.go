@@ -34,6 +34,7 @@ type gmailTestServer struct {
 	thread         map[string]any
 	listIDs        []string
 	attachment     []byte
+	metadata       map[string]map[string]any
 	rawMessageID   string
 	forbidden      bool
 }
@@ -44,7 +45,7 @@ func newGmailTestServer(t *testing.T) *gmailTestServer {
 		t:          t,
 		listIDs:    []string{"t1", "t2"},
 		labels:     []map[string]any{{"id": "INBOX", "name": "INBOX"}, {"id": "Label_7", "name": "Newsletters"}},
-		profile:    map[string]any{"emailAddress": "sami@example.com"},
+		profile:    map[string]any{"emailAddress": "user@example.com"},
 		thread:     testThread("t1", true, false),
 		attachment: []byte("report body"),
 	}
@@ -144,7 +145,11 @@ func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
 		status, body := http.StatusOK, `{}`
 		if strings.Contains(request.URL.RawQuery, "format=metadata") {
 			id := filepath.Base(request.URL.Path)
-			body = string(mustJSON(g.t, metadataThread(id)))
+			metadata := metadataThread(id)
+			if g.metadata != nil && g.metadata[id] != nil {
+				metadata = g.metadata[id]
+			}
+			body = string(mustJSON(g.t, metadata))
 		} else if g.forbidden {
 			status = http.StatusForbidden
 			body = string(mustJSON(g.t, googleError(http.StatusForbidden, "insufficientPermissions")))
@@ -249,6 +254,32 @@ func TestInboxJSON(t *testing.T) {
 	}
 	if id, err := refs.Resolve(auth.AccountWork, "2"); err != nil || id != "t2" {
 		t.Fatalf("second written ref = (%q, %v), want t2", id, err)
+	}
+}
+
+func TestInboxExcludesThreadsWithoutInboxMessage(t *testing.T) {
+	g := newGmailTestServer(t)
+	g.listIDs = []string{"inbox", "sent"}
+	sent := metadataThread("sent")
+	sent["messages"].([]map[string]any)[0]["labelIds"] = []string{"SENT"}
+	g.metadata = map[string]map[string]any{
+		"inbox": metadataThread("inbox"),
+		"sent":  sent,
+	}
+
+	code, value, stderr := runJSON(t, g, "inbox", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("inbox = (%d, %q), want success", code, stderr)
+	}
+	threads := value["threads"].([]any)
+	if len(threads) != 1 {
+		t.Fatalf("inbox threads = %#v, want only the thread with an INBOX message", threads)
+	}
+	if got := threads[0].(map[string]any)["id"]; got != "inbox" {
+		t.Fatalf("remaining inbox thread ID = %q, want inbox", got)
+	}
+	if _, err := refs.Resolve(auth.AccountWork, "2"); err == nil {
+		t.Fatal("filtered-out thread remained addressable by a numbered reference")
 	}
 }
 
@@ -450,8 +481,8 @@ func TestOpenWritesTempAndSpawns(t *testing.T) {
 	}
 	t.Setenv("PATH", stub+":"+os.Getenv("PATH"))
 	code, value, stderr := runJSON(t, g, "open", "1", "--json")
-	if code != 0 || !strings.Contains(stderr, "opened ") {
-		t.Fatalf("open = (%d, %q), want diagnostic", code, stderr)
+	if code != 0 || !strings.Contains(stderr, "handed to opener: ") {
+		t.Fatalf("open = (%d, %q), want handoff diagnostic", code, stderr)
 	}
 	opened, err := os.ReadFile(capture)
 	if err != nil {
@@ -509,8 +540,8 @@ func TestRawMessageReferenceResolvesForOpen(t *testing.T) {
 			t.Fatalf("decode open JSON %q: %v", stdout, err)
 		}
 	}
-	if code != 0 || !strings.Contains(stderr, "opened ") || value["threadId"] != "t1" {
-		t.Fatalf("open raw message = (%d, %#v, %q), want parent thread", code, value, stderr)
+	if code != 0 || !strings.Contains(stderr, "handed to opener: ") || value["threadId"] != "t1" {
+		t.Fatalf("open raw message = (%d, %#v, %q), want parent thread and handoff diagnostic", code, value, stderr)
 	}
 }
 
@@ -699,7 +730,7 @@ func TestStatusHumanWritesAllStatusLinesToStdout(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("status exit = %d", code)
 	}
-	for _, line := range []string{"account: work", "route: env-token", "cache: absent", "profile: sami@example.com"} {
+	for _, line := range []string{"account: work", "route: env-token", "cache: absent", "profile: user@example.com"} {
 		if !strings.Contains(stdout, line) {
 			t.Errorf("stdout %q does not contain %q", stdout, line)
 		}
@@ -833,7 +864,7 @@ func testThread(id string, attachment, quote bool) map[string]any {
 		"payload": map[string]any{
 			"headers": []map[string]string{
 				{"name": "From", "value": "Alice <alice@example.com>"},
-				{"name": "To", "value": "Sami <sami@example.com>"},
+				{"name": "To", "value": "User <user@example.com>"},
 				{"name": "Subject", "value": "Mailbox test"},
 				{"name": "Date", "value": "Wed, 27 Aug 2026 01:02:03 +0000"},
 			},

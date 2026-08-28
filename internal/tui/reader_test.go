@@ -42,7 +42,7 @@ func TestThreadHeadersRenderOutsideMarkdown(t *testing.T) {
 	}
 }
 
-func TestDigitOpensLink(t *testing.T) {
+func TestSingleDigitLinkOpensImmediatelyWhenThreadHasAtMostNineLinks(t *testing.T) {
 	thread := linkedThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
 	model.view = threadView
@@ -59,6 +59,79 @@ func TestDigitOpensLink(t *testing.T) {
 	runCmd(t, cmd)
 	if got, want := opened, "https://example.test/two"; got != want {
 		t.Fatalf("opened link = %q, want %q", got, want)
+	}
+}
+
+func TestMultiDigitLinkOpensOnEnter(t *testing.T) {
+	thread := tenLinkedThread()
+	model, _ := newTestApp([]*gmail.Thread{thread})
+	model.view = threadView
+	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: thread})
+	originalOpenURL := openURL
+	t.Cleanup(func() { openURL = originalOpenURL })
+	var opened string
+	openURL = func(target string) error {
+		opened = target
+		return nil
+	}
+
+	model, cmd := update(t, model, key("1"))
+	if cmd != nil {
+		t.Fatal("first digit opened a link instead of beginning link-number input")
+	}
+	if view := ansi.Strip(model.View()); !strings.Contains(view, "link number: 1") {
+		t.Fatalf("reader view = %q, want link-number input in the status bar", view)
+	}
+	model, cmd = update(t, model, key("0"))
+	if cmd != nil {
+		t.Fatal("second digit returned an unexpected command")
+	}
+	model, cmd = update(t, model, key("enter"))
+	msg := runCmd(t, cmd)
+	model, _ = update(t, model, msg)
+	if got, want := opened, "https://example.test/ten?email_token=secret"; got != want {
+		t.Fatalf("opened link = %q, want full URL %q", got, want)
+	}
+}
+
+func TestEscapeCancelsMultiDigitLinkInput(t *testing.T) {
+	thread := tenLinkedThread()
+	model, _ := newTestApp([]*gmail.Thread{thread})
+	model.view = threadView
+	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: thread})
+
+	model, cmd := update(t, model, key("1"))
+	if cmd != nil {
+		t.Fatal("first digit opened a link instead of beginning link-number input")
+	}
+	model, _ = update(t, model, key("esc"))
+	if model.view != threadView {
+		t.Fatalf("escape during link-number input changed view to %v, want reader", model.view)
+	}
+	if strings.Contains(ansi.Strip(model.View()), "link number:") {
+		t.Fatalf("reader view retained cancelled link-number input: %q", ansi.Strip(model.View()))
+	}
+}
+
+func TestEscapeReturnsToInboxAfterOpeningMultiDigitLink(t *testing.T) {
+	thread := tenLinkedThread()
+	model, _ := newTestApp([]*gmail.Thread{thread})
+	model.view = threadView
+	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: thread})
+	originalOpenURL := openURL
+	t.Cleanup(func() { openURL = originalOpenURL })
+	openURL = func(string) error { return nil }
+
+	model, cmd := update(t, model, key("1"))
+	if cmd != nil {
+		t.Fatal("first digit opened a link instead of beginning link-number input")
+	}
+	model, _ = update(t, model, key("0"))
+	model, cmd = update(t, model, key("enter"))
+	model, _ = update(t, model, runCmd(t, cmd))
+	model, _ = update(t, model, key("esc"))
+	if model.view != listView {
+		t.Fatalf("escape after link opening left view at %v, want inbox", model.view)
 	}
 }
 
@@ -125,4 +198,8 @@ func TestLinkCompletionDoesNotClearLaterActionSpinner(t *testing.T) {
 	if !model.loading || model.pending == nil {
 		t.Fatalf("link completion interrupted later action: loading=%v pending=%#v", model.loading, model.pending)
 	}
+}
+
+func tenLinkedThread() *gmail.Thread {
+	return threadFixture(1, `<p><a href="https://example.test/one">one</a> <a href="https://example.test/two">two</a> <a href="https://example.test/three">three</a> <a href="https://example.test/four">four</a> <a href="https://example.test/five">five</a> <a href="https://example.test/six">six</a> <a href="https://example.test/seven">seven</a> <a href="https://example.test/eight">eight</a> <a href="https://example.test/nine">nine</a> <a href="https://example.test/ten?email_token=secret">ten</a></p>`)
 }

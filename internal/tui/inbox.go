@@ -106,9 +106,9 @@ func (m *inboxModel) updateLabels(ids, add, remove []string) {
 	}
 }
 
-func (m inboxModel) View(account auth.Account, width, height int, labelNameByID map[string]string) string {
+func (m inboxModel) View(account auth.Account, width, height int, labelNameByID map[string]string, envToken bool) string {
 	lines := []string{
-		titleStyle.Render(m.title(account)),
+		titleStyle.Render(m.title(account, envToken)),
 		helpStyle.Render("j/k move · space select · e archive · d trash · u unread · l label · / search · tab account · enter read · R refresh · q quit"),
 		m.rowsView(width, labelNameByID, height-3),
 	}
@@ -117,21 +117,25 @@ func (m inboxModel) View(account auth.Account, width, height int, labelNameByID 
 
 func (m app) inboxView() string {
 	if !m.previewEnabled() {
-		return m.list.View(m.account, m.layout.width, m.layout.height, m.ctx.labelNameByID) + "\n" + m.statusView()
+		return m.list.View(m.account, m.layout.width, m.layout.height, m.ctx.labelNameByID, m.usesEnvToken()) + "\n" + m.statusView()
 	}
 	listPane := paneStyle.Width(m.layout.listPaneWidth).Height(m.layout.splitPaneHeight).Render(m.list.rowsView(m.layout.listContentWidth, m.ctx.labelNameByID, m.layout.splitContentHeight))
 	previewPane := paneStyle.Width(m.layout.previewPaneWidth).Height(m.layout.splitPaneHeight).Render(m.previewView(m.layout.previewContentWidth, m.layout.splitContentHeight))
-	return titleStyle.Render(m.list.title(m.account)) + "\n" +
+	return titleStyle.Render(m.list.title(m.account, m.usesEnvToken())) + "\n" +
 		helpStyle.Render("j/k move · space select · enter read · e archive · d trash · u unread · l label · / search · tab account · R refresh · q quit") + "\n" +
 		lipgloss.JoinHorizontal(lipgloss.Top, listPane, previewPane) + "\n" +
 		m.statusView()
 }
 
-func (m inboxModel) title(account auth.Account) string {
+func (m inboxModel) title(account auth.Account, envToken bool) string {
+	title := fmt.Sprintf("Mailbox — %s inbox", account)
 	if m.query != "" {
-		return fmt.Sprintf("Mailbox — %s search: %s", account, m.query)
+		title = fmt.Sprintf("Mailbox — %s search: %s", account, m.query)
 	}
-	return fmt.Sprintf("Mailbox — %s inbox", account)
+	if envToken {
+		return title + " [env token]"
+	}
+	return title
 }
 
 func (m inboxModel) rowsView(width int, labelNameByID map[string]string, height int) string {

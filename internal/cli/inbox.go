@@ -67,6 +67,13 @@ func runListing(cc *cmdCtx, options gmail.ListOptions) int {
 		if err != nil {
 			return cc.runtimeError(account, source, err)
 		}
+		if hasInboxLabel(options.LabelIDs) {
+			metadata = gmail.FilterThreadsWithLabel(metadata, "INBOX")
+		}
+		ids = ids[:0]
+		for _, thread := range metadata {
+			ids = append(ids, thread.ID)
+		}
 		rows = threadRows(metadata, listed.Threads)
 	}
 	if err := refs.Write(account, ids); err != nil {
@@ -106,4 +113,13 @@ func threadRows(metadata, listed []*gmail.Thread) []threadRow {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func hasInboxLabel(labelIDs []string) bool {
+	for _, labelID := range labelIDs {
+		if labelID == "INBOX" {
+			return true
+		}
+	}
+	return false
 }

@@ -2,9 +2,11 @@ package render
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sjawhar/mailbox/internal/gmail"
 )
@@ -81,7 +83,7 @@ func (thread *RenderedThread) Markdown() string {
 	fmt.Fprintf(&output, "# %s\n\n", SanitizeTerminal(thread.Subject))
 	for index, message := range thread.Messages {
 		fmt.Fprintf(&output, "## %s → %s, %s\n\n", SanitizeTerminal(message.From), SanitizeTerminal(message.To), message.Date.UTC().Format("2006-01-02 15:04 MST"))
-		markdown := SanitizeTerminal(message.Markdown)
+		markdown := SanitizeTerminal(TerminalMarkdown(message.Markdown, message.Links))
 		output.WriteString(markdown)
 		if !strings.HasSuffix(markdown, "\n") {
 			output.WriteByte('\n')
@@ -102,6 +104,40 @@ func (thread *RenderedThread) Markdown() string {
 		}
 	}
 	return output.String()
+}
+
+const terminalLinkDisplayLimit = 96
+
+// TerminalMarkdown replaces only generated link-table URLs with safe display
+// values. RenderedMessage retains its original Markdown and Link URLs for JSON
+// consumers and opening links.
+func TerminalMarkdown(markdown string, links []Link) string {
+	for _, link := range links {
+		source := fmt.Sprintf("[%d]: %s", link.N, link.URL)
+		replacement := fmt.Sprintf("[%d]: %s", link.N, terminalLinkDisplayURL(link.URL))
+		markdown = strings.Replace(markdown, source, replacement, 1)
+	}
+	return markdown
+}
+
+func terminalLinkDisplayURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return truncateTerminalLinkURL(raw)
+	}
+	display := parsed.Scheme + "://" + parsed.Host + parsed.EscapedPath()
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		display += "…"
+	}
+	return truncateTerminalLinkURL(display)
+}
+
+func truncateTerminalLinkURL(value string) string {
+	if utf8.RuneCountInString(value) <= terminalLinkDisplayLimit {
+		return value
+	}
+	runes := []rune(value)
+	return string(runes[:terminalLinkDisplayLimit-1]) + "…"
 }
 
 // ThreadAttachments returns every attachment in the same order and numbering as

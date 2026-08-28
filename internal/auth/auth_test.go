@@ -14,18 +14,33 @@ func TestProvisioningHint(t *testing.T) {
 		name    string
 		account Account
 		route   Route
-		want    string
+		want    []string
 	}{
-		{name: "broker", account: AccountWork, route: RouteBroker, want: "domain-wide delegation"},
-		{name: "env token", account: AccountWork, route: RouteEnvToken, want: "MAILBOX_TOKEN"},
-		{name: "personal oauth", account: AccountPersonal, route: RouteOAuthRefresh, want: "GWS_PERSONAL_MAIL_OAUTH"},
+		{name: "broker", account: AccountWork, route: RouteBroker, want: []string{"gmail.modify", "MAILBOX_BROKER", "README"}},
+		{name: "env token", account: AccountWork, route: RouteEnvToken, want: []string{"gmail.modify", "MAILBOX_TOKEN", "README"}},
+		{name: "personal oauth", account: AccountPersonal, route: RouteOAuthRefresh, want: []string{"gmail.modify", "GWS_PERSONAL_MAIL_OAUTH", "README"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ProvisioningHint(tc.account, tc.route); !strings.Contains(got, tc.want) {
-				t.Fatalf("ProvisioningHint(%q, %q) = %q, want it to contain %q", tc.account, tc.route, got, tc.want)
+			got := ProvisioningHint(tc.account, tc.route)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("ProvisioningHint(%q, %q) = %q, want it to contain %q", tc.account, tc.route, got, want)
+				}
 			}
 		})
+	}
+}
+
+func TestFindSecretsRequiresPathExecutable(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	_, err := findSecrets()
+	if err == nil {
+		t.Fatal("findSecrets() succeeded without a PATH executable")
+	}
+	if got, want := err.Error(), "secrets executable not found on PATH"; got != want {
+		t.Fatalf("findSecrets() error = %q, want %q", got, want)
 	}
 }
 

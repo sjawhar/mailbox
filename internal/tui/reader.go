@@ -16,6 +16,7 @@ type threadModel struct {
 	thread           *gmail.Thread
 	rendered         *render.RenderedThread
 	keepQuotes       bool
+	linkInput        string
 	attachments      []render.Attachment
 	attachmentCursor int
 }
@@ -54,7 +55,7 @@ func renderThreadDocument(thread *render.RenderedThread, width int) (string, err
 		document.WriteString("\n\n")
 		document.WriteString(messageHeaderStyle.Render(truncate(formatMessageHeader(message), width)))
 		document.WriteString("\n")
-		body, err := renderMarkdown(message.Markdown, width)
+		body, err := renderMarkdown(render.TerminalMarkdown(message.Markdown, message.Links), width)
 		if err != nil {
 			return "", err
 		}
@@ -89,7 +90,35 @@ func renderPreview(thread *gmail.Thread, width int) (string, error) {
 }
 
 func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch message.String() {
+	value := message.String()
+	if m.thread.linkInput != "" {
+		switch value {
+		case "esc":
+			m.thread.linkInput = ""
+			m.clearStatus()
+			return m, nil
+		case "enter":
+			input := m.thread.linkInput
+			m.thread.linkInput = ""
+			if link, ok := m.thread.link(input); ok {
+				m.clearStatus()
+				request := m.beginRequest(openOperation)
+				return m, openLinkCmd(request, link.URL)
+			}
+			m.status = fmt.Sprintf("link [%s] not found", input)
+			m.statusError = false
+			return m, nil
+		default:
+			if isLinkInputDigit(value) {
+				m.thread.linkInput += value
+				m.status = fmt.Sprintf("link number: %s · enter open · esc cancel", m.thread.linkInput)
+				m.statusError = false
+			}
+			return m, nil
+		}
+	}
+
+	switch value {
 	case "esc":
 		m.view = listView
 		return m, nil
@@ -123,9 +152,17 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		request := m.beginRequest(openOperation)
 		return m, m.loadingCmd(openHTMLCmd(request, m.thread.thread))
 	}
-	if link, ok := m.thread.link(message.String()); ok {
-		request := m.beginRequest(openOperation)
-		return m, openLinkCmd(request, link.URL)
+	if isLinkFirstDigit(value) && m.thread.rendered != nil {
+		if len(m.thread.rendered.AllLinks()) > 9 {
+			m.thread.linkInput = value
+			m.status = fmt.Sprintf("link number: %s · enter open · esc cancel", value)
+			m.statusError = false
+			return m, nil
+		}
+		if link, ok := m.thread.link(value); ok {
+			request := m.beginRequest(openOperation)
+			return m, openLinkCmd(request, link.URL)
+		}
 	}
 	var command tea.Cmd
 	m.viewport, command = m.viewport.Update(message)
@@ -248,8 +285,13 @@ func (m app) allThreadsHaveLabel(ids []string, labelID string) bool {
 }
 
 func (m threadModel) link(value string) (render.Link, bool) {
-	if len(value) != 1 || value[0] < '1' || value[0] > '9' || m.rendered == nil {
+	if value == "" || m.rendered == nil {
 		return render.Link{}, false
+	}
+	for index := range value {
+		if value[index] < '0' || value[index] > '9' {
+			return render.Link{}, false
+		}
 	}
 	number, err := strconv.Atoi(value)
 	if err != nil {
@@ -261,4 +303,12 @@ func (m threadModel) link(value string) (render.Link, bool) {
 		}
 	}
 	return render.Link{}, false
+}
+
+func isLinkFirstDigit(value string) bool {
+	return len(value) == 1 && value[0] >= '1' && value[0] <= '9'
+}
+
+func isLinkInputDigit(value string) bool {
+	return len(value) == 1 && value[0] >= '0' && value[0] <= '9'
 }

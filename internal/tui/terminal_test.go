@@ -41,6 +41,30 @@ func TestRenderThreadDocumentSanitizesMailText(t *testing.T) {
 	}
 }
 
+func TestRenderThreadDocumentElidesLinkTableQueries(t *testing.T) {
+	fullURL := "https://example.test/private/path?email_token=secret"
+	thread := &render.RenderedThread{
+		Messages: []render.RenderedMessage{{
+			From:     "Sender <sender@example.test>",
+			To:       "Receiver <receiver@example.test>",
+			Date:     time.Date(2026, 8, 29, 10, 40, 0, 0, time.UTC),
+			Markdown: "Open [link][1]\n\n[1]: " + fullURL + "\n",
+			Links:    []render.Link{{N: 1, URL: fullURL}},
+		}},
+	}
+
+	document, err := renderThreadDocument(thread, 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(document, "email_token=secret") {
+		t.Fatalf("reader link table leaked query parameters: %q", document)
+	}
+	if !strings.Contains(document, "https://example.test/private/path…") {
+		t.Fatalf("reader link table = %q, want query-elided URL", document)
+	}
+}
+
 func TestInboxViewSanitizesMailText(t *testing.T) {
 	payload := "\x1b]52;c;clipboard\a"
 	thread := threadFixture(1, "<p>body</p>")
@@ -50,7 +74,7 @@ func TestInboxViewSanitizesMailText(t *testing.T) {
 	inbox := newInboxModel()
 	inbox.setRows([]*gmail.Thread{thread})
 
-	view := inbox.View(auth.AccountWork, 80, 10, labelNames([]gmail.Label{{ID: "label", Name: "label" + payload, Type: "user"}}))
+	view := inbox.View(auth.AccountWork, 80, 10, labelNames([]gmail.Label{{ID: "label", Name: "label" + payload, Type: "user"}}), false)
 	if strings.Contains(view, "clipboard") || strings.Contains(view, "\x1b]52") {
 		t.Fatalf("inbox.View() leaked terminal control payload: %q", view)
 	}
@@ -67,5 +91,8 @@ func TestOpenedStatusSanitizesTarget(t *testing.T) {
 	model, _ = update(t, model, openedMsg{request: model.currentRequest(openOperation), target: payload})
 	if strings.Contains(model.status, "clipboard") || strings.Contains(model.status, "\x1b]52") {
 		t.Fatalf("opened status leaked terminal control payload: %q", model.status)
+	}
+	if !strings.Contains(model.status, "handed to opener:") {
+		t.Fatalf("opened status = %q, want handoff wording", model.status)
 	}
 }

@@ -57,8 +57,10 @@ func TestPreviewScopeErrorIncludesProvisioningHint(t *testing.T) {
 	model.preview.loading = true
 	model, fetch := update(t, model, previewRequestMsg{request: model.currentRequest(previewOperation), threadID: api.threads[0].ID})
 	model, _ = update(t, model, runCmd(t, fetch))
-	if !strings.Contains(model.status, "provision:") || !strings.Contains(model.status, "domain-wide delegation") {
-		t.Fatalf("preview scope error status = %q", model.status)
+	for _, want := range []string{"provision:", "gmail.modify", "MAILBOX_BROKER"} {
+		if !strings.Contains(model.status, want) {
+			t.Fatalf("preview scope error status = %q, want broker provisioning hint to contain %q", model.status, want)
+		}
 	}
 }
 

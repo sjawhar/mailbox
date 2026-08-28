@@ -150,7 +150,7 @@ func TestGetProfile(t *testing.T) {
 	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		requireRequest(t, r, http.MethodGet, "/gmail/v1/users/me/profile", "token")
 		writeJSON(t, w, http.StatusOK, map[string]any{
-			"emailAddress":  "sami@example.com",
+			"emailAddress":  "user@example.com",
 			"messagesTotal": 3,
 			"threadsTotal":  2,
 		})
@@ -160,8 +160,8 @@ func TestGetProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProfile: %v", err)
 	}
-	if profile.EmailAddress != "sami@example.com" {
-		t.Fatalf("EmailAddress = %q, want sami@example.com", profile.EmailAddress)
+	if profile.EmailAddress != "user@example.com" {
+		t.Fatalf("EmailAddress = %q, want user@example.com", profile.EmailAddress)
 	}
 }
 
@@ -173,15 +173,15 @@ func TestUnauthorizedRetryOnce(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		writeJSON(t, w, http.StatusOK, map[string]any{"emailAddress": "sami@example.com"})
+		writeJSON(t, w, http.StatusOK, map[string]any{"emailAddress": "user@example.com"})
 	}, "old", "new")
 
 	profile, err := client.GetProfile(context.Background())
 	if err != nil {
 		t.Fatalf("GetProfile: %v", err)
 	}
-	if profile.EmailAddress != "sami@example.com" {
-		t.Fatalf("EmailAddress = %q, want sami@example.com", profile.EmailAddress)
+	if profile.EmailAddress != "user@example.com" {
+		t.Fatalf("EmailAddress = %q, want user@example.com", profile.EmailAddress)
 	}
 	creds.mu.Lock()
 	invalidated := creds.invalidated

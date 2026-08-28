@@ -98,6 +98,8 @@ type app struct {
 	generations [asyncOperationCount]uint64
 }
 
+const envTokenIdentityNotice = "MAILBOX_TOKEN pins one identity for all accounts; account switching remains available"
+
 func newApp(account *accountCtx) app {
 	search := textinput.New()
 	search.Prompt = searchPrompt
@@ -170,7 +172,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.preview.content = ""
 		m.preview.err = ""
 		m.preview.loading = false
-		m.clearStatus()
+		m.clearListingStatus()
 		if m.ctx.labels == nil {
 			preview := m.requestPreview()
 			labels := listLabelsCmd(m.beginRequest(labelOperation))
@@ -233,7 +235,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ctx.labels = []gmail.Label{}
 		}
 		m.ctx.labelNameByID = labelNames(m.ctx.labels)
-		m.clearStatus()
+		m.clearListingStatus()
 		return m, nil
 	case actionDoneMsg:
 		if m.discardAsync(message) {
@@ -257,7 +259,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if message.clearLoading {
 			m.loading = false
 		}
-		m.status = fmt.Sprintf("opened: %s", render.SanitizeTerminal(message.target))
+		m.status = fmt.Sprintf("handed to opener: %s", render.SanitizeTerminal(message.target))
 		m.statusError = false
 		return m, nil
 	case errMsg:
@@ -300,6 +302,17 @@ func (m *app) setSize(width, height int) {
 func (m *app) clearStatus() {
 	m.status = ""
 	m.statusError = false
+}
+
+func (m *app) clearListingStatus() {
+	if m.usesEnvToken() && m.status == envTokenIdentityNotice {
+		return
+	}
+	m.clearStatus()
+}
+
+func (m app) usesEnvToken() bool {
+	return m.ctx != nil && m.ctx.lastRoute() == auth.RouteEnvToken
 }
 
 func (m *app) surfaceError(err error) {
@@ -369,7 +382,12 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	m.thread = threadModel{}
 	m.pending = nil
 	m.loading = true
-	m.clearStatus()
+	if m.usesEnvToken() {
+		m.status = envTokenIdentityNotice
+		m.statusError = false
+	} else {
+		m.clearStatus()
+	}
 	request := m.beginRequest(listOperation)
 	return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
 }

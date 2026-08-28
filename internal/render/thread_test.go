@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +105,41 @@ func TestRenderedThreadMarkdownFormat(t *testing.T) {
 		"Second body\n"
 	if got := rt.Markdown(); got != want {
 		t.Fatalf("Markdown() =\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestTerminalLinkTableElidesQueriesButJSONKeepsFullURLs(t *testing.T) {
+	fullURL := "https://example.test/private/path?email_token=secret"
+	longURL := "https://example.test/" + strings.Repeat("directory/", 20) + "?email_token=secret"
+	thread := &RenderedThread{
+		Messages: []RenderedMessage{{
+			Markdown: "[1]: " + fullURL + "\n[2]: " + longURL + "\n",
+			Links: []Link{
+				{N: 1, URL: fullURL},
+				{N: 2, URL: longURL},
+			},
+		}},
+	}
+
+	terminal := thread.Markdown()
+	if strings.Contains(terminal, "email_token=secret") {
+		t.Fatalf("terminal link table leaked query parameters: %q", terminal)
+	}
+	if !strings.Contains(terminal, "https://example.test/private/path…") {
+		t.Fatalf("terminal link table = %q, want query-elided URL", terminal)
+	}
+	for _, line := range strings.Split(terminal, "\n") {
+		if strings.HasPrefix(line, "[2]: ") && len(line) > 110 {
+			t.Fatalf("terminal link table line = %q, want bounded display length", line)
+		}
+	}
+
+	encoded, err := json.Marshal(thread)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), fullURL) || !strings.Contains(string(encoded), longURL) {
+		t.Fatalf("JSON = %q, want full link URLs", encoded)
 	}
 }
 
