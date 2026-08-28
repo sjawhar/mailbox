@@ -98,37 +98,63 @@ func mintFromEnv(ctx context.Context, account Account) (token Token, found bool,
 	return Token{AccessToken: accessToken, Route: RouteMutationEnv, Expiry: expiry}, true, nil
 }
 
-// MutationToken returns a gmail.modify access token, minting through minter
-// when the in-memory slot is empty or expired. Mutation resolution never
-// touches the disk cache, the broker, or the read keys (spec §3). Concurrent
-// calls coalesce on one mint (single-flight).
+// mutationEnvToken applies the global override shared by minting and
+// non-minting mutation callers.
+func (s *Source) mutationEnvToken() (string, bool) {
+	token := os.Getenv("MAILBOX_TOKEN")
+	if token == "" {
+		return "", false
+	}
+	s.mutMu.Lock()
+	s.mutRoute = RouteEnvToken
+	s.mutMu.Unlock()
+	return token, true
+}
+
+// validMutationTokenLocked returns the cached mutation token when it remains
+// usable and records its route. The caller must hold mutMu.
+func (s *Source) validMutationTokenLocked() (Token, bool) {
+	if s.mutToken == nil || !s.mutToken.Expiry.Add(-2*time.Minute).After(time.Now()) {
+		return Token{}, false
+	}
+	token := *s.mutToken
+	s.mutRoute = token.Route
+	return token, true
+}
+
+func waitMutationFlight(ctx context.Context, flight *mutationFlight) (Token, error) {
+	select {
+	case <-ctx.Done():
+		return Token{}, ctx.Err()
+	case <-flight.done:
+		if flight.err != nil {
+			return Token{}, flight.err
+		}
+		return flight.token, nil
+	}
+}
+
+// MutationToken is the may-mint policy: it returns the minter's real error.
+// MutationCredentials.AccessToken below is the may-not-mint policy: no flight
+// is ErrExpiredToken and a failed flight maps back to ErrExpiredToken.
 func (s *Source) MutationToken(ctx context.Context, minter Minter) (string, error) {
-	if token := os.Getenv("MAILBOX_TOKEN"); token != "" {
-		s.mutMu.Lock()
-		s.mutRoute = RouteEnvToken
-		s.mutMu.Unlock()
+	if token, ok := s.mutationEnvToken(); ok {
 		return token, nil
 	}
 
 	s.mutMu.Lock()
-	if s.mutToken != nil && s.mutToken.Expiry.Add(-2*time.Minute).After(time.Now()) {
-		token := *s.mutToken
-		s.mutRoute = token.Route
+	if token, ok := s.validMutationTokenLocked(); ok {
 		s.mutMu.Unlock()
 		return token.AccessToken, nil
 	}
 	if s.mutFlight != nil {
 		flight := s.mutFlight
 		s.mutMu.Unlock()
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-flight.done:
-			if flight.err != nil {
-				return "", flight.err
-			}
-			return flight.token.AccessToken, nil
+		token, err := waitMutationFlight(ctx, flight)
+		if err != nil {
+			return "", err
 		}
+		return token.AccessToken, nil
 	}
 
 	flight := &mutationFlight{done: make(chan struct{})}
@@ -182,36 +208,29 @@ type MutationCredentials struct {
 }
 
 func (m *MutationCredentials) AccessToken(ctx context.Context) (string, error) {
-	if token := os.Getenv("MAILBOX_TOKEN"); token != "" {
-		s := m.source
-		s.mutMu.Lock()
-		s.mutRoute = RouteEnvToken
-		s.mutMu.Unlock()
+	s := m.source
+	if token, ok := s.mutationEnvToken(); ok {
 		return token, nil
 	}
 
-	s := m.source
 	s.mutMu.Lock()
-	if s.mutToken != nil && s.mutToken.Expiry.Add(-2*time.Minute).After(time.Now()) {
-		token := s.mutToken.AccessToken
-		s.mutRoute = s.mutToken.Route
+	if token, ok := s.validMutationTokenLocked(); ok {
 		s.mutMu.Unlock()
-		return token, nil
+		return token.AccessToken, nil
 	}
 	flight := s.mutFlight
 	s.mutMu.Unlock()
 	if flight == nil {
 		return "", ErrExpiredToken
 	}
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-flight.done:
-		if flight.err != nil {
-			return "", ErrExpiredToken
+	token, err := waitMutationFlight(ctx, flight)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
 		}
-		return flight.token.AccessToken, nil
+		return "", ErrExpiredToken
 	}
+	return token.AccessToken, nil
 }
 
 func (m *MutationCredentials) Invalidate(ctx context.Context) error {
