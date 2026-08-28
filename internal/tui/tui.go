@@ -404,6 +404,10 @@ func (m app) updateKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m app) switchAccount() (tea.Model, tea.Cmd) {
+	if m.minting {
+		m.status += " · waiting for unlock…"
+		return m, nil
+	}
 	target := auth.AccountWork
 	if m.account == auth.AccountWork {
 		target = auth.AccountPersonal

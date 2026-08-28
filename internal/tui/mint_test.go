@@ -155,27 +155,55 @@ func TestKeypressDuringMintIsDroppedWithFeedback(t *testing.T) {
 	}
 }
 
-// TestAccountSwitchDiscardsInFlightMint catches a completed mint replayed on
-// a newly selected account.
-func TestAccountSwitchDiscardsInFlightMint(t *testing.T) {
+// TestAccountSwitchDuringMintKeepsMintAttribution catches an account switch
+// clearing the status that attributes an in-flight secrets request.
+func TestAccountSwitchDuringMintKeepsMintAttribution(t *testing.T) {
 	rows := testThreads(1)
 	model, api, recorder, _ := newMintApp(t, rows)
 	api.modifyErrs = []error{auth.ErrExpiredToken}
 
-	model, cmd := update(t, model, key("e"))
-	model, mint := update(t, model, runCmd(t, cmd))
-	pendingMint := runCmd(t, mint)
+	originalFactory := newAccountCtx
+	t.Cleanup(func() { newAccountCtx = originalFactory })
+	newAccountCtx = func(account auth.Account) (*accountCtx, error) {
+		if account != auth.AccountPersonal {
+			t.Fatalf("factory account = %q, want personal", account)
+		}
+		return &accountCtx{
+			account:            account,
+			api:                &fakeAPI{threads: testThreads(1)},
+			lastRoute:          func() auth.Route { return auth.RouteBroker },
+			mutationRoute:      func() auth.Route { return auth.RouteMint },
+			invalidateMutation: func() {},
+			mint:               func(context.Context, io.Writer) error { return nil },
+		}, nil
+	}
 
-	personalAPI := &fakeAPI{threads: testThreads(1)}
-	model = switchToPersonal(t, model, personalAPI)
-	model, after := update(t, model, pendingMint)
-	if after != nil {
-		t.Fatal("stale mint result dispatched an action on the new account")
+	model, action := update(t, model, key("e"))
+	model, mint := update(t, model, runCmd(t, action))
+	unlockStatus := model.status
+	model, switchCmd := update(t, model, key("tab"))
+	if switchCmd != nil {
+		t.Fatal("account switch started while a mutation mint was in flight")
 	}
-	if len(personalAPI.modifyCalls) != 0 || len(api.modifyCalls) != 1 {
-		t.Fatalf("modify calls after switch: personal=%d work=%d", len(personalAPI.modifyCalls), len(api.modifyCalls))
+	if model.account != auth.AccountWork {
+		t.Fatalf("account = %q, want work while minting", model.account)
 	}
-	_ = recorder
+	if model.status != unlockStatus+" · waiting for unlock…" {
+		t.Fatalf("status = %q, want preserved unlock attribution with waiting feedback", model.status)
+	}
+
+	model, retry := update(t, model, runCmd(t, mint))
+	if recorder.calls != 1 {
+		t.Fatalf("mints = %d, want exactly one", recorder.calls)
+	}
+	if model.minting {
+		t.Fatal("minting remains true after the mint command resolved")
+	}
+	model, switchCmd = update(t, model, key("tab"))
+	if switchCmd == nil || model.account != auth.AccountPersonal {
+		t.Fatalf("switch after mint command: cmd=%v account=%q, want personal listing command", switchCmd, model.account)
+	}
+	_ = retry
 }
 
 // TestMintSuccessNoteIsSurfaced catches loss of the child stderr note after a

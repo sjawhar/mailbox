@@ -73,27 +73,38 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	g := &fakeGmail{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/gmail/v1/users/me/threads", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"threads":[{"id":"t1","snippet":"hello"}]}`)
+		fmt.Fprint(w, `{"threads":[{"id":"t1","snippet":"hello"},{"id":"t2","snippet":"hello"}]}`)
 	})
 	mux.HandleFunc("/gmail/v1/users/me/labels", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"labels":[]}`)
 	})
 	body := base64.RawURLEncoding.EncodeToString([]byte("<p>hi</p>"))
-	thread := fmt.Sprintf(`{"id":"t1","messages":[{"id":"m1","threadId":"t1","internalDate":"1788000000000","labelIds":["INBOX","UNREAD"],"payload":{"mimeType":"text/html","headers":[{"name":"From","value":"A <a@example.test>"},{"name":"To","value":"B <b@example.test>"},{"name":"Subject","value":"PTY smoke"}],"body":{"data":%q}}}]}`, body)
-	mux.HandleFunc("/gmail/v1/users/me/threads/t1", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, thread)
-	})
-	mux.HandleFunc("/gmail/v1/users/me/threads/t1/modify", func(w http.ResponseWriter, r *http.Request) {
-		g.mu.Lock()
-		g.mutations = append(g.mutations, r.Header.Get("Authorization"))
-		g.mu.Unlock()
-		fmt.Fprint(w, `{}`)
+	thread := func(id, messageID string) string {
+		return fmt.Sprintf(`{"id":%q,"messages":[{"id":%q,"threadId":%q,"internalDate":"1788000000000","labelIds":["INBOX","UNREAD"],"payload":{"mimeType":"text/html","headers":[{"name":"From","value":"A <a@example.test>"},{"name":"To","value":"B <b@example.test>"},{"name":"Subject","value":"PTY smoke"}],"body":{"data":%q}}}]}`, id, messageID, id, body)
+	}
+	threads := map[string]string{
+		"t1": thread("t1", "m1"),
+		"t2": thread("t2", "m2"),
+	}
+	mux.HandleFunc("/gmail/v1/users/me/threads/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/gmail/v1/users/me/threads/")
+		if strings.HasSuffix(id, "/modify") {
+			g.mu.Lock()
+			g.mutations = append(g.mutations, r.Header.Get("Authorization"))
+			g.mu.Unlock()
+			fmt.Fprint(w, `{}`)
+			return
+		}
+		if contents, found := threads[id]; found {
+			fmt.Fprint(w, contents)
+			return
+		}
+		http.NotFound(w, r)
 	})
 	mux.HandleFunc("/batch/gmail/v1", func(w http.ResponseWriter, r *http.Request) {
-		// The single-thread listing batches one metadata GET; answer it.
 		boundary := "e2e-boundary"
 		w.Header().Set("Content-Type", "multipart/mixed; boundary="+boundary)
-		fmt.Fprintf(w, "--%s\r\nContent-Type: application/http\r\nContent-ID: <response-item0>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n%s\r\n--%s--\r\n", boundary, thread, boundary)
+		fmt.Fprintf(w, "--%s\r\nContent-Type: application/http\r\nContent-ID: <response-item0>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n%s\r\n--%s\r\nContent-Type: application/http\r\nContent-ID: <response-item1>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n%s\r\n--%s--\r\n", boundary, threads["t1"], boundary, threads["t2"], boundary)
 	})
 	g.server = httptest.NewServer(mux)
 	t.Cleanup(g.server.Close)
@@ -266,8 +277,13 @@ func TestTUIMintFlowInRealPTY(t *testing.T) {
 		t.Fatalf("secrets invocations after the second mutation keypress = %q, want exactly one", got)
 	}
 	auths := gmail.mutationAuths()
-	if len(auths) != 1 || auths[0] != "Bearer pty-mut-tok" {
-		t.Fatalf("mutation Authorization = %v, want the minted token exactly once", auths)
+	if len(auths) != 2 {
+		t.Fatalf("mutation Authorization = %v, want two requests with the minted token", auths)
+	}
+	for index, authorization := range auths {
+		if authorization != "Bearer pty-mut-tok" {
+			t.Fatalf("mutation Authorization[%d] = %q, want minted token", index, authorization)
+		}
 	}
 	entries, err := os.ReadDir(cache)
 	if err != nil {
