@@ -161,7 +161,7 @@ func TestErrorSurfacesInStatusBar(t *testing.T) {
 	err := &gmail.APIError{Status: 403, Reason: "insufficientPermissions", Message: "scope missing"}
 
 	model, cmd := update(t, model, errMsg{request: model.currentRequest(listOperation), err: err})
-	for _, want := range []string{"provision:", "gmail.modify", "MAILBOX_BROKER"} {
+	for _, want := range []string{"provision:", "read-only", "GWS_WORK_MODIFY_OAUTH"} {
 		if !strings.Contains(model.status, want) {
 			t.Fatalf("status = %q, want broker provisioning hint to contain %q", model.status, want)
 		}

@@ -98,10 +98,10 @@ func newProbeEnv(t *testing.T) probeEnv {
 		t.Fatal(err)
 	}
 	writeStub(t, stubs, "google-user-token",
-		`printf 'LEAK=%s%s%s%s%s%s%s%s\n' "${MAILBOX_TOKEN:-}" "${MAILBOX_SECRETS_REEXEC:-}" "${GWS_WORK_MAIL_OAUTH:-}" "${GWS_PERSONAL_MAIL_OAUTH:-}" "${GWS_WORK_READ_OAUTH:-}" "${GWS_PERSONAL_READ_OAUTH:-}" "${GWS_WORK_SEND_OAUTH:-}" "${GWS_PERSONAL_SEND_OAUTH:-}" >> "${PROBE_LEAK_FILE:-/dev/null}"
+		`printf 'LEAK=%s%s%s%s%s%s%s%s%s%s%s\n' "${MAILBOX_TOKEN:-}" "${MAILBOX_SECRETS_REEXEC:-}" "${GWS_WORK_MAIL_OAUTH:-}" "${GWS_PERSONAL_MAIL_OAUTH:-}" "${GWS_WORK_READ_OAUTH:-}" "${GWS_PERSONAL_READ_OAUTH:-}" "${GWS_WORK_MODIFY_OAUTH:-}" "${GWS_PERSONAL_MODIFY_OAUTH:-}" "${GWS_WORK_SEND_OAUTH:-}" "${GWS_PERSONAL_SEND_OAUTH:-}" "${SECRETSD_SESSION_TOKEN_FILE:-}" >> "${PROBE_LEAK_FILE:-/dev/null}"
 echo "SHOULD-NOT-RUN" >&2; exit 99`)
 	writeStub(t, stubs, "secrets",
-		`printf 'LEAK=%s%s%s%s%s%s%s\n' "${MAILBOX_TOKEN:-}" "${GWS_WORK_MAIL_OAUTH:-}" "${GWS_PERSONAL_MAIL_OAUTH:-}" "${GWS_WORK_READ_OAUTH:-}" "${GWS_PERSONAL_READ_OAUTH:-}" "${GWS_WORK_SEND_OAUTH:-}" "${GWS_PERSONAL_SEND_OAUTH:-}" >> "${PROBE_LEAK_FILE:-/dev/null}"
+		`printf 'LEAK=%s%s%s%s%s%s%s%s%s%s\n' "${MAILBOX_TOKEN:-}" "${GWS_WORK_MAIL_OAUTH:-}" "${GWS_PERSONAL_MAIL_OAUTH:-}" "${GWS_WORK_READ_OAUTH:-}" "${GWS_PERSONAL_READ_OAUTH:-}" "${GWS_WORK_MODIFY_OAUTH:-}" "${GWS_PERSONAL_MODIFY_OAUTH:-}" "${GWS_WORK_SEND_OAUTH:-}" "${GWS_PERSONAL_SEND_OAUTH:-}" "${SECRETSD_SESSION_TOKEN_FILE:-}" >> "${PROBE_LEAK_FILE:-/dev/null}"
 key="$1"; shift; [ "$1" = "--" ] && shift
 if [ -z "$STUB_SECRET_VALUE" ]; then echo "stub secrets: no value for $key" >&2; exit 1; fi
 export "$key=$STUB_SECRET_VALUE"
@@ -128,7 +128,8 @@ func tokenServer(t *testing.T, status int, body string) string {
 
 func successfulBroker(t *testing.T, pe probeEnv, token string) {
 	t.Helper()
-	writeStub(t, pe.stubs, "google-user-token", `printf 'LEAK=%s%s%s%s%s%s%s%s\n' "${MAILBOX_TOKEN:-}" "${MAILBOX_SECRETS_REEXEC:-}" "${GWS_WORK_MAIL_OAUTH:-}" "${GWS_PERSONAL_MAIL_OAUTH:-}" "${GWS_WORK_READ_OAUTH:-}" "${GWS_PERSONAL_READ_OAUTH:-}" "${GWS_WORK_SEND_OAUTH:-}" "${GWS_PERSONAL_SEND_OAUTH:-}" >> "${PROBE_LEAK_FILE:-/dev/null}"
+	writeStub(t, pe.stubs, "google-user-token", `printf 'LEAK=%s%s%s%s%s%s%s%s%s%s%s\n' "${MAILBOX_TOKEN:-}" "${MAILBOX_SECRETS_REEXEC:-}" "${GWS_WORK_MAIL_OAUTH:-}" "${GWS_PERSONAL_MAIL_OAUTH:-}" "${GWS_WORK_READ_OAUTH:-}" "${GWS_PERSONAL_READ_OAUTH:-}" "${GWS_WORK_MODIFY_OAUTH:-}" "${GWS_PERSONAL_MODIFY_OAUTH:-}" "${GWS_WORK_SEND_OAUTH:-}" "${GWS_PERSONAL_SEND_OAUTH:-}" "${SECRETSD_SESSION_TOKEN_FILE:-}" >> "${PROBE_LEAK_FILE:-/dev/null}"
+printf '%s ' "$@" > "${PROBE_LEAK_FILE:-/dev/null}.argv"
 printf '%s\n' "`+token+`"`)
 }
 
@@ -165,6 +166,8 @@ var oauthEnvironmentNames = []string{
 	"GWS_PERSONAL_MAIL_OAUTH",
 	"GWS_WORK_READ_OAUTH",
 	"GWS_PERSONAL_READ_OAUTH",
+	"GWS_WORK_MODIFY_OAUTH",
+	"GWS_PERSONAL_MODIFY_OAUTH",
 	"GWS_WORK_SEND_OAUTH",
 	"GWS_PERSONAL_SEND_OAUTH",
 }
@@ -239,6 +242,20 @@ func TestRouting(t *testing.T) {
 		}
 	})
 
+	t.Run("broker argv requests gmail.readonly (F8)", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		successfulBroker(t, pe, "broker-tok")
+		got := execProbe(t, pe)
+		assertProbeSuccess(t, got, RouteBroker, "broker-tok")
+		argv, err := os.ReadFile(pe.leakFile + ".argv")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(string(argv)) != "--scopes gmail.readonly" {
+			t.Fatalf("broker argv = %q, want --scopes gmail.readonly", argv)
+		}
+	})
+
 	t.Run("broker child env is scrubbed", func(t *testing.T) {
 		pe := newProbeEnv(t)
 		successfulBroker(t, pe, "broker-tok")
@@ -256,7 +273,7 @@ func TestRouting(t *testing.T) {
 	t.Run("broker failure is loud with no fallback", func(t *testing.T) {
 		pe := newProbeEnv(t)
 		writeStub(t, pe.stubs, "google-user-token", `echo boom >&2; exit 3`)
-		pe.extra["GWS_WORK_MAIL_OAUTH"] = oauthJSON()
+		pe.extra["GWS_WORK_READ_OAUTH"] = oauthJSON()
 		got := execProbe(t, pe)
 		if got.exit == 0 {
 			t.Fatalf("unexpected success: stdout = %q, stderr = %q", got.stdout, got.stderr)
@@ -287,7 +304,7 @@ printf 'override-tok\n'`)
 		if err := os.WriteFile(pe.dmi, []byte("LENOVO\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		pe.extra["GWS_WORK_MAIL_OAUTH"] = oauthJSON()
+		pe.extra["GWS_WORK_READ_OAUTH"] = oauthJSON()
 		pe.extra["MAILBOX_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"ref-tok","expires_in":3600}`)
 		got := execProbe(t, pe)
 		assertProbeSuccess(t, got, RouteOAuthRefresh, "ref-tok")
@@ -303,7 +320,7 @@ printf 'override-tok\n'`)
 	t.Run("personal ignores broker even on EC2", func(t *testing.T) {
 		pe := newProbeEnv(t)
 		pe.extra["PROBE_ACCOUNT"] = string(AccountPersonal)
-		pe.extra["GWS_PERSONAL_MAIL_OAUTH"] = oauthJSON()
+		pe.extra["GWS_PERSONAL_READ_OAUTH"] = oauthJSON()
 		pe.extra["MAILBOX_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"personal-tok","expires_in":3600}`)
 		got := execProbe(t, pe)
 		assertProbeSuccess(t, got, RouteOAuthRefresh, "personal-tok")
@@ -331,7 +348,7 @@ printf 'override-tok\n'`)
 		pe.extra["PROBE_ENSURE_ENV"] = "1"
 		pe.extra["STUB_SECRET_VALUE"] = oauthJSON()
 		for _, name := range oauthEnvironmentNames {
-			if name != "GWS_PERSONAL_MAIL_OAUTH" {
+			if name != "GWS_PERSONAL_READ_OAUTH" {
 				pe.extra[name] = "decoy-should-not-leak"
 			}
 		}
@@ -353,7 +370,7 @@ printf 'override-tok\n'`)
 		if got.exit == 0 {
 			t.Fatalf("unexpected success: stdout = %q, stderr = %q", got.stdout, got.stderr)
 		}
-		want := "GWS_PERSONAL_MAIL_OAUTH still unset after re-exec under secrets"
+		want := "GWS_PERSONAL_READ_OAUTH still unset after re-exec under secrets"
 		if !strings.Contains(got.stderr, want) {
 			t.Fatalf("stderr = %q, want %q", got.stderr, want)
 		}
@@ -364,13 +381,13 @@ printf 'override-tok\n'`)
 		if err := os.WriteFile(pe.dmi, []byte("LENOVO\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		pe.extra["GWS_WORK_MAIL_OAUTH"] = oauthJSON()
+		pe.extra["GWS_WORK_READ_OAUTH"] = oauthJSON()
 		pe.extra["MAILBOX_TOKEN_URL"] = tokenServer(t, http.StatusBadRequest, `{"error":"invalid_grant"}`)
 		got := execProbe(t, pe)
 		if got.exit == 0 {
 			t.Fatalf("unexpected success: stdout = %q, stderr = %q", got.stdout, got.stderr)
 		}
-		if !strings.Contains(got.stderr, "invalid_grant") || !strings.Contains(got.stderr, "GWS_WORK_MAIL_OAUTH") {
+		if !strings.Contains(got.stderr, "invalid_grant") || !strings.Contains(got.stderr, "GWS_WORK_READ_OAUTH") {
 			t.Fatalf("stderr = %q, want invalid_grant and key", got.stderr)
 		}
 	})
@@ -380,12 +397,12 @@ printf 'override-tok\n'`)
 		if err := os.WriteFile(pe.dmi, []byte("LENOVO\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		pe.extra["GWS_WORK_MAIL_OAUTH"] = `{"client_id":""}`
+		pe.extra["GWS_WORK_READ_OAUTH"] = `{"client_id":""}`
 		got := execProbe(t, pe)
 		if got.exit == 0 {
 			t.Fatalf("unexpected success: stdout = %q, stderr = %q", got.stdout, got.stderr)
 		}
-		if !strings.Contains(got.stderr, "client_id") || !strings.Contains(got.stderr, "GWS_WORK_MAIL_OAUTH") {
+		if !strings.Contains(got.stderr, "client_id") || !strings.Contains(got.stderr, "GWS_WORK_READ_OAUTH") {
 			t.Fatalf("stderr = %q, want client_id and key", got.stderr)
 		}
 	})
@@ -395,6 +412,8 @@ func TestScrubbedEnvironDropsCredentials(t *testing.T) {
 	credentialNames := append([]string{
 		"MAILBOX_TOKEN",
 		"MAILBOX_SECRETS_REEXEC",
+		"SECRETSD_SESSION_TOKEN_FILE",
+		"GWS_WORK_MODIFY_OAUTH",
 		"GWS_FUTURE_SCOPE_OAUTH",
 	}, oauthEnvironmentNames...)
 	for _, name := range credentialNames {

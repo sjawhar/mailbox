@@ -133,14 +133,14 @@ func TestTabSwitchAuthFailureStaysPut(t *testing.T) {
 	originalFactory := newAccountCtx
 	t.Cleanup(func() { newAccountCtx = originalFactory })
 	newAccountCtx = func(auth.Account) (*accountCtx, error) {
-		return nil, &auth.NeedsSecretsError{Key: "GWS_PERSONAL_MAIL_OAUTH"}
+		return nil, &auth.NeedsSecretsError{Key: "GWS_PERSONAL_READ_OAUTH"}
 	}
 
 	model, cmd := update(t, model, key("tab"))
 	if model.account != auth.AccountWork {
 		t.Fatalf("active account = %q, want work", model.account)
 	}
-	if !strings.Contains(model.status, "GWS_PERSONAL_MAIL_OAUTH") ||
+	if !strings.Contains(model.status, "GWS_PERSONAL_READ_OAUTH") ||
 		!strings.Contains(model.status, "provision:") ||
 		!strings.Contains(model.status, "secrets") {
 		t.Fatalf("status = %q, want personal credential provisioning error", model.status)
@@ -173,7 +173,7 @@ func TestTabSwitchListingAuthFailureDoesNotRelabelWorkRows(t *testing.T) {
 	if model.account != auth.AccountPersonal || len(model.list.rows) != 0 {
 		t.Fatalf("personal auth failure retained work rows: account=%q rows=%v", model.account, threadIDs(model.list.rows))
 	}
-	if !strings.Contains(model.status, "provision:") || !strings.Contains(model.status, "GWS_PERSONAL_MAIL_OAUTH") {
+	if !strings.Contains(model.status, "provision:") || !strings.Contains(model.status, "GWS_PERSONAL_READ_OAUTH") {
 		t.Fatalf("status = %q, want personal provisioning hint", model.status)
 	}
 }

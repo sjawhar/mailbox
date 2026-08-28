@@ -16,9 +16,11 @@ func TestProvisioningHint(t *testing.T) {
 		route   Route
 		want    []string
 	}{
-		{name: "broker", account: AccountWork, route: RouteBroker, want: []string{"gmail.modify", "MAILBOX_BROKER", "README"}},
+		{name: "broker", account: AccountWork, route: RouteBroker, want: []string{"read-only", "GWS_WORK_MODIFY_OAUTH", "human tier", "README"}},
 		{name: "env token", account: AccountWork, route: RouteEnvToken, want: []string{"gmail.modify", "MAILBOX_TOKEN", "README"}},
-		{name: "personal oauth", account: AccountPersonal, route: RouteOAuthRefresh, want: []string{"gmail.modify", "GWS_PERSONAL_MAIL_OAUTH", "README"}},
+		{name: "personal oauth", account: AccountPersonal, route: RouteOAuthRefresh, want: []string{"gmail.modify", "GWS_PERSONAL_READ_OAUTH", "README"}},
+		{name: "mint", account: AccountWork, route: RouteMint, want: []string{"GWS_WORK_MODIFY_OAUTH", "gmail.modify", "ceremony"}},
+		{name: "mutation env", account: AccountPersonal, route: RouteMutationEnv, want: []string{"GWS_PERSONAL_MODIFY_OAUTH", "gmail.modify", "ceremony"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -46,8 +48,8 @@ func TestFindSecretsRequiresPathExecutable(t *testing.T) {
 
 func TestSourceCacheLifecycle(t *testing.T) {
 	t.Setenv("MAILBOX_TOKEN", "")
-	t.Setenv("GWS_WORK_MAIL_OAUTH", "")
-	t.Setenv("GWS_PERSONAL_MAIL_OAUTH", "")
+	t.Setenv("GWS_WORK_READ_OAUTH", "")
+	t.Setenv("GWS_PERSONAL_READ_OAUTH", "")
 	t.Setenv("MAILBOX_DMI_SYS_VENDOR", t.TempDir()+"/not-ec2")
 	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
 
