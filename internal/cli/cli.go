@@ -200,6 +200,20 @@ func (cc *cmdCtx) runtimeErrorForScope(account auth.Account, source *auth.Source
 	return 1
 }
 
+// retryMutation retries exactly once after a mutation credential expiry. The
+// CLI minter is environment-only, so this can never invoke secrets.
+func (cc *cmdCtx) retryMutation(source *auth.Source, action func() error) error {
+	err := action()
+	if !errors.Is(err, auth.ErrExpiredToken) {
+		return err
+	}
+	source.InvalidateMutation()
+	if _, err = source.MutationToken(context.Background(), auth.EnvOnlyMinter{}); err != nil {
+		return err
+	}
+	return action()
+}
+
 func failUsage(stderr io.Writer, err error) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "mailbox: %v\n", err)

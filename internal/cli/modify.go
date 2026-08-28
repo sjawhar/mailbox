@@ -30,9 +30,13 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 		return next.mutationRuntimeError(account, source, err)
 	}
 	if action == "archive" {
-		err = client.ModifyThreads(ctx, ids, nil, []string{"INBOX"})
+		err = next.retryMutation(source, func() error {
+			return client.ModifyThreads(ctx, ids, nil, []string{"INBOX"})
+		})
 	} else {
-		err = client.TrashThreads(ctx, ids)
+		err = next.retryMutation(source, func() error {
+			return client.TrashThreads(ctx, ids)
+		})
 	}
 	if err != nil {
 		return next.runtimeError(account, source, err)
@@ -71,7 +75,9 @@ func runMark(cc *cmdCtx, args []string) int {
 	} else {
 		add = []string{"UNREAD"}
 	}
-	if err := client.ModifyThreads(context.Background(), ids, add, remove); err != nil {
+	if err := next.retryMutation(source, func() error {
+		return client.ModifyThreads(context.Background(), ids, add, remove)
+	}); err != nil {
 		return next.runtimeError(account, source, err)
 	}
 	return next.actionResult(account, source, "mark", "marked "+mode, ids)
@@ -108,7 +114,9 @@ func runLabel(cc *cmdCtx, args []string) int {
 	} else {
 		remove = []string{label.ID}
 	}
-	if err := client.ModifyThreads(context.Background(), ids, add, remove); err != nil {
+	if err := next.retryMutation(source, func() error {
+		return client.ModifyThreads(context.Background(), ids, add, remove)
+	}); err != nil {
 		return next.runtimeError(account, source, err)
 	}
 	verb := "labeled"
