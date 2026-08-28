@@ -26,34 +26,47 @@ type Credentials interface {
 	Invalidate(ctx context.Context) error
 }
 
+// ClientConfig supplies credentials for a Gmail client. Read and Account are
+// required. Omit Mutation for a read-only client; supply it for a read-write
+// client.
+type ClientConfig struct {
+	Read     Credentials
+	Mutation Credentials
+	Account  string
+}
+
 // Client calls the Gmail REST API.
 type Client struct {
-	Creds Credentials
-	// Mutation supplies tokens for mutation call sites (threads modify/trash,
-	// label add/remove, mark read/unread, archive). Nil means this client is
-	// read-only; mutation methods fail loudly without HTTP.
-	Mutation Credentials
-	// Account names the Gmail account ("work"/"personal") for typed scope errors.
-	Account string
-	BaseURL string
-	HTTP    *http.Client
+	read     Credentials
+	mutation Credentials
+	account  string
+	BaseURL  string
+	HTTP     *http.Client
 
 	sleep  func(context.Context, time.Duration) error
 	jitter func(time.Duration) time.Duration
 }
 
-// NewClient returns a Gmail client using creds for every request.
-func NewClient(creds Credentials) *Client {
+// NewClient constructs a Gmail client in either read-only or read-write mode.
+func NewClient(config ClientConfig) *Client {
+	if config.Read == nil {
+		panic("gmail: client requires read credentials")
+	}
+	if config.Account == "" {
+		panic("gmail: client requires an account")
+	}
 	baseURL := defaultBaseURL
 	if override := os.Getenv("MAILBOX_GMAIL_BASE_URL"); override != "" {
 		baseURL = override
 	}
 	return &Client{
-		Creds:   creds,
-		BaseURL: baseURL,
-		HTTP:    &http.Client{Timeout: 30 * time.Second},
-		sleep:   sleepWithContext,
-		jitter:  rateLimitJitter,
+		read:     config.Read,
+		mutation: config.Mutation,
+		account:  config.Account,
+		BaseURL:  baseURL,
+		HTTP:     &http.Client{Timeout: 30 * time.Second},
+		sleep:    sleepWithContext,
+		jitter:   rateLimitJitter,
 	}
 }
 
@@ -78,7 +91,7 @@ func (c *Client) ListThreads(ctx context.Context, opts ListOptions) (*ThreadList
 	}
 
 	var threads ThreadList
-	if err := c.scopeMapped(c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/threads", query, nil, &threads), "gmail.readonly"); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, "/gmail/v1/users/me/threads", query, nil, &threads), "gmail.readonly"); err != nil {
 		return nil, err
 	}
 	return &threads, nil
@@ -88,7 +101,7 @@ func (c *Client) ListThreads(ctx context.Context, opts ListOptions) (*ThreadList
 func (c *Client) GetThread(ctx context.Context, id, format string) (*Thread, error) {
 	var thread Thread
 	query := url.Values{"format": {format}}
-	if err := c.scopeMapped(c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/threads/"+url.PathEscape(id), query, nil, &thread), "gmail.readonly"); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, "/gmail/v1/users/me/threads/"+url.PathEscape(id), query, nil, &thread), "gmail.readonly"); err != nil {
 		return nil, err
 	}
 	return &thread, nil
@@ -111,7 +124,7 @@ func (c *Client) GetThreadsMetadata(ctx context.Context, ids []string) ([]*Threa
 				},
 			})
 		}
-		results, err := c.doBatch(ctx, c.Creds, items)
+		results, err := c.doBatch(ctx, c.read, items)
 		if err != nil {
 			return nil, c.scopeMapped(err, "gmail.readonly")
 		}
@@ -131,10 +144,7 @@ func (c *Client) ModifyThreads(ctx context.Context, ids, addLabelIDs, removeLabe
 	if len(ids) == 0 {
 		return nil
 	}
-	creds, err := c.mutationCredentials()
-	if err != nil {
-		return err
-	}
+	creds := c.mutation
 	body := modifyThreadRequest{
 		AddLabelIDs:    nonNilStrings(addLabelIDs),
 		RemoveLabelIDs: nonNilStrings(removeLabelIDs),
@@ -150,10 +160,7 @@ func (c *Client) TrashThreads(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	creds, err := c.mutationCredentials()
-	if err != nil {
-		return err
-	}
+	creds := c.mutation
 	if len(ids) == 1 {
 		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil), "gmail.modify")
 	}
@@ -165,7 +172,7 @@ func (c *Client) ListLabels(ctx context.Context) ([]Label, error) {
 	var response struct {
 		Labels []Label `json:"labels"`
 	}
-	if err := c.scopeMapped(c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/labels", nil, nil, &response), "gmail.readonly"); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, "/gmail/v1/users/me/labels", nil, nil, &response), "gmail.readonly"); err != nil {
 		return nil, err
 	}
 	return response.Labels, nil
@@ -177,7 +184,7 @@ func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID stri
 		Data string `json:"data"`
 	}
 	path := "/gmail/v1/users/me/messages/" + url.PathEscape(messageID) + "/attachments/" + url.PathEscape(attachmentID)
-	if err := c.scopeMapped(c.do(ctx, c.Creds, http.MethodGet, path, nil, nil, &response), "gmail.readonly"); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, path, nil, nil, &response), "gmail.readonly"); err != nil {
 		return nil, err
 	}
 
@@ -195,7 +202,7 @@ func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID stri
 // GetProfile returns the current Gmail profile.
 func (c *Client) GetProfile(ctx context.Context) (*Profile, error) {
 	var profile Profile
-	if err := c.scopeMapped(c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/profile", nil, nil, &profile), "gmail.readonly"); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, "/gmail/v1/users/me/profile", nil, nil, &profile), "gmail.readonly"); err != nil {
 		return nil, err
 	}
 	return &profile, nil
@@ -213,7 +220,7 @@ func (c *Client) ResolveThreadID(ctx context.Context, id string) (string, error)
 		ThreadID string `json:"threadId"`
 	}
 	path := "/gmail/v1/users/me/messages/" + url.PathEscape(id)
-	if err := c.do(ctx, c.Creds, http.MethodGet, path, url.Values{"format": {"minimal"}}, nil, &message); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, path, url.Values{"format": {"minimal"}}, nil, &message), "gmail.readonly"); err != nil {
 		if IsNotFound(err) {
 			return "", fmt.Errorf("no thread or message with id '%s' in account", id)
 		}
@@ -237,19 +244,12 @@ func nonNilStrings(values []string) []string {
 	return values
 }
 
-func (c *Client) mutationCredentials() (Credentials, error) {
-	if c.Mutation == nil {
-		return nil, errors.New("gmail: mutation call on a client constructed without mutation credentials")
-	}
-	return c.Mutation, nil
-}
-
 // scopeMapped makes the required Gmail scope available to every surface.
 func (c *Client) scopeMapped(err error, scope string) error {
 	if err == nil || !IsInsufficientScope(err) {
 		return err
 	}
-	return &ErrInsufficientScope{Account: c.Account, Scope: scope, Err: err}
+	return &ErrInsufficientScope{Account: c.account, Scope: scope, Err: err}
 }
 
 func (c *Client) batchThreadOperations(ctx context.Context, creds Credentials, ids []string, suffix string, body any) error {

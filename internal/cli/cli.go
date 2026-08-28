@@ -99,9 +99,10 @@ func (cc *cmdCtx) start() (auth.Account, *auth.Source, *gmail.Client, int) {
 	if err := source.EnsureEnv(cc.rawArgs); err != nil {
 		return "", nil, nil, cc.runtimeError(account, source, err)
 	}
-	client := gmail.NewClient(source)
-	client.Mutation = source.MutationCredentials()
-	client.Account = string(account)
+	client := gmail.NewClient(gmail.ClientConfig{
+		Read:    source,
+		Account: string(account),
+	})
 	return account, source, client, 0
 }
 
@@ -129,9 +130,11 @@ func (cc *cmdCtx) startMutation() (auth.Account, *auth.Source, *gmail.Client, in
 		return "", nil, nil, cc.runtimeError(account, source, err)
 	}
 	creds := source.MutationCredentials()
-	client := gmail.NewClient(creds)
-	client.Mutation = creds
-	client.Account = string(account)
+	client := gmail.NewClient(gmail.ClientConfig{
+		Read:     creds,
+		Mutation: creds,
+		Account:  string(account),
+	})
 	return account, source, client, 0
 }
 

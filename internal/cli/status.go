@@ -28,7 +28,10 @@ func runStatus(cc *cmdCtx, args []string) int {
 		next.writeStatus(next.stderr, account, source)
 		return next.runtimeError(account, source, err)
 	}
-	client := gmail.NewClient(source)
+	client := gmail.NewClient(gmail.ClientConfig{
+		Read:    source,
+		Account: string(account),
+	})
 	if _, err := source.Resolve(context.Background()); err != nil {
 		next.writeStatus(next.stderr, account, source)
 		return next.runtimeError(account, source, err)

@@ -247,7 +247,7 @@ func TestBatchPartError(t *testing.T) {
 }
 
 func TestModifyThreadsSingleDirect(t *testing.T) {
-	client, creds := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		requireRequest(t, r, http.MethodPost, "/gmail/v1/users/me/threads/t1/modify", "token")
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -258,7 +258,6 @@ func TestModifyThreadsSingleDirect(t *testing.T) {
 		}
 		writeJSON(t, w, http.StatusOK, map[string]any{})
 	}, "token")
-	client.Mutation = creds
 
 	if err := client.ModifyThreads(context.Background(), []string{"t1"}, nil, []string{"INBOX"}); err != nil {
 		t.Fatalf("ModifyThreads: %v", err)
@@ -267,7 +266,7 @@ func TestModifyThreadsSingleDirect(t *testing.T) {
 
 func TestModifyThreadsBatch(t *testing.T) {
 	ids := []string{"t0", "t1"}
-	client, creds := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		parts := readBatchRequest(t, r)
 		if len(parts) != len(ids) {
 			t.Fatalf("batch parts = %d, want %d", len(parts), len(ids))
@@ -291,7 +290,6 @@ func TestModifyThreadsBatch(t *testing.T) {
 			{index: 1, status: http.StatusNoContent},
 		})
 	}, "token")
-	client.Mutation = creds
 
 	if err := client.ModifyThreads(context.Background(), ids, []string{"STARRED"}, nil); err != nil {
 		t.Fatalf("ModifyThreads: %v", err)
@@ -301,7 +299,7 @@ func TestModifyThreadsBatch(t *testing.T) {
 func TestTrashThreadsBatch(t *testing.T) {
 	ids := []string{"t0", "t1", "t2"}
 	var requests int
-	client, creds := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		parts := readBatchRequest(t, r)
 		if len(parts) != len(ids) {
@@ -327,7 +325,6 @@ func TestTrashThreadsBatch(t *testing.T) {
 			{index: 2, status: http.StatusNoContent},
 		})
 	}, "token")
-	client.Mutation = creds
 
 	if err := client.TrashThreads(context.Background(), ids); err != nil {
 		t.Fatalf("TrashThreads: %v", err)

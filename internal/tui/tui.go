@@ -57,9 +57,11 @@ var newAccountCtx = func(account auth.Account) (*accountCtx, error) {
 		return nil, err
 	}
 	mutation := source.MutationCredentials()
-	client := gmail.NewClient(source)
-	client.Mutation = mutation
-	client.Account = string(account)
+	client := gmail.NewClient(gmail.ClientConfig{
+		Read:     source,
+		Mutation: mutation,
+		Account:  string(account),
+	})
 	return &accountCtx{
 		account:       account,
 		api:           client,

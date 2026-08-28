@@ -79,9 +79,12 @@ func TestMutation401AcrossMultiChunkBatchMintsExactlyOnce(t *testing.T) {
 	if _, err := source.MutationToken(context.Background(), minter); err != nil {
 		t.Fatal(err) // the initial mint (the TUI's first-keypress mint)
 	}
-	client := gmail.NewClient(source.MutationCredentials())
-	client.Mutation = source.MutationCredentials()
-	client.Account = "work"
+	creds := source.MutationCredentials()
+	client := gmail.NewClient(gmail.ClientConfig{
+		Read:     creds,
+		Mutation: creds,
+		Account:  string(auth.AccountWork),
+	})
 
 	ids := make([]string, 150) // two chunks of 100-part batches
 	for i := range ids {
