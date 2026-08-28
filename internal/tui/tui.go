@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -38,11 +39,14 @@ type gmailAPI interface {
 }
 
 type accountCtx struct {
-	account       auth.Account
-	api           gmailAPI
-	lastRoute     func() auth.Route
-	labels        []gmail.Label
-	labelNameByID map[string]string
+	account              auth.Account
+	api                  gmailAPI
+	lastRoute            func() auth.Route
+	mutationRoute        func() auth.Route
+	invalidateMutation   func()
+	mint                 func(ctx context.Context, stderr io.Writer) error
+	labels               []gmail.Label
+	labelNameByID        map[string]string
 }
 
 var newAccountCtx = func(account auth.Account) (*accountCtx, error) {
@@ -54,9 +58,15 @@ var newAccountCtx = func(account auth.Account) (*accountCtx, error) {
 	client.Mutation = source.MutationCredentials()
 	client.Account = string(account)
 	return &accountCtx{
-		account:   account,
-		api:       client,
-		lastRoute: source.LastRoute,
+		account:              account,
+		api:                  client,
+		lastRoute:            source.LastRoute,
+		mutationRoute:        source.MutationRoute,
+		invalidateMutation:   source.InvalidateMutation,
+		mint: func(ctx context.Context, stderr io.Writer) error {
+			_, err := source.MutationToken(ctx, &auth.ExecMinter{Stderr: stderr})
+			return err
+		},
 	}, nil
 }
 
@@ -71,11 +81,12 @@ const (
 )
 
 type pendingAction struct {
-	action  string
-	ids     []string
-	add     []string
-	remove  []string
-	advance bool
+	action   string
+	ids      []string
+	add      []string
+	remove   []string
+	advance  bool
+	reminted bool
 }
 
 type app struct {
@@ -98,6 +109,7 @@ type app struct {
 	loading     bool
 	layout      layoutMetrics
 	pending     *pendingAction
+	minting     bool
 	generations [asyncOperationCount]uint64
 }
 
@@ -265,12 +277,41 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("handed to opener: %s", render.SanitizeTerminal(message.target))
 		m.statusError = false
 		return m, nil
+	case mintDoneMsg:
+		if m.discardAsync(message) {
+			return m, nil
+		}
+		m.minting = false
+		if message.err != nil {
+			m.loading = false
+			m.pending = nil
+			m.status = render.SanitizeTerminal(message.err.Error()) +
+				" — provision " + auth.ModifyEnvKey(m.account) + " per README (human tier)"
+			m.statusError = true
+			return m, nil
+		}
+		if m.pending == nil {
+			m.loading = false
+			return m, nil
+		}
+		m.status = "unlocked " + string(m.account) + " mutations"
+		if message.note != "" {
+			m.status += " · " + message.note
+		}
+		m.statusError = false
+		return m.dispatchPending()
 	case errMsg:
 		if m.discardAsync(message) {
 			return m, nil
 		}
+		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pending.reminted {
+			m.pending.reminted = true
+			m.ctx.invalidateMutation()
+			return m.startMint()
+		}
 		m.loading = false
 		m.pending = nil
+		m.minting = false
 		m.surfaceError(message.err)
 		return m, nil
 	case tea.KeyMsg:
@@ -322,7 +363,12 @@ func (m *app) surfaceError(err error) {
 	m.status = render.SanitizeTerminal(err.Error())
 	m.statusError = true
 	if gmail.IsInsufficientScope(err) {
-		m.status += " — provision: " + auth.ProvisioningHint(m.ctx.account, m.ctx.lastRoute())
+		route := m.ctx.lastRoute()
+		var scope *gmail.ErrInsufficientScope
+		if errors.As(err, &scope) {
+			route = m.ctx.mutationRoute()
+		}
+		m.status += " — provision: " + auth.ProvisioningHint(m.ctx.account, route)
 	}
 }
 
@@ -384,6 +430,7 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	m.preview = newPreviewModel()
 	m.thread = threadModel{}
 	m.pending = nil
+	m.minting = false
 	m.loading = true
 	if m.usesEnvToken() {
 		m.status = envTokenIdentityNotice
@@ -393,6 +440,27 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	}
 	request := m.beginRequest(listOperation)
 	return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
+}
+
+func (m app) startMint() (tea.Model, tea.Cmd) {
+	m.minting = true
+	m.loading = true
+	m.status = fmt.Sprintf("unlocking %s mutations (%s) — touch your YubiKey if it blinks",
+		m.account, auth.ModifyEnvKey(m.account))
+	m.statusError = false
+	request := m.beginRequest(mintOperation)
+	return m, m.loadingCmd(mintCmd(request))
+}
+
+// dispatchPending re-issues the buffered action exactly once after a mint.
+func (m app) dispatchPending() (tea.Model, tea.Cmd) {
+	pending := m.pending
+	m.loading = true
+	request := m.beginRequest(actionOperation)
+	if pending.action == "trash" {
+		return m, m.loadingCmd(trashThreadsCmd(request, pending.ids))
+	}
+	return m, m.loadingCmd(modifyThreadsCmd(request, pending.action, pending.ids, pending.add, pending.remove))
 }
 
 func (m app) finishAction(done actionDoneMsg) (tea.Model, tea.Cmd) {

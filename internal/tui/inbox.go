@@ -272,7 +272,14 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m app) startAction(action string, ids, add, remove []string, advance bool) (tea.Model, tea.Cmd) {
-	if m.pending != nil || len(ids) == 0 {
+	if len(ids) == 0 {
+		return m, nil
+	}
+	if m.pending != nil {
+		if m.minting {
+			m.status = "waiting for unlock…"
+			m.statusError = false
+		}
 		return m, nil
 	}
 	m.pending = &pendingAction{action: action, ids: ids, add: add, remove: remove, advance: advance}

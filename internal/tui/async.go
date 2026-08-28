@@ -10,6 +10,7 @@ const (
 	labelOperation
 	attachmentOperation
 	openOperation
+	mintOperation
 	asyncOperationCount
 )
 

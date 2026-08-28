@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -63,6 +65,14 @@ type errMsg struct {
 }
 
 func (message errMsg) requestRef() asyncRequest { return message.request }
+
+type mintDoneMsg struct {
+	request asyncRequest
+	note    string
+	err     error
+}
+
+func (message mintDoneMsg) requestRef() asyncRequest { return message.request }
 
 type labelsMsg struct {
 	request asyncRequest
@@ -157,6 +167,33 @@ func trashThreadsCmd(request asyncRequest, ids []string) tea.Cmd {
 		}
 		return actionDoneMsg{request: request, action: "trash", ids: ids}
 	}
+}
+
+// mintCmd runs the account's minter and reports the child's sanitized stderr
+// tail alongside the outcome.
+func mintCmd(request asyncRequest) tea.Cmd {
+	return func() tea.Msg {
+		var stderr bytes.Buffer
+		err := request.ctx.mint(context.Background(), &stderr)
+		return mintDoneMsg{request: request, note: mintNote(stderr.String()), err: err}
+	}
+}
+
+// mintNote reduces child stderr to a status-line-safe fragment: the last
+// non-empty sanitized line, capped at 200 characters.
+func mintNote(stderr string) string {
+	lines := strings.Split(render.SanitizeTerminal(strings.TrimSpace(stderr)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		if len(line) > 200 {
+			line = line[:200]
+		}
+		return line
+	}
+	return ""
 }
 
 func listLabelsCmd(request asyncRequest) tea.Cmd {
