@@ -127,6 +127,45 @@ func TestMutationTokenSingleFlight(t *testing.T) {
 	}
 }
 
+func TestMutationTokenFailureIsSingleFlightAndCanRetry(t *testing.T) {
+	clearCredentialEnv(t)
+	source := NewSource(AccountWork)
+	mintErr := errors.New("mint failed")
+	minter := &fakeMinter{delay: 100 * time.Millisecond, err: mintErr}
+
+	errs := make(chan error, 8)
+	var group sync.WaitGroup
+	for range 8 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			_, err := source.MutationToken(context.Background(), minter)
+			errs <- err
+		}()
+	}
+	group.Wait()
+	close(errs)
+
+	if minter.count() != 1 {
+		t.Fatalf("mints after concurrent failure = %d, want 1", minter.count())
+	}
+	for err := range errs {
+		if !errors.Is(err, mintErr) {
+			t.Errorf("MutationToken error = %v, want %v", err, mintErr)
+		}
+	}
+
+	minter.err = nil
+	minter.token = validToken(RouteMint)
+	token, err := source.MutationToken(context.Background(), minter)
+	if err != nil || token != "mut-tok" {
+		t.Fatalf("MutationToken after failed flight = %q, %v", token, err)
+	}
+	if minter.count() != 2 {
+		t.Fatalf("mints after retry = %d, want 2", minter.count())
+	}
+}
+
 func TestMutationCredentialsNeverMint(t *testing.T) {
 	clearCredentialEnv(t)
 	source := NewSource(AccountWork)

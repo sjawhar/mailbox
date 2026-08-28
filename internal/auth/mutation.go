@@ -18,6 +18,12 @@ const (
 // AccessToken path never mints (F2). Retry policy lives with the surfaces.
 var ErrExpiredToken = errors.New("mutation token expired; a new mint is required")
 
+type mutationFlight struct {
+	done  chan struct{}
+	token Token
+	err   error
+}
+
 // Minter acquires a gmail.modify access token for one account.
 type Minter interface {
 	Mint(ctx context.Context, account Account) (Token, error)
@@ -103,41 +109,48 @@ func (s *Source) MutationToken(ctx context.Context, minter Minter) (string, erro
 		s.mutMu.Unlock()
 		return token, nil
 	}
-	for {
-		s.mutMu.Lock()
-		if s.mutToken != nil && s.mutToken.Expiry.Add(-2*time.Minute).After(time.Now()) {
-			token := *s.mutToken
-			s.mutRoute = token.Route
-			s.mutMu.Unlock()
-			return token.AccessToken, nil
-		}
-		if s.mutFlight == nil {
-			flight := make(chan struct{})
-			s.mutFlight = flight
-			s.mutMu.Unlock()
 
-			token, err := minter.Mint(ctx, s.account)
-
-			s.mutMu.Lock()
-			s.mutFlight = nil
-			close(flight)
-			if err != nil {
-				s.mutMu.Unlock()
-				return "", err
-			}
-			s.mutToken = &token
-			s.mutRoute = token.Route
-			s.mutMu.Unlock()
-			return token.AccessToken, nil
-		}
+	s.mutMu.Lock()
+	if s.mutToken != nil && s.mutToken.Expiry.Add(-2*time.Minute).After(time.Now()) {
+		token := *s.mutToken
+		s.mutRoute = token.Route
+		s.mutMu.Unlock()
+		return token.AccessToken, nil
+	}
+	if s.mutFlight != nil {
 		flight := s.mutFlight
 		s.mutMu.Unlock()
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-flight:
+		case <-flight.done:
+			if flight.err != nil {
+				return "", flight.err
+			}
+			return flight.token.AccessToken, nil
 		}
 	}
+
+	flight := &mutationFlight{done: make(chan struct{})}
+	s.mutFlight = flight
+	s.mutMu.Unlock()
+
+	token, err := minter.Mint(ctx, s.account)
+
+	s.mutMu.Lock()
+	flight.token = token
+	flight.err = err
+	s.mutFlight = nil
+	if err == nil {
+		s.mutToken = &token
+		s.mutRoute = token.Route
+	}
+	close(flight.done)
+	s.mutMu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	return token.AccessToken, nil
 }
 
 // InvalidateMutation clears the in-memory mutation slot. It never mints:
@@ -176,25 +189,28 @@ func (m *MutationCredentials) AccessToken(ctx context.Context) (string, error) {
 		s.mutMu.Unlock()
 		return token, nil
 	}
+
 	s := m.source
-	for {
-		s.mutMu.Lock()
-		if s.mutToken != nil && s.mutToken.Expiry.Add(-2*time.Minute).After(time.Now()) {
-			token := s.mutToken.AccessToken
-			s.mutRoute = s.mutToken.Route
-			s.mutMu.Unlock()
-			return token, nil
-		}
-		flight := s.mutFlight
+	s.mutMu.Lock()
+	if s.mutToken != nil && s.mutToken.Expiry.Add(-2*time.Minute).After(time.Now()) {
+		token := s.mutToken.AccessToken
+		s.mutRoute = s.mutToken.Route
 		s.mutMu.Unlock()
-		if flight == nil {
+		return token, nil
+	}
+	flight := s.mutFlight
+	s.mutMu.Unlock()
+	if flight == nil {
+		return "", ErrExpiredToken
+	}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-flight.done:
+		if flight.err != nil {
 			return "", ErrExpiredToken
 		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-flight:
-		}
+		return flight.token.AccessToken, nil
 	}
 }
 

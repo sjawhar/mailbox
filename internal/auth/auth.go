@@ -43,7 +43,7 @@ type Source struct {
 
 	mutMu     sync.Mutex
 	mutToken  *Token
-	mutFlight chan struct{}
+	mutFlight *mutationFlight
 	mutRoute  Route
 }
 
