@@ -186,16 +186,16 @@ func (cc *cmdCtx) mutationRuntimeError(account auth.Account, source *auth.Source
 func (cc *cmdCtx) runtimeErrorForScope(account auth.Account, source *auth.Source, err error, mutation bool) int {
 	fmt.Fprintf(cc.stderr, "mailbox: %v\n", err)
 	if source != nil && gmail.IsInsufficientScope(err) {
-		route := source.LastRoute()
+		route, scope := source.LastRoute(), "gmail.readonly"
 		if mutation {
-			route = source.MutationRoute()
+			route, scope = source.MutationRoute(), "gmail.modify"
 		} else {
-			var scope *gmail.ErrInsufficientScope
-			if errors.As(err, &scope) {
-				route = source.MutationRoute()
+			var typed *gmail.ErrInsufficientScope
+			if errors.As(err, &typed) {
+				route, scope = source.MutationRoute(), typed.Scope
 			}
 		}
-		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ProvisioningHint(account, route))
+		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ProvisioningHint(account, route, scope))
 	}
 	return 1
 }

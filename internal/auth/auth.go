@@ -202,7 +202,17 @@ func (s *Source) EnsureEnv(argv []string) error {
 	return syscall.Exec(secretsBin, args, env)
 }
 
-func ProvisioningHint(account Account, route Route) string {
+func ProvisioningHint(account Account, route Route, scope string) string {
+	if scope == "gmail.readonly" {
+		switch route {
+		case RouteBroker:
+			return "the broker token is read-only and lacks the gmail.readonly scope; see README"
+		case RouteEnvToken:
+			return "MAILBOX_TOKEN lacks the gmail.readonly scope; see README"
+		default:
+			return fmt.Sprintf("%s lacks the gmail.readonly scope; see README", readEnvKey(account))
+		}
+	}
 	switch route {
 	case RouteBroker:
 		return fmt.Sprintf("the broker token is read-only; mutations need %s (human tier); see README", ModifyEnvKey(account))
@@ -211,7 +221,7 @@ func ProvisioningHint(account Account, route Route) string {
 	case RouteMint, RouteMutationEnv:
 		return fmt.Sprintf("%s lacks the gmail.modify scope; re-run the provisioning ceremony (README)", ModifyEnvKey(account))
 	default:
-		return fmt.Sprintf("%s lacks the gmail.modify scope; see README", readEnvKey(account))
+		return fmt.Sprintf("%s lacks the gmail.modify scope; see README", ModifyEnvKey(account))
 	}
 }
 

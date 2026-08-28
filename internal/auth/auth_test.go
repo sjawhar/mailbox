@@ -18,13 +18,13 @@ func TestProvisioningHint(t *testing.T) {
 	}{
 		{name: "broker", account: AccountWork, route: RouteBroker, want: []string{"read-only", "GWS_WORK_MODIFY_OAUTH", "human tier", "README"}},
 		{name: "env token", account: AccountWork, route: RouteEnvToken, want: []string{"gmail.modify", "MAILBOX_TOKEN", "README"}},
-		{name: "personal oauth", account: AccountPersonal, route: RouteOAuthRefresh, want: []string{"gmail.modify", "GWS_PERSONAL_READ_OAUTH", "README"}},
+		{name: "personal oauth", account: AccountPersonal, route: RouteOAuthRefresh, want: []string{"gmail.modify", "GWS_PERSONAL_MODIFY_OAUTH", "README"}},
 		{name: "mint", account: AccountWork, route: RouteMint, want: []string{"GWS_WORK_MODIFY_OAUTH", "gmail.modify", "ceremony"}},
 		{name: "mutation env", account: AccountPersonal, route: RouteMutationEnv, want: []string{"GWS_PERSONAL_MODIFY_OAUTH", "gmail.modify", "ceremony"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ProvisioningHint(tc.account, tc.route)
+			got := ProvisioningHint(tc.account, tc.route, "gmail.modify")
 			for _, want := range tc.want {
 				if !strings.Contains(got, want) {
 					t.Fatalf("ProvisioningHint(%q, %q) = %q, want it to contain %q", tc.account, tc.route, got, want)

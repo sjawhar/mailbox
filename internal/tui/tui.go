@@ -383,12 +383,12 @@ func (m *app) surfaceError(err error) {
 	m.status = render.SanitizeTerminal(err.Error())
 	m.statusError = true
 	if gmail.IsInsufficientScope(err) {
-		route := m.ctx.lastRoute()
-		var scope *gmail.ErrInsufficientScope
-		if errors.As(err, &scope) {
-			route = m.ctx.mutationRoute()
+		route, scope := m.ctx.lastRoute(), "gmail.readonly"
+		var typed *gmail.ErrInsufficientScope
+		if errors.As(err, &typed) {
+			route, scope = m.ctx.mutationRoute(), typed.Scope
 		}
-		m.status += " — provision: " + auth.ProvisioningHint(m.ctx.account, route)
+		m.status += " — provision: " + auth.ProvisioningHint(m.ctx.account, route, scope)
 	}
 }
 
