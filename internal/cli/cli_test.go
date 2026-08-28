@@ -37,6 +37,7 @@ type gmailTestServer struct {
 	metadata       map[string]map[string]any
 	rawMessageID   string
 	forbidden      bool
+	readForbidden  bool
 	mutationToken  string
 }
 
@@ -92,6 +93,10 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"id": g.rawMessageID, "threadId": "t1"})
 	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/threads/") && r.Method == http.MethodGet:
+		if g.readForbidden {
+			writeResponse(g.t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions"))
+			return
+		}
 		if g.rawMessageID != "" && strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/threads/"+g.rawMessageID) {
 			writeResponse(g.t, w, http.StatusNotFound, googleError(http.StatusNotFound, "notFound"))
 			return
@@ -102,6 +107,10 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeResponse(g.t, w, http.StatusOK, g.thread)
 	case r.URL.Path == "/gmail/v1/users/me/labels":
+		if g.readForbidden {
+			writeResponse(g.t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions"))
+			return
+		}
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"labels": g.labels})
 	case strings.Contains(r.URL.Path, "/attachments/"):
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"data": base64.RawURLEncoding.EncodeToString(g.attachment)})
@@ -1020,6 +1029,54 @@ func TestColdCacheMutationRefreshesActsAndExits(t *testing.T) {
 	}
 	if got := recordedSecretsArgv(t, argvFile); got != "" {
 		t.Fatalf("secrets spawned during an env-credential mutation: %q", got)
+	}
+}
+
+// TestMutationIncidentalReadScopeHintUsesMutationCredential catches raw
+// thread and label resolution scope errors rendered as read-token failures.
+func TestMutationIncidentalReadScopeHintUsesMutationCredential(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		args []string
+		want string
+	}{
+		{
+			name: "raw thread with pinned token",
+			env:  map[string]string{"MAILBOX_TOKEN": "test-token"},
+			args: []string{"archive", "t1"},
+			want: "MAILBOX_TOKEN lacks the gmail.modify scope",
+		},
+		{
+			name: "label name with environment token",
+			env: map[string]string{
+				"GWS_WORK_MODIFY_OAUTH": `{"client_id":"client","client_secret":"secret","refresh_token":"refresh"}`,
+			},
+			args: []string{"label", "add", "Newsletters", "t1"},
+			want: "GWS_WORK_MODIFY_OAUTH lacks the gmail.modify scope",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newGmailTestServer(t)
+			g.readForbidden = true
+			env := testCase.env
+			if env["GWS_WORK_MODIFY_OAUTH"] != "" {
+				env["MAILBOX_TOKEN_URL"] = g.tokenURL(t, "mut-tok")
+				g.mutationToken = "mut-tok"
+			}
+
+			code, _, stderr, _ := runMutationCLI(t, g, env, testCase.args...)
+			if code != 1 {
+				t.Fatalf("exit = %d, stderr = %q, want 1", code, stderr)
+			}
+			if !strings.Contains(stderr, testCase.want) {
+				t.Fatalf("stderr = %q, want mutation hint %q", stderr, testCase.want)
+			}
+			if strings.Contains(stderr, "GWS_WORK_READ_OAUTH") {
+				t.Fatalf("stderr = %q, must not name the read credential", stderr)
+			}
+		})
 	}
 }
 

@@ -158,12 +158,26 @@ func (cc *cmdCtx) needsMutationCredential(needs *auth.NeedsMutationCredError) in
 }
 
 func (cc *cmdCtx) runtimeError(account auth.Account, source *auth.Source, err error) int {
+	return cc.runtimeErrorForScope(account, source, err, false)
+}
+
+// mutationRuntimeError renders incidental mutation-subcommand reads with the
+// credential that performed them, rather than the dormant read credential.
+func (cc *cmdCtx) mutationRuntimeError(account auth.Account, source *auth.Source, err error) int {
+	return cc.runtimeErrorForScope(account, source, err, true)
+}
+
+func (cc *cmdCtx) runtimeErrorForScope(account auth.Account, source *auth.Source, err error, mutation bool) int {
 	fmt.Fprintf(cc.stderr, "mailbox: %v\n", err)
 	if source != nil && gmail.IsInsufficientScope(err) {
 		route := source.LastRoute()
-		var scope *gmail.ErrInsufficientScope
-		if errors.As(err, &scope) {
+		if mutation {
 			route = source.MutationRoute()
+		} else {
+			var scope *gmail.ErrInsufficientScope
+			if errors.As(err, &scope) {
+				route = source.MutationRoute()
+			}
 		}
 		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ProvisioningHint(account, route))
 	}

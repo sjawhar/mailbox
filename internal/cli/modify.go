@@ -27,7 +27,7 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 	ctx := context.Background()
 	ids, err := resolveThreadRefs(ctx, client, account, pos)
 	if err != nil {
-		return next.runtimeError(account, source, err)
+		return next.mutationRuntimeError(account, source, err)
 	}
 	if action == "archive" {
 		err = client.ModifyThreads(ctx, ids, nil, []string{"INBOX"})
@@ -63,7 +63,7 @@ func runMark(cc *cmdCtx, args []string) int {
 	}
 	ids, err := resolveThreadRefs(context.Background(), client, account, pos[1:])
 	if err != nil {
-		return next.runtimeError(account, source, err)
+		return next.mutationRuntimeError(account, source, err)
 	}
 	var add, remove []string
 	if mode == "read" {
@@ -96,11 +96,11 @@ func runLabel(cc *cmdCtx, args []string) int {
 	}
 	label, err := resolveLabel(context.Background(), client, pos[1])
 	if err != nil {
-		return next.runtimeError(account, source, err)
+		return next.mutationRuntimeError(account, source, err)
 	}
 	ids, err := resolveThreadRefs(context.Background(), client, account, pos[2:])
 	if err != nil {
-		return next.runtimeError(account, source, err)
+		return next.mutationRuntimeError(account, source, err)
 	}
 	var add, remove []string
 	if mode == "add" {
