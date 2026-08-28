@@ -14,6 +14,10 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "__mint" && os.Getenv("PROBE_MINT_ENV_FILE") != "" {
+		mintProbeMain() // defined in mint_test.go; records inherited env, then runs the real child logic
+		return
+	}
 	if os.Getenv("MAILBOX_AUTH_PROBE") == "1" {
 		probeMain()
 		return
