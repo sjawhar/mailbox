@@ -37,6 +37,8 @@ type gmailTestServer struct {
 	metadata       map[string]map[string]any
 	rawMessageID   string
 	forbidden      bool
+	readForbidden  bool
+	mutationToken  string
 }
 
 func newGmailTestServer(t *testing.T) *gmailTestServer {
@@ -54,10 +56,24 @@ func newGmailTestServer(t *testing.T) *gmailTestServer {
 	return g
 }
 
+func (g *gmailTestServer) tokenURL(t *testing.T, accessToken string) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"access_token":%q,"expires_in":3600}`, accessToken)
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
 func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	g.t.Helper()
+	// Mutation subcommands run every call — internal reads included — on the
+	// mutation token (spec §6: no read-path engagement).
 	if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-		g.t.Fatalf("Authorization = %q, want test token", got)
+		if g.mutationToken == "" || got != "Bearer "+g.mutationToken {
+			g.t.Fatalf("Authorization = %q, want test token", got)
+		}
 	}
 	if r.URL.Path == "/batch/gmail/v1" {
 		g.handleBatch(w, r)
@@ -77,6 +93,10 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"id": g.rawMessageID, "threadId": "t1"})
 	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/threads/") && r.Method == http.MethodGet:
+		if g.readForbidden {
+			writeResponse(g.t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions"))
+			return
+		}
 		if g.rawMessageID != "" && strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/threads/"+g.rawMessageID) {
 			writeResponse(g.t, w, http.StatusNotFound, googleError(http.StatusNotFound, "notFound"))
 			return
@@ -87,6 +107,10 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeResponse(g.t, w, http.StatusOK, g.thread)
 	case r.URL.Path == "/gmail/v1/users/me/labels":
+		if g.readForbidden {
+			writeResponse(g.t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions"))
+			return
+		}
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"labels": g.labels})
 	case strings.Contains(r.URL.Path, "/attachments/"):
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"data": base64.RawURLEncoding.EncodeToString(g.attachment)})
@@ -803,6 +827,62 @@ func TestScopeHintOn403(t *testing.T) {
 	code, _, stderr := runCLI(t, g, "archive", "1")
 	if code != 1 || !strings.Contains(stderr, "provision:") || !strings.Contains(stderr, "MAILBOX_TOKEN") {
 		t.Fatalf("scope error = (%d, %q), want hint", code, stderr)
+	}
+}
+
+func TestTypedReadScopeHintUsesReadRoute(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		setup func(t *testing.T, g *gmailTestServer)
+		want  string
+	}{
+		{
+			name: "broker",
+			setup: func(t *testing.T, g *gmailTestServer) {
+				dmi := filepath.Join(t.TempDir(), "sys_vendor")
+				if err := os.WriteFile(dmi, []byte("Amazon EC2\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				broker := filepath.Join(t.TempDir(), "broker")
+				if err := os.WriteFile(broker, []byte("#!/bin/sh\nprintf test-token\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("MAILBOX_DMI_SYS_VENDOR", dmi)
+				t.Setenv("MAILBOX_BROKER", broker)
+			},
+			want: "the broker token is read-only and lacks the gmail.readonly scope",
+		},
+		{
+			name: "read oauth",
+			setup: func(t *testing.T, g *gmailTestServer) {
+				dmi := filepath.Join(t.TempDir(), "sys_vendor")
+				if err := os.WriteFile(dmi, []byte("not EC2\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("MAILBOX_DMI_SYS_VENDOR", dmi)
+				t.Setenv("GWS_WORK_READ_OAUTH", `{"client_id":"client","client_secret":"secret","refresh_token":"refresh"}`)
+				t.Setenv("MAILBOX_TOKEN_URL", g.tokenURL(t, "test-token"))
+			},
+			want: "GWS_WORK_READ_OAUTH lacks the gmail.readonly scope",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newGmailTestServer(t)
+			g.readForbidden = true
+			t.Setenv("MAILBOX_GMAIL_BASE_URL", g.server.URL)
+			t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+			t.Setenv("MAILBOX_TOKEN", "")
+			t.Setenv("MAILBOX_BROKER", "")
+			testCase.setup(t, g)
+
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"read", "t1"}, &stdout, &stderr); code != 1 {
+				t.Fatalf("read exit = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			if got := stderr.String(); !strings.Contains(got, testCase.want) {
+				t.Fatalf("stderr = %q, want %q", got, testCase.want)
+			}
+		})
 	}
 }
 

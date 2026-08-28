@@ -91,6 +91,16 @@ func renderPreview(thread *gmail.Thread, width int) (string, error) {
 
 func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	value := message.String()
+	if m.minting {
+		switch value {
+		case keyArchive:
+			return m.startAction("archive", []string{m.thread.thread.ID}, nil, []string{"INBOX"}, true)
+		case keyTrash:
+			return m.startAction("trash", []string{m.thread.thread.ID}, nil, nil, true)
+		default:
+			return m, nil
+		}
+	}
 	if m.thread.linkInput != "" {
 		switch value {
 		case "esc":

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"testing"
 
@@ -30,6 +31,8 @@ type fakeAPI struct {
 	getErr      error
 	modifyErr   error
 	trashErr    error
+	modifyErrs  []error
+	trashErrs   []error
 	labelsErr   error
 
 	attachments map[string][]byte
@@ -101,11 +104,21 @@ func (f *fakeAPI) ModifyThreads(_ context.Context, ids, add, remove []string) er
 		add:    append([]string(nil), add...),
 		remove: append([]string(nil), remove...),
 	})
+	if len(f.modifyErrs) > 0 {
+		err := f.modifyErrs[0]
+		f.modifyErrs = f.modifyErrs[1:]
+		return err
+	}
 	return f.modifyErr
 }
 
 func (f *fakeAPI) TrashThreads(_ context.Context, ids []string) error {
 	f.trashCalls = append(f.trashCalls, append([]string(nil), ids...))
+	if len(f.trashErrs) > 0 {
+		err := f.trashErrs[0]
+		f.trashErrs = f.trashErrs[1:]
+		return err
+	}
 	return f.trashErr
 }
 
@@ -125,7 +138,15 @@ func newTestApp(rows []*gmail.Thread) (app, *fakeAPI) {
 }
 
 func newTestModel(api gmailAPI, account auth.Account) app {
-	ctx := &accountCtx{account: account, api: api, lastRoute: func() auth.Route { return auth.RouteBroker }}
+	ctx := &accountCtx{
+		account:            account,
+		api:                api,
+		lastRoute:          func() auth.Route { return auth.RouteBroker },
+		mutationRoute:      func() auth.Route { return auth.RouteMint },
+		mutationReady:      func() bool { return true },
+		invalidateMutation: func() {},
+		mint:               func(context.Context, io.Writer) error { return nil },
+	}
 	model := newApp(ctx)
 	model.list.rows = append([]*gmail.Thread(nil), testAPIThreads(api)...)
 	return model
@@ -139,7 +160,15 @@ func switchToPersonal(t *testing.T, model app, api gmailAPI) app {
 		if account != auth.AccountPersonal {
 			t.Fatalf("factory account = %q, want personal", account)
 		}
-		return &accountCtx{account: account, api: api, lastRoute: func() auth.Route { return auth.RouteOAuthRefresh }}, nil
+		return &accountCtx{
+			account:            account,
+			api:                api,
+			lastRoute:          func() auth.Route { return auth.RouteOAuthRefresh },
+			mutationRoute:      func() auth.Route { return auth.RouteMint },
+			mutationReady:      func() bool { return true },
+			invalidateMutation: func() {},
+			mint:               func(context.Context, io.Writer) error { return nil },
+		}, nil
 	}
 	model, command := update(t, model, key("tab"))
 	if command == nil {

@@ -26,6 +26,20 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("gmail: API error %d: %s", e.Status, e.Message)
 }
 
+// ErrInsufficientScope reports a Gmail 403 whose cause is a missing OAuth
+// scope on a mutation call, carrying account + required scope (spec §4).
+type ErrInsufficientScope struct {
+	Account string
+	Scope   string
+	Err     error
+}
+
+func (e *ErrInsufficientScope) Error() string {
+	return fmt.Sprintf("gmail: %s token lacks the %s scope: %v", e.Account, e.Scope, e.Err)
+}
+
+func (e *ErrInsufficientScope) Unwrap() error { return e.Err }
+
 // IsInsufficientScope reports whether err means the token lacks a required Gmail scope.
 func IsInsufficientScope(err error) bool {
 	var apiErr *APIError

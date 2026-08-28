@@ -266,22 +266,29 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		request := m.beginRequest(listOperation)
 		return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
 	case keyQuit:
+		if m.deflectMint() {
+			return m, nil
+		}
 		return m, tea.Quit
 	}
 	return m, nil
 }
 
 func (m app) startAction(action string, ids, add, remove []string, advance bool) (tea.Model, tea.Cmd) {
-	if m.pending != nil || len(ids) == 0 {
+	if len(ids) == 0 {
+		return m, nil
+	}
+	if m.pending != nil {
+		if m.deflectMint() {
+			return m, nil
+		}
 		return m, nil
 	}
 	m.pending = &pendingAction{action: action, ids: ids, add: add, remove: remove, advance: advance}
-	m.loading = true
-	request := m.beginRequest(actionOperation)
-	if action == "trash" {
-		return m, m.loadingCmd(trashThreadsCmd(request, ids))
+	if !m.ctx.mutationReady() {
+		return m.startMint()
 	}
-	return m, m.loadingCmd(modifyThreadsCmd(request, action, ids, add, remove))
+	return m.dispatchPending()
 }
 
 func metadata(thread *gmail.Thread) (from, subject, date string) {

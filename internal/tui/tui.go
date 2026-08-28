@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -38,11 +40,15 @@ type gmailAPI interface {
 }
 
 type accountCtx struct {
-	account       auth.Account
-	api           gmailAPI
-	lastRoute     func() auth.Route
-	labels        []gmail.Label
-	labelNameByID map[string]string
+	account            auth.Account
+	api                gmailAPI
+	lastRoute          func() auth.Route
+	mutationRoute      func() auth.Route
+	mutationReady      func() bool
+	invalidateMutation func()
+	mint               func(ctx context.Context, stderr io.Writer) error
+	labels             []gmail.Label
+	labelNameByID      map[string]string
 }
 
 var newAccountCtx = func(account auth.Account) (*accountCtx, error) {
@@ -50,10 +56,26 @@ var newAccountCtx = func(account auth.Account) (*accountCtx, error) {
 	if _, err := source.Resolve(context.Background()); err != nil {
 		return nil, err
 	}
+	mutation := source.MutationCredentials()
+	client := gmail.NewClient(gmail.ClientConfig{
+		Read:     source,
+		Mutation: mutation,
+		Account:  string(account),
+	})
 	return &accountCtx{
-		account:   account,
-		api:       gmail.NewClient(source),
-		lastRoute: source.LastRoute,
+		account:       account,
+		api:           client,
+		lastRoute:     source.LastRoute,
+		mutationRoute: source.MutationRoute,
+		mutationReady: func() bool {
+			_, err := mutation.AccessToken(context.Background())
+			return err == nil
+		},
+		invalidateMutation: source.InvalidateMutation,
+		mint: func(ctx context.Context, stderr io.Writer) error {
+			_, err := source.MutationToken(ctx, &auth.ExecMinter{Stderr: stderr})
+			return err
+		},
 	}, nil
 }
 
@@ -73,6 +95,7 @@ type pendingAction struct {
 	add     []string
 	remove  []string
 	advance bool
+	retried bool
 }
 
 type app struct {
@@ -95,6 +118,7 @@ type app struct {
 	loading     bool
 	layout      layoutMetrics
 	pending     *pendingAction
+	minting     bool
 	generations [asyncOperationCount]uint64
 }
 
@@ -166,7 +190,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		m.loading = false
+		if !m.minting {
+			m.loading = false
+		}
 		m.list.setRows(message.threads)
 		m.preview.requestedID = ""
 		m.preview.content = ""
@@ -229,7 +255,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		m.loading = false
+		if !m.minting {
+			m.loading = false
+		}
 		m.ctx.labels = message.labels
 		if m.ctx.labels == nil {
 			m.ctx.labels = []gmail.Label{}
@@ -244,7 +272,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		return m.finishAction(message)
 	case attachmentSavedMsg:
-		if m.discardAsync(message) {
+		if m.discardAsync(message) || m.minting {
 			return m, nil
 		}
 		m.loading = false
@@ -253,7 +281,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusError = false
 		return m, nil
 	case openedMsg:
-		if m.discardAsync(message) {
+		if m.discardAsync(message) || m.minting {
 			return m, nil
 		}
 		if message.clearLoading {
@@ -262,12 +290,44 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("handed to opener: %s", render.SanitizeTerminal(message.target))
 		m.statusError = false
 		return m, nil
+	case mintDoneMsg:
+		if m.discardAsync(message) {
+			return m, nil
+		}
+		m.minting = false
+		if message.err != nil {
+			m.loading = false
+			m.pending = nil
+			m.status = render.SanitizeTerminal(message.err.Error()) +
+				" — provision " + auth.ModifyEnvKey(m.account) + " per README (human tier)"
+			m.statusError = true
+			return m, nil
+		}
+		if m.pending == nil {
+			m.loading = false
+			return m, nil
+		}
+		m.status = "unlocked " + string(m.account) + " mutations"
+		if message.note != "" {
+			m.status += " · " + message.note
+		}
+		m.statusError = false
+		return m.dispatchPending()
 	case errMsg:
 		if m.discardAsync(message) {
 			return m, nil
 		}
+		if m.minting && message.request.operation != actionOperation {
+			return m, nil
+		}
+		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pending.retried {
+			m.pending.retried = true
+			m.ctx.invalidateMutation()
+			return m.startMint()
+		}
 		m.loading = false
 		m.pending = nil
+		m.minting = false
 		m.surfaceError(message.err)
 		return m, nil
 	case tea.KeyMsg:
@@ -300,6 +360,9 @@ func (m *app) setSize(width, height int) {
 }
 
 func (m *app) clearStatus() {
+	if !m.canSurfaceStatus() {
+		return
+	}
 	m.status = ""
 	m.statusError = false
 }
@@ -316,13 +379,39 @@ func (m app) usesEnvToken() bool {
 }
 
 func (m *app) surfaceError(err error) {
+	if !m.canSurfaceStatus() {
+		return
+	}
 	m.status = render.SanitizeTerminal(err.Error())
 	m.statusError = true
 	if gmail.IsInsufficientScope(err) {
-		m.status += " — provision: " + auth.ProvisioningHint(m.ctx.account, m.ctx.lastRoute())
+		route, scope := m.ctx.lastRoute(), "gmail.readonly"
+		var typed *gmail.ErrInsufficientScope
+		if errors.As(err, &typed) {
+			scope = typed.Scope
+			if scope == "gmail.modify" {
+				route = m.ctx.mutationRoute()
+			}
+		}
+		m.status += " — provision: " + auth.ProvisioningHint(m.ctx.account, route, scope)
 	}
 }
 
+func (m app) canSurfaceStatus() bool { return !m.minting }
+
+// deflectMint preserves the unlock attribution while telling the user why the
+// requested transition cannot run until the child minter returns.
+func (m *app) deflectMint() bool {
+	if !m.minting {
+		return false
+	}
+	const waiting = "waiting for unlock…"
+	if !strings.Contains(m.status, waiting) {
+		m.status += " · " + waiting
+	}
+	m.statusError = false
+	return true
+}
 func (m app) statusView() string {
 	status := m.status
 	if m.loading {
@@ -338,6 +427,12 @@ func (m app) statusView() string {
 }
 
 func (m app) updateKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if message.String() == "ctrl+c" {
+		if m.deflectMint() {
+			return m, nil
+		}
+		return m, tea.Quit
+	}
 	switch m.view {
 	case listView:
 		return m.updateListKey(message)
@@ -355,6 +450,9 @@ func (m app) updateKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m app) switchAccount() (tea.Model, tea.Cmd) {
+	if m.deflectMint() {
+		return m, nil
+	}
 	target := auth.AccountWork
 	if m.account == auth.AccountWork {
 		target = auth.AccountPersonal
@@ -381,6 +479,7 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	m.preview = newPreviewModel()
 	m.thread = threadModel{}
 	m.pending = nil
+	m.minting = false
 	m.loading = true
 	if m.usesEnvToken() {
 		m.status = envTokenIdentityNotice
@@ -390,6 +489,27 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	}
 	request := m.beginRequest(listOperation)
 	return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
+}
+
+func (m app) startMint() (tea.Model, tea.Cmd) {
+	m.minting = true
+	m.loading = true
+	m.status = fmt.Sprintf("unlocking %s mutations (%s) — touch your YubiKey if it blinks",
+		m.account, auth.ModifyEnvKey(m.account))
+	m.statusError = false
+	request := m.beginRequest(mintOperation)
+	return m, m.loadingCmd(mintCmd(request))
+}
+
+// dispatchPending re-issues the buffered action exactly once after a mint.
+func (m app) dispatchPending() (tea.Model, tea.Cmd) {
+	pending := m.pending
+	m.loading = true
+	request := m.beginRequest(actionOperation)
+	if pending.action == "trash" {
+		return m, m.loadingCmd(trashThreadsCmd(request, pending.ids))
+	}
+	return m, m.loadingCmd(modifyThreadsCmd(request, pending.action, pending.ids, pending.add, pending.remove))
 }
 
 func (m app) finishAction(done actionDoneMsg) (tea.Model, tea.Cmd) {

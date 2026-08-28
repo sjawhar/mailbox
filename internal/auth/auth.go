@@ -40,6 +40,11 @@ type Source struct {
 	mu        sync.Mutex
 	mem       *Token
 	lastRoute Route
+
+	mutMu     sync.Mutex
+	mutToken  *Token
+	mutFlight *mutationFlight
+	mutRoute  Route
 }
 
 func NewSource(account Account) *Source {
@@ -91,7 +96,7 @@ func (s *Source) Resolve(ctx context.Context) (Token, error) {
 		return token, nil
 	}
 
-	key := oauthEnvKey(s.account)
+	key := readEnvKey(s.account)
 	rawJSON := os.Getenv(key)
 	if rawJSON == "" {
 		return Token{}, &NeedsSecretsError{Key: key}
@@ -197,23 +202,34 @@ func (s *Source) EnsureEnv(argv []string) error {
 	return syscall.Exec(secretsBin, args, env)
 }
 
-func ProvisioningHint(account Account, route Route) string {
+func ProvisioningHint(account Account, route Route, scope string) string {
+	if scope == "gmail.readonly" {
+		switch route {
+		case RouteBroker:
+			return "the broker token is read-only and lacks the gmail.readonly scope; see README"
+		case RouteEnvToken:
+			return "MAILBOX_TOKEN lacks the gmail.readonly scope; see README"
+		default:
+			return fmt.Sprintf("%s lacks the gmail.readonly scope; see README", readEnvKey(account))
+		}
+	}
 	switch route {
 	case RouteBroker:
-		return "the broker token lacks the gmail.modify scope; MAILBOX_BROKER selects the broker executable; see README"
+		return fmt.Sprintf("the broker token is read-only; mutations need %s (human tier); see README", ModifyEnvKey(account))
 	case RouteEnvToken:
 		return "MAILBOX_TOKEN lacks the gmail.modify scope; see README"
+	case RouteMint, RouteMutationEnv:
+		return fmt.Sprintf("%s lacks the gmail.modify scope; re-run the provisioning ceremony (README)", ModifyEnvKey(account))
 	default:
-		key := oauthEnvKey(account)
-		return fmt.Sprintf("%s lacks the gmail.modify scope; see README", key)
+		return fmt.Sprintf("%s lacks the gmail.modify scope; see README", ModifyEnvKey(account))
 	}
 }
 
-func oauthEnvKey(account Account) string {
+func readEnvKey(account Account) string {
 	if account == AccountPersonal {
-		return "GWS_PERSONAL_MAIL_OAUTH"
+		return "GWS_PERSONAL_READ_OAUTH"
 	}
-	return "GWS_WORK_MAIL_OAUTH"
+	return "GWS_WORK_READ_OAUTH"
 }
 
 func onEC2() bool {
@@ -230,7 +246,7 @@ func runBroker(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, broker, "--scopes", "gmail.modify")
+	cmd := exec.CommandContext(ctx, broker, "--scopes", "gmail.readonly")
 	cmd.Env = ScrubbedEnviron()
 	cmd.Stderr = os.Stderr
 	output, err := cmd.Output()
@@ -277,7 +293,7 @@ func ScrubbedEnviron() []string {
 }
 
 func isCredentialEnvironment(name string) bool {
-	if name == "MAILBOX_TOKEN" || name == "MAILBOX_SECRETS_REEXEC" {
+	if name == "MAILBOX_TOKEN" || name == "MAILBOX_TOKEN_URL" || name == "MAILBOX_SECRETS_REEXEC" || name == "SECRETSD_SESSION_TOKEN_FILE" {
 		return true
 	}
 	return strings.HasPrefix(name, "GWS_") && strings.HasSuffix(name, "_OAUTH")

@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -61,6 +62,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runAttachment(cc, rest[1:])
 	case "status":
 		return runStatus(cc, rest[1:])
+	case "__mint":
+		return runMint(cc, rest[1:])
 	default:
 		fmt.Fprintf(stderr, "mailbox: unknown command '%s'\n", rest[0])
 		usage(stderr)
@@ -96,15 +99,125 @@ func (cc *cmdCtx) start() (auth.Account, *auth.Source, *gmail.Client, int) {
 	if err := source.EnsureEnv(cc.rawArgs); err != nil {
 		return "", nil, nil, cc.runtimeError(account, source, err)
 	}
-	return account, source, gmail.NewClient(source), 0
+	client := gmail.NewClient(gmail.ClientConfig{
+		Read:    source,
+		Account: string(account),
+	})
+	return account, source, client, 0
+}
+
+// startMutation is the entry point for mutation subcommands. It resolves the
+// mutation credential and nothing else: no EnsureEnv, no read-path re-exec —
+// a re-exec would scrub the human-tier key out of the environment and strand
+// the command (spec §6: credential in env means refresh, act, exit; nothing
+// cached, nothing spawned). Incidental reads (thread-ref resolution, label
+// listing) ride the same gmail.modify token per amended spec §1: "never
+// mixed" governs resolution routing, not which token serves a read call. The
+// minter has no subprocess capability: the CLI surface can never cause a
+// secretsd request (the C ruling). With no resolvable credential the remedy
+// envelope is emitted before exit (F9: the envelope is never lost to an exec).
+func (cc *cmdCtx) startMutation() (auth.Account, *auth.Source, *gmail.Client, int) {
+	account, err := auth.ResolveAccount(cc.accountFlag)
+	if err != nil {
+		return "", nil, nil, cc.runtimeError("", nil, err)
+	}
+	source := auth.NewSource(account)
+	if _, err := source.MutationToken(context.Background(), auth.EnvOnlyMinter{}); err != nil {
+		var needs *auth.NeedsMutationCredError
+		if errors.As(err, &needs) {
+			return "", nil, nil, cc.needsMutationCredential(needs)
+		}
+		return "", nil, nil, cc.runtimeError(account, source, err)
+	}
+	creds := source.MutationCredentials()
+	client := gmail.NewClient(gmail.ClientConfig{
+		Read:     creds,
+		Mutation: creds,
+		Account:  string(account),
+	})
+	return account, source, client, 0
+}
+
+type mutationCredEnvelope struct {
+	Error struct {
+		Code    string `json:"code"`
+		Key     string `json:"key"`
+		Command string `json:"command"`
+	} `json:"error"`
+}
+
+func (cc *cmdCtx) needsMutationCredential(needs *auth.NeedsMutationCredError) int {
+	command := cc.mutationCredentialCommand(needs.Key)
+	fmt.Fprintf(cc.stderr, "mailbox: mutation credentials for %s are human-tier; run: %s\n", needs.Account, command)
+	if cc.json {
+		var envelope mutationCredEnvelope
+		envelope.Error.Code = "needs_mutation_credential"
+		envelope.Error.Key = needs.Key
+		envelope.Error.Command = command
+		if err := writeJSON(cc.stdout, envelope); err != nil {
+			fmt.Fprintf(cc.stderr, "mailbox: %v\n", wrapError("write JSON", err))
+		}
+	}
+	return 1
+}
+
+func (cc *cmdCtx) mutationCredentialCommand(key string) string {
+	parts := append([]string{"secrets", key, "--", "mailbox"}, cc.rawArgs...)
+	for index, part := range parts {
+		parts[index] = shellQuote(part)
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(arg string) string {
+	if arg != "" && !strings.ContainsAny(arg, " \t\n\"'\\$`*?[](){}<>|&;#~") {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 }
 
 func (cc *cmdCtx) runtimeError(account auth.Account, source *auth.Source, err error) int {
+	return cc.runtimeErrorForScope(account, source, err, false)
+}
+
+// mutationRuntimeError renders incidental mutation-subcommand reads with the
+// credential that performed them, rather than the dormant read credential.
+func (cc *cmdCtx) mutationRuntimeError(account auth.Account, source *auth.Source, err error) int {
+	return cc.runtimeErrorForScope(account, source, err, true)
+}
+
+func (cc *cmdCtx) runtimeErrorForScope(account auth.Account, source *auth.Source, err error, mutation bool) int {
 	fmt.Fprintf(cc.stderr, "mailbox: %v\n", err)
 	if source != nil && gmail.IsInsufficientScope(err) {
-		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ProvisioningHint(account, source.LastRoute()))
+		route, scope := source.LastRoute(), "gmail.readonly"
+		if mutation {
+			route, scope = source.MutationRoute(), "gmail.modify"
+		} else {
+			var typed *gmail.ErrInsufficientScope
+			if errors.As(err, &typed) {
+				scope = typed.Scope
+				if scope == "gmail.modify" {
+					route = source.MutationRoute()
+				}
+			}
+		}
+		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ProvisioningHint(account, route, scope))
 	}
 	return 1
+}
+
+// retryMutation retries exactly once after a mutation credential expiry. The
+// CLI minter is environment-only, so this can never invoke secrets.
+func (cc *cmdCtx) retryMutation(source *auth.Source, action func() error) error {
+	err := action()
+	if !errors.Is(err, auth.ErrExpiredToken) {
+		return err
+	}
+	source.InvalidateMutation()
+	if _, err = source.MutationToken(context.Background(), auth.EnvOnlyMinter{}); err != nil {
+		return err
+	}
+	return action()
 }
 
 func failUsage(stderr io.Writer, err error) int {

@@ -49,7 +49,7 @@ Run `mailbox` without a subcommand in a terminal to open the interactive TUI. Fo
 
 `--account work|personal` selects an account and overrides `GWS_ACCOUNT`. When neither is set, mailbox uses `work`; `GWS_ACCOUNT` must be `work` or `personal`.
 
-Every one-shot command accepts `--json`. It writes one JSON value to standard output and reserves standard error for diagnostics. A listing has this shape:
+Every command in the table accepts `--json`. It writes one JSON value to standard output and reserves standard error for diagnostics. A listing has this shape:
 
 ```json
 {
@@ -71,19 +71,61 @@ Every one-shot command accepts `--json`. It writes one JSON value to standard ou
 
 ## Authentication
 
-Mailbox resolves credentials for the selected account in this order: `MAILBOX_TOKEN`, a valid local access-token cache, the work-account broker on Amazon EC2, then the selected OAuth credential.
+Mailbox separates two credential classes per account (`work`, `personal`) and never mixes them:
+
+| Class | Gmail scope | Resolution order | Tier |
+| --- | --- | --- | --- |
+| Read (`inbox`, `search`, `read`, `open`, `attachment`, `status`) | `gmail.readonly` | `MAILBOX_TOKEN` → valid local cache → work broker on Amazon EC2 → `GWS_{WORK,PERSONAL}_READ_OAUTH` (re-exec under `secrets` when unset) | agent |
+| Mutation (`archive`, `trash`, `mark`, `label`) | `gmail.modify` | `MAILBOX_TOKEN` → `GWS_{WORK,PERSONAL}_MODIFY_OAUTH` | human (YubiKey) |
 
 | Environment variable | Contract |
 | --- | --- |
-| `MAILBOX_TOKEN` | Any bearer access token. Mailbox uses it verbatim, does not cache it, and gives it highest credential precedence. Use a token with `gmail.modify` for commands that change Gmail. |
-| `GWS_WORK_MAIL_OAUTH` | An `authorized_user` OAuth credential for the work account. |
-| `GWS_PERSONAL_MAIL_OAUTH` | An `authorized_user` OAuth credential for the personal account. |
-| `MAILBOX_BROKER` | Optional path to the broker executable. It has highest precedence for broker discovery; otherwise mailbox looks for `google-user-token` on `PATH`. |
-| `MAILBOX_CACHE_DIR` | Optional access-token cache directory. The default is the OS user-cache directory plus `mailbox`: `$XDG_CACHE_HOME/mailbox` when set, otherwise `~/.cache/mailbox` on Linux; `~/Library/Caches/mailbox` on macOS. |
+| `MAILBOX_TOKEN` | Any bearer access token. Used verbatim for both classes, never cached, highest precedence. If it lacks `gmail.modify`, mutations fail with a typed scope error — there is no fallback to another credential. |
+| `GWS_WORK_READ_OAUTH` / `GWS_PERSONAL_READ_OAUTH` | `authorized_user` OAuth credentials with `gmail.readonly` for the read path. Agent tier. |
+| `GWS_WORK_MODIFY_OAUTH` / `GWS_PERSONAL_MODIFY_OAUTH` | `authorized_user` OAuth credentials with `gmail.modify`. Human tier: acquiring one through `secrets` requires a watched YubiKey approval. |
+| `MAILBOX_BROKER` | Optional path to the broker executable (work reads on EC2). Mailbox invokes it as `MAILBOX_BROKER --scopes gmail.readonly`; it prints an access token on stdout. |
+| `MAILBOX_CACHE_DIR` | Optional access-token cache directory (read tokens ONLY — mutation tokens are never written to disk). Default: `$XDG_CACHE_HOME/mailbox`, else `~/.cache/mailbox` (Linux) or `~/Library/Caches/mailbox` (macOS). |
 
-Set an OAuth variable directly or have any secret manager inject it into the mailbox process. Google OAuth consent with the `https://www.googleapis.com/auth/gmail.modify` scope produces an `authorized_user` credential with this shape:
+### Mutation credentials
 
-When the selected OAuth environment variable is unset and a `secrets` CLI is available on `PATH`, mailbox re-execs itself under `secrets <KEY> --` so the CLI can provide that credential.
+The interactive TUI is the only surface that may trigger a `secrets` approval:
+the first mutation keypress for an account mints a `gmail.modify` access token
+through `secrets GWS_<ACCOUNT>_MODIFY_OAUTH -- mailbox __mint --account <a>`
+(status line: `unlocking <account> mutations (GWS_<ACCOUNT>_MODIFY_OAUTH) —
+touch your YubiKey if it blinks`). The minted token lives in process memory
+only and expires after about an hour; the next mutation after expiry re-mints
+on that keypress.
+
+One-shot CLI mutations never invoke `secrets` for a modify key and never
+re-exec for a read credential: with the credential in the environment they
+refresh in-process, act, and exit — nothing cached, nothing spawned, even on
+a cold cache (their internal reads ride the same `gmail.modify` token).
+Without the credential they fail loudly with exit code 1 and the exact
+remedy:
+
+```
+mailbox: mutation credentials for work are human-tier; run: secrets GWS_WORK_MODIFY_OAUTH -- mailbox archive 42
+```
+
+With `--json`, the same failure is a machine-readable envelope on stdout:
+
+```json
+{"error":{"code":"needs_mutation_credential","key":"GWS_WORK_MODIFY_OAUTH","command":"secrets GWS_WORK_MODIFY_OAUTH -- mailbox archive 42 --json"}}
+```
+
+`mailbox __mint` is internal: it is the short-lived child of the TUI's mint
+flow described above. It refuses to run when `MAILBOX_TOKEN` is set, reads
+only `GWS_<ACCOUNT>_MODIFY_OAUTH` from its own environment, prints a single
+JSON object (`access_token`, RFC 3339 `expiry`) to stdout, and writes nothing
+to disk.
+
+### Read credentials
+
+Set a READ OAuth variable directly or let mailbox re-exec itself under
+`secrets GWS_<ACCOUNT>_READ_OAUTH --` when the variable is unset and a
+`secrets` CLI is on `PATH`. Google OAuth consent with the
+`https://www.googleapis.com/auth/gmail.readonly` scope produces the
+`authorized_user` credential shape:
 
 ```json
 {
@@ -94,7 +136,7 @@ When the selected OAuth environment variable is unset and a `secrets` CLI is ava
 }
 ```
 
-The broker is optional. Mailbox invokes it as `MAILBOX_BROKER --scopes gmail.modify` and expects it to print an access token to standard output. On Amazon EC2, mailbox automatically tries the broker route for the work account after checking `MAILBOX_TOKEN` and the cache; on other machines, it refreshes the selected OAuth credential instead.
+Exit codes: `0` success, `1` runtime or credential failure, `2` usage errors.
 
 ## License
 
