@@ -78,7 +78,7 @@ func (c *Client) ListThreads(ctx context.Context, opts ListOptions) (*ThreadList
 	}
 
 	var threads ThreadList
-	if err := c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/threads", query, nil, &threads); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/threads", query, nil, &threads), "gmail.readonly"); err != nil {
 		return nil, err
 	}
 	return &threads, nil
@@ -88,7 +88,7 @@ func (c *Client) ListThreads(ctx context.Context, opts ListOptions) (*ThreadList
 func (c *Client) GetThread(ctx context.Context, id, format string) (*Thread, error) {
 	var thread Thread
 	query := url.Values{"format": {format}}
-	if err := c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/threads/"+url.PathEscape(id), query, nil, &thread); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/threads/"+url.PathEscape(id), query, nil, &thread), "gmail.readonly"); err != nil {
 		return nil, err
 	}
 	return &thread, nil
@@ -113,7 +113,7 @@ func (c *Client) GetThreadsMetadata(ctx context.Context, ids []string) ([]*Threa
 		}
 		results, err := c.doBatch(ctx, c.Creds, items)
 		if err != nil {
-			return nil, err
+			return nil, c.scopeMapped(err, "gmail.readonly")
 		}
 		for _, result := range results {
 			var thread Thread
@@ -140,9 +140,9 @@ func (c *Client) ModifyThreads(ctx context.Context, ids, addLabelIDs, removeLabe
 		RemoveLabelIDs: nonNilStrings(removeLabelIDs),
 	}
 	if len(ids) == 1 {
-		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/modify", nil, body, nil))
+		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/modify", nil, body, nil), "gmail.modify")
 	}
-	return c.scopeMapped(c.batchThreadOperations(ctx, creds, ids, "/modify", body))
+	return c.scopeMapped(c.batchThreadOperations(ctx, creds, ids, "/modify", body), "gmail.modify")
 }
 
 // TrashThreads moves ids to Gmail trash.
@@ -155,9 +155,9 @@ func (c *Client) TrashThreads(ctx context.Context, ids []string) error {
 		return err
 	}
 	if len(ids) == 1 {
-		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil))
+		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil), "gmail.modify")
 	}
-	return c.scopeMapped(c.batchThreadOperations(ctx, creds, ids, "/trash", nil))
+	return c.scopeMapped(c.batchThreadOperations(ctx, creds, ids, "/trash", nil), "gmail.modify")
 }
 
 // ListLabels returns all labels for the current user.
@@ -165,7 +165,7 @@ func (c *Client) ListLabels(ctx context.Context) ([]Label, error) {
 	var response struct {
 		Labels []Label `json:"labels"`
 	}
-	if err := c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/labels", nil, nil, &response); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/labels", nil, nil, &response), "gmail.readonly"); err != nil {
 		return nil, err
 	}
 	return response.Labels, nil
@@ -177,7 +177,7 @@ func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID stri
 		Data string `json:"data"`
 	}
 	path := "/gmail/v1/users/me/messages/" + url.PathEscape(messageID) + "/attachments/" + url.PathEscape(attachmentID)
-	if err := c.do(ctx, c.Creds, http.MethodGet, path, nil, nil, &response); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.Creds, http.MethodGet, path, nil, nil, &response), "gmail.readonly"); err != nil {
 		return nil, err
 	}
 
@@ -195,7 +195,7 @@ func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID stri
 // GetProfile returns the current Gmail profile.
 func (c *Client) GetProfile(ctx context.Context) (*Profile, error) {
 	var profile Profile
-	if err := c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/profile", nil, nil, &profile); err != nil {
+	if err := c.scopeMapped(c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/profile", nil, nil, &profile), "gmail.readonly"); err != nil {
 		return nil, err
 	}
 	return &profile, nil
@@ -244,12 +244,12 @@ func (c *Client) mutationCredentials() (Credentials, error) {
 	return c.Mutation, nil
 }
 
-// scopeMapped types a 403-scope failure from a mutation call site (spec §4).
-func (c *Client) scopeMapped(err error) error {
+// scopeMapped makes the required Gmail scope available to every surface.
+func (c *Client) scopeMapped(err error, scope string) error {
 	if err == nil || !IsInsufficientScope(err) {
 		return err
 	}
-	return &ErrInsufficientScope{Account: c.Account, Scope: "gmail.modify", Err: err}
+	return &ErrInsufficientScope{Account: c.Account, Scope: scope, Err: err}
 }
 
 func (c *Client) batchThreadOperations(ctx context.Context, creds Credentials, ids []string, suffix string, body any) error {

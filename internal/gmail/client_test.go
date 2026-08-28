@@ -537,16 +537,16 @@ func TestMutation403MapsToErrInsufficientScope(t *testing.T) {
 	}
 }
 
-func TestRead403StaysUntyped(t *testing.T) {
+func TestRead403MapsToErrInsufficientScope(t *testing.T) {
 	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions", "scopes"))
 	}, "read-tok")
 	_, err := client.GetProfile(context.Background())
 	var scope *ErrInsufficientScope
-	if errors.As(err, &scope) {
-		t.Fatalf("read 403 = %v, want plain APIError (read path unchanged)", err)
+	if !errors.As(err, &scope) {
+		t.Fatalf("read 403 = %v, want ErrInsufficientScope", err)
 	}
-	if !IsInsufficientScope(err) {
-		t.Fatal("read 403 lost IsInsufficientScope")
+	if scope.Scope != "gmail.readonly" {
+		t.Fatalf("scope = %q, want gmail.readonly", scope.Scope)
 	}
 }
