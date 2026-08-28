@@ -43,6 +43,7 @@ type accountCtx struct {
 	api                  gmailAPI
 	lastRoute            func() auth.Route
 	mutationRoute        func() auth.Route
+	mutationReady        func() bool
 	invalidateMutation   func()
 	mint                 func(ctx context.Context, stderr io.Writer) error
 	labels               []gmail.Label
@@ -54,15 +55,20 @@ var newAccountCtx = func(account auth.Account) (*accountCtx, error) {
 	if _, err := source.Resolve(context.Background()); err != nil {
 		return nil, err
 	}
+	mutation := source.MutationCredentials()
 	client := gmail.NewClient(source)
-	client.Mutation = source.MutationCredentials()
+	client.Mutation = mutation
 	client.Account = string(account)
 	return &accountCtx{
-		account:              account,
-		api:                  client,
-		lastRoute:            source.LastRoute,
-		mutationRoute:        source.MutationRoute,
-		invalidateMutation:   source.InvalidateMutation,
+		account:            account,
+		api:                client,
+		lastRoute:          source.LastRoute,
+		mutationRoute:      source.MutationRoute,
+		mutationReady: func() bool {
+			_, err := mutation.AccessToken(context.Background())
+			return err == nil
+		},
+		invalidateMutation: source.InvalidateMutation,
 		mint: func(ctx context.Context, stderr io.Writer) error {
 			_, err := source.MutationToken(ctx, &auth.ExecMinter{Stderr: stderr})
 			return err
@@ -86,7 +92,7 @@ type pendingAction struct {
 	add      []string
 	remove   []string
 	advance  bool
-	reminted bool
+	retried  bool
 }
 
 type app struct {
@@ -181,7 +187,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		m.loading = false
+		if !m.minting {
+			m.loading = false
+		}
 		m.list.setRows(message.threads)
 		m.preview.requestedID = ""
 		m.preview.content = ""
@@ -244,7 +252,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		m.loading = false
+		if !m.minting {
+			m.loading = false
+		}
 		m.ctx.labels = message.labels
 		if m.ctx.labels == nil {
 			m.ctx.labels = []gmail.Label{}
@@ -259,7 +269,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		return m.finishAction(message)
 	case attachmentSavedMsg:
-		if m.discardAsync(message) {
+		if m.discardAsync(message) || m.minting {
 			return m, nil
 		}
 		m.loading = false
@@ -268,7 +278,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusError = false
 		return m, nil
 	case openedMsg:
-		if m.discardAsync(message) {
+		if m.discardAsync(message) || m.minting {
 			return m, nil
 		}
 		if message.clearLoading {
@@ -304,8 +314,11 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pending.reminted {
-			m.pending.reminted = true
+		if m.minting && message.request.operation != actionOperation {
+			return m, nil
+		}
+		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pending.retried {
+			m.pending.retried = true
 			m.ctx.invalidateMutation()
 			return m.startMint()
 		}
@@ -344,6 +357,9 @@ func (m *app) setSize(width, height int) {
 }
 
 func (m *app) clearStatus() {
+	if m.minting {
+		return
+	}
 	m.status = ""
 	m.statusError = false
 }
@@ -360,6 +376,9 @@ func (m app) usesEnvToken() bool {
 }
 
 func (m *app) surfaceError(err error) {
+	if m.minting {
+		return
+	}
 	m.status = render.SanitizeTerminal(err.Error())
 	m.statusError = true
 	if gmail.IsInsufficientScope(err) {

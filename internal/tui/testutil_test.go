@@ -143,6 +143,7 @@ func newTestModel(api gmailAPI, account auth.Account) app {
 		api:                api,
 		lastRoute:          func() auth.Route { return auth.RouteBroker },
 		mutationRoute:      func() auth.Route { return auth.RouteMint },
+		mutationReady:      func() bool { return true },
 		invalidateMutation: func() {},
 		mint:               func(context.Context, io.Writer) error { return nil },
 	}
@@ -164,6 +165,7 @@ func switchToPersonal(t *testing.T, model app, api gmailAPI) app {
 			api:                api,
 			lastRoute:          func() auth.Route { return auth.RouteOAuthRefresh },
 			mutationRoute:      func() auth.Route { return auth.RouteMint },
+			mutationReady:      func() bool { return true },
 			invalidateMutation: func() {},
 			mint:               func(context.Context, io.Writer) error { return nil },
 		}, nil

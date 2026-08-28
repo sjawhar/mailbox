@@ -277,18 +277,16 @@ func (m app) startAction(action string, ids, add, remove []string, advance bool)
 	}
 	if m.pending != nil {
 		if m.minting {
-			m.status = "waiting for unlock…"
+			m.status += " · waiting for unlock…"
 			m.statusError = false
 		}
 		return m, nil
 	}
 	m.pending = &pendingAction{action: action, ids: ids, add: add, remove: remove, advance: advance}
-	m.loading = true
-	request := m.beginRequest(actionOperation)
-	if action == "trash" {
-		return m, m.loadingCmd(trashThreadsCmd(request, ids))
+	if !m.ctx.mutationReady() {
+		return m.startMint()
 	}
-	return m, m.loadingCmd(modifyThreadsCmd(request, action, ids, add, remove))
+	return m.dispatchPending()
 }
 
 func metadata(thread *gmail.Thread) (from, subject, date string) {
