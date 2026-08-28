@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -284,6 +285,44 @@ func TestMutationScopeErrorUsesMutationRoute(t *testing.T) {
 	}
 	if strings.Contains(model.status, "broker token is read-only") {
 		t.Fatalf("status = %q, must not use the read credential route", model.status)
+	}
+}
+
+func TestTypedReadScopeErrorUsesReadRoute(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		route auth.Route
+		want  string
+	}{
+		{
+			name:  "broker",
+			route: auth.RouteBroker,
+			want:  "the broker token is read-only and lacks the gmail.readonly scope",
+		},
+		{
+			name:  "read oauth",
+			route: auth.RouteOAuthRefresh,
+			want:  "GWS_WORK_READ_OAUTH lacks the gmail.readonly scope",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			model := newTestModel(&fakeAPI{}, auth.AccountWork)
+			model.ctx.lastRoute = func() auth.Route { return testCase.route }
+			model.ctx.mutationRoute = func() auth.Route { return auth.RouteMint }
+
+			model.surfaceError(&gmail.ErrInsufficientScope{
+				Account: "work",
+				Scope:   "gmail.readonly",
+				Err: &gmail.APIError{
+					Status:  http.StatusForbidden,
+					Reason:  "insufficientPermissions",
+					Message: "scope missing",
+				},
+			})
+			if !strings.Contains(model.status, testCase.want) {
+				t.Fatalf("status = %q, want %q", model.status, testCase.want)
+			}
+		})
 	}
 }
 

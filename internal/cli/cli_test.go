@@ -830,6 +830,62 @@ func TestScopeHintOn403(t *testing.T) {
 	}
 }
 
+func TestTypedReadScopeHintUsesReadRoute(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		setup func(t *testing.T, g *gmailTestServer)
+		want  string
+	}{
+		{
+			name: "broker",
+			setup: func(t *testing.T, g *gmailTestServer) {
+				dmi := filepath.Join(t.TempDir(), "sys_vendor")
+				if err := os.WriteFile(dmi, []byte("Amazon EC2\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				broker := filepath.Join(t.TempDir(), "broker")
+				if err := os.WriteFile(broker, []byte("#!/bin/sh\nprintf test-token\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("MAILBOX_DMI_SYS_VENDOR", dmi)
+				t.Setenv("MAILBOX_BROKER", broker)
+			},
+			want: "the broker token is read-only and lacks the gmail.readonly scope",
+		},
+		{
+			name: "read oauth",
+			setup: func(t *testing.T, g *gmailTestServer) {
+				dmi := filepath.Join(t.TempDir(), "sys_vendor")
+				if err := os.WriteFile(dmi, []byte("not EC2\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("MAILBOX_DMI_SYS_VENDOR", dmi)
+				t.Setenv("GWS_WORK_READ_OAUTH", `{"client_id":"client","client_secret":"secret","refresh_token":"refresh"}`)
+				t.Setenv("MAILBOX_TOKEN_URL", g.tokenURL(t, "test-token"))
+			},
+			want: "GWS_WORK_READ_OAUTH lacks the gmail.readonly scope",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newGmailTestServer(t)
+			g.readForbidden = true
+			t.Setenv("MAILBOX_GMAIL_BASE_URL", g.server.URL)
+			t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+			t.Setenv("MAILBOX_TOKEN", "")
+			t.Setenv("MAILBOX_BROKER", "")
+			testCase.setup(t, g)
+
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"read", "t1"}, &stdout, &stderr); code != 1 {
+				t.Fatalf("read exit = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			if got := stderr.String(); !strings.Contains(got, testCase.want) {
+				t.Fatalf("stderr = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestStaleRefIsLoud(t *testing.T) {
 	g := newGmailTestServer(t)
 	code, _, stderr := runCLI(t, g, "read", "3")

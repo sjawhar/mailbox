@@ -388,7 +388,10 @@ func (m *app) surfaceError(err error) {
 		route, scope := m.ctx.lastRoute(), "gmail.readonly"
 		var typed *gmail.ErrInsufficientScope
 		if errors.As(err, &typed) {
-			route, scope = m.ctx.mutationRoute(), typed.Scope
+			scope = typed.Scope
+			if scope == "gmail.modify" {
+				route = m.ctx.mutationRoute()
+			}
 		}
 		m.status += " — provision: " + auth.ProvisioningHint(m.ctx.account, route, scope)
 	}

@@ -195,7 +195,10 @@ func (cc *cmdCtx) runtimeErrorForScope(account auth.Account, source *auth.Source
 		} else {
 			var typed *gmail.ErrInsufficientScope
 			if errors.As(err, &typed) {
-				route, scope = source.MutationRoute(), typed.Scope
+				scope = typed.Scope
+				if scope == "gmail.modify" {
+					route = source.MutationRoute()
+				}
 			}
 		}
 		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ProvisioningHint(account, route, scope))
