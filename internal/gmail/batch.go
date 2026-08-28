@@ -33,7 +33,7 @@ type batchResult struct {
 	body []byte
 }
 
-func (c *Client) doBatch(ctx context.Context, items []batchItem) ([]batchResult, error) {
+func (c *Client) doBatch(ctx context.Context, creds Credentials, items []batchItem) ([]batchResult, error) {
 	results := make([]batchResult, len(items))
 	pending := make([]batchItem, len(items))
 	for index, item := range items {
@@ -45,7 +45,7 @@ func (c *Client) doBatch(ctx context.Context, items []batchItem) ([]batchResult,
 	unauthorizedRetries := 0
 	rateLimitRetries := 0
 	for {
-		outcome, err := c.doBatchRequest(ctx, pending, &unauthorizedRetries)
+		outcome, err := c.doBatchRequest(ctx, creds, pending, &unauthorizedRetries)
 		if err != nil {
 			if isRateLimitError(err) && rateLimitRetries < maxRateLimitRetries {
 				if err := c.waitForRateLimit(ctx, rateLimitRetries, retryAfter(err)); err != nil {
@@ -113,9 +113,9 @@ func batchRetryAfter(items []batchRetryItem) time.Duration {
 	return delay
 }
 
-func (c *Client) doBatchRequest(ctx context.Context, items []batchItem, unauthorizedRetries *int) (batchOutcome, error) {
+func (c *Client) doBatchRequest(ctx context.Context, creds Credentials, items []batchItem, unauthorizedRetries *int) (batchOutcome, error) {
 	for {
-		token, err := c.Creds.AccessToken(ctx)
+		token, err := creds.AccessToken(ctx)
 		if err != nil {
 			return batchOutcome{}, err
 		}
@@ -143,7 +143,7 @@ func (c *Client) doBatchRequest(ctx context.Context, items []batchItem, unauthor
 			resp.Body.Close()
 			if *unauthorizedRetries == 0 {
 				*unauthorizedRetries++
-				if err := c.Creds.Invalidate(ctx); err != nil {
+				if err := creds.Invalidate(ctx); err != nil {
 					return batchOutcome{}, err
 				}
 				continue
@@ -168,7 +168,7 @@ func (c *Client) doBatchRequest(ctx context.Context, items []batchItem, unauthor
 			return batchOutcome{}, stillUnauthorizedError()
 		}
 		*unauthorizedRetries++
-		if err := c.Creds.Invalidate(ctx); err != nil {
+		if err := creds.Invalidate(ctx); err != nil {
 			return batchOutcome{}, err
 		}
 	}

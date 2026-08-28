@@ -28,7 +28,13 @@ type Credentials interface {
 
 // Client calls the Gmail REST API.
 type Client struct {
-	Creds   Credentials
+	Creds Credentials
+	// Mutation supplies tokens for mutation call sites (threads modify/trash,
+	// label add/remove, mark read/unread, archive). Nil means this client is
+	// read-only; mutation methods fail loudly without HTTP.
+	Mutation Credentials
+	// Account names the Gmail account ("work"/"personal") for typed scope errors.
+	Account string
 	BaseURL string
 	HTTP    *http.Client
 
@@ -72,7 +78,7 @@ func (c *Client) ListThreads(ctx context.Context, opts ListOptions) (*ThreadList
 	}
 
 	var threads ThreadList
-	if err := c.do(ctx, http.MethodGet, "/gmail/v1/users/me/threads", query, nil, &threads); err != nil {
+	if err := c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/threads", query, nil, &threads); err != nil {
 		return nil, err
 	}
 	return &threads, nil
@@ -82,7 +88,7 @@ func (c *Client) ListThreads(ctx context.Context, opts ListOptions) (*ThreadList
 func (c *Client) GetThread(ctx context.Context, id, format string) (*Thread, error) {
 	var thread Thread
 	query := url.Values{"format": {format}}
-	if err := c.do(ctx, http.MethodGet, "/gmail/v1/users/me/threads/"+url.PathEscape(id), query, nil, &thread); err != nil {
+	if err := c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/threads/"+url.PathEscape(id), query, nil, &thread); err != nil {
 		return nil, err
 	}
 	return &thread, nil
@@ -105,7 +111,7 @@ func (c *Client) GetThreadsMetadata(ctx context.Context, ids []string) ([]*Threa
 				},
 			})
 		}
-		results, err := c.doBatch(ctx, items)
+		results, err := c.doBatch(ctx, c.Creds, items)
 		if err != nil {
 			return nil, err
 		}
@@ -125,14 +131,18 @@ func (c *Client) ModifyThreads(ctx context.Context, ids, addLabelIDs, removeLabe
 	if len(ids) == 0 {
 		return nil
 	}
+	creds, err := c.mutationCredentials()
+	if err != nil {
+		return err
+	}
 	body := modifyThreadRequest{
 		AddLabelIDs:    nonNilStrings(addLabelIDs),
 		RemoveLabelIDs: nonNilStrings(removeLabelIDs),
 	}
 	if len(ids) == 1 {
-		return c.do(ctx, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/modify", nil, body, nil)
+		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/modify", nil, body, nil))
 	}
-	return c.batchThreadOperations(ctx, ids, "/modify", body)
+	return c.scopeMapped(c.batchThreadOperations(ctx, creds, ids, "/modify", body))
 }
 
 // TrashThreads moves ids to Gmail trash.
@@ -140,10 +150,14 @@ func (c *Client) TrashThreads(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	if len(ids) == 1 {
-		return c.do(ctx, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil)
+	creds, err := c.mutationCredentials()
+	if err != nil {
+		return err
 	}
-	return c.batchThreadOperations(ctx, ids, "/trash", nil)
+	if len(ids) == 1 {
+		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil))
+	}
+	return c.scopeMapped(c.batchThreadOperations(ctx, creds, ids, "/trash", nil))
 }
 
 // ListLabels returns all labels for the current user.
@@ -151,7 +165,7 @@ func (c *Client) ListLabels(ctx context.Context) ([]Label, error) {
 	var response struct {
 		Labels []Label `json:"labels"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/gmail/v1/users/me/labels", nil, nil, &response); err != nil {
+	if err := c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/labels", nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return response.Labels, nil
@@ -163,7 +177,7 @@ func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID stri
 		Data string `json:"data"`
 	}
 	path := "/gmail/v1/users/me/messages/" + url.PathEscape(messageID) + "/attachments/" + url.PathEscape(attachmentID)
-	if err := c.do(ctx, http.MethodGet, path, nil, nil, &response); err != nil {
+	if err := c.do(ctx, c.Creds, http.MethodGet, path, nil, nil, &response); err != nil {
 		return nil, err
 	}
 
@@ -181,7 +195,7 @@ func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID stri
 // GetProfile returns the current Gmail profile.
 func (c *Client) GetProfile(ctx context.Context) (*Profile, error) {
 	var profile Profile
-	if err := c.do(ctx, http.MethodGet, "/gmail/v1/users/me/profile", nil, nil, &profile); err != nil {
+	if err := c.do(ctx, c.Creds, http.MethodGet, "/gmail/v1/users/me/profile", nil, nil, &profile); err != nil {
 		return nil, err
 	}
 	return &profile, nil
@@ -199,7 +213,7 @@ func (c *Client) ResolveThreadID(ctx context.Context, id string) (string, error)
 		ThreadID string `json:"threadId"`
 	}
 	path := "/gmail/v1/users/me/messages/" + url.PathEscape(id)
-	if err := c.do(ctx, http.MethodGet, path, url.Values{"format": {"minimal"}}, nil, &message); err != nil {
+	if err := c.do(ctx, c.Creds, http.MethodGet, path, url.Values{"format": {"minimal"}}, nil, &message); err != nil {
 		if IsNotFound(err) {
 			return "", fmt.Errorf("no thread or message with id '%s' in account", id)
 		}
@@ -223,7 +237,22 @@ func nonNilStrings(values []string) []string {
 	return values
 }
 
-func (c *Client) batchThreadOperations(ctx context.Context, ids []string, suffix string, body any) error {
+func (c *Client) mutationCredentials() (Credentials, error) {
+	if c.Mutation == nil {
+		return nil, errors.New("gmail: mutation call on a client constructed without mutation credentials")
+	}
+	return c.Mutation, nil
+}
+
+// scopeMapped types a 403-scope failure from a mutation call site (spec §4).
+func (c *Client) scopeMapped(err error) error {
+	if err == nil || !IsInsufficientScope(err) {
+		return err
+	}
+	return &ErrInsufficientScope{Account: c.Account, Scope: "gmail.modify", Err: err}
+}
+
+func (c *Client) batchThreadOperations(ctx context.Context, creds Credentials, ids []string, suffix string, body any) error {
 	for start := 0; start < len(ids); start += maxBatchParts {
 		end := min(start+maxBatchParts, len(ids))
 		items := make([]batchItem, 0, end-start)
@@ -235,18 +264,18 @@ func (c *Client) batchThreadOperations(ctx context.Context, ids []string, suffix
 				body:   body,
 			})
 		}
-		if _, err := c.doBatch(ctx, items); err != nil {
+		if _, err := c.doBatch(ctx, creds, items); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
+func (c *Client) do(ctx context.Context, creds Credentials, method, path string, query url.Values, body, out any) error {
 	unauthorizedRetries := 0
 	rateLimitRetries := 0
 	for {
-		token, err := c.Creds.AccessToken(ctx)
+		token, err := creds.AccessToken(ctx)
 		if err != nil {
 			return err
 		}
@@ -264,7 +293,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			resp.Body.Close()
 			if unauthorizedRetries == 0 {
 				unauthorizedRetries++
-				if err := c.Creds.Invalidate(ctx); err != nil {
+				if err := creds.Invalidate(ctx); err != nil {
 					return err
 				}
 				continue
