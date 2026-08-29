@@ -216,7 +216,7 @@ func TestPendingActionBlocksSecondWrite(t *testing.T) {
 }
 
 func TestLabelPickerToggle(t *testing.T) {
-	label := gmail.Label{ID: "Label_7", Name: "Project"}
+	label := gmail.Label{ID: "Label_7", Name: "Project", Type: "user"}
 	rows := testThreads(2)
 	rows[0].Messages[0].LabelIDs = append(rows[0].Messages[0].LabelIDs, label.ID)
 	model, api := newTestApp(rows)
@@ -243,7 +243,7 @@ func TestLabelPickerToggle(t *testing.T) {
 }
 
 func TestLabelPickerUsesASCIIMarker(t *testing.T) {
-	label := gmail.Label{ID: "Label_7", Name: "Project"}
+	label := gmail.Label{ID: "Label_7", Name: "Project", Type: "user"}
 	rows := testThreads(1)
 	rows[0].Messages[0].LabelIDs = append(rows[0].Messages[0].LabelIDs, label.ID)
 	model, _ := newTestApp(rows)

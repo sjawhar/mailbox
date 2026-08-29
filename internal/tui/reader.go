@@ -288,7 +288,7 @@ func (m app) filteredLabels() []gmail.Label {
 	filter := strings.ToLower(m.label.Value())
 	labels := make([]gmail.Label, 0, len(m.ctx.labels))
 	for _, label := range m.ctx.labels {
-		if strings.Contains(strings.ToLower(label.Name), filter) {
+		if label.Type == "user" && strings.Contains(strings.ToLower(label.Name), filter) {
 			labels = append(labels, label)
 		}
 	}
