@@ -88,7 +88,10 @@ func runStatus(cc *cmdCtx, args []string) int {
 	for _, source := range diagnosticSources {
 		next.emitCredentialDiagnostic(source, auth.ClassRead)
 	}
-	return 0
+	if output.OK {
+		return 0
+	}
+	return 1
 }
 
 func (cc *cmdCtx) statusAccounts() ([]*auth.AccountConfig, error) {

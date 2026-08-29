@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/mailbox/internal/auth"
 )
 
 func writeCredentialConfig(t *testing.T, dir, writeSource string) string {
@@ -164,13 +167,53 @@ write_credential_cmd = ["record-write"]
 	}
 }
 
+func TestBatchAcquirerDeniesExecForAbsentEnvAndInteractiveSources(t *testing.T) {
+	g := newGmailTestServer(t)
+	newConfigRig(t, g, `
+default_account = "work"
+[accounts.work]
+read_credential_env  = "TEST_READ_OAUTH"
+write_credential_cmd = ["record-write"]
+[accounts.absent]
+read_credential_env = "TEST_ABSENT_OAUTH"
+`)
+	cfg, err := auth.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, ok := cfg.Account("work")
+	if !ok {
+		t.Fatal("work account missing")
+	}
+	absent, ok := cfg.Account("absent")
+	if !ok {
+		t.Fatal("absent account missing")
+	}
+	for _, test := range []struct {
+		name  string
+		acct  *auth.AccountConfig
+		class auth.Class
+		want  string
+	}{
+		{name: "absent", acct: absent, class: auth.ClassWrite, want: "auth.refusalAcquirer"},
+		{name: "environment", acct: work, class: auth.ClassRead, want: "auth.EnvOnlyAcquirer"},
+		{name: "interactive command", acct: work, class: auth.ClassWrite, want: "auth.refusalAcquirer"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := reflect.TypeOf(auth.BatchAcquirer(cfg, test.acct, test.class)).String(); got != test.want {
+				t.Fatalf("BatchAcquirer(%s) = %s, want %s", test.class, got, test.want)
+			}
+		})
+	}
+}
+
 func TestWriteEnvelopeShape(t *testing.T) {
 	g := newGmailTestServer(t)
 	rig := newConfigRig(t, g, `
 default_account = "work"
 [accounts.work]
 read_credential_env  = "TEST_READ_OAUTH"
-write_credential_cmd = ["record-write"]
+write_credential_cmd = ["record-write", "--write-argv-tail-sentinel"]
 `)
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"archive", "t1", "--json"}, &stdout, &stderr)
@@ -199,7 +242,7 @@ write_credential_cmd = ["record-write"]
 		t.Fatalf("envelope = %+v", envelope)
 	}
 	for _, output := range []string{stdout.String(), stderr.String()} {
-		if strings.Contains(output, "record-write\" ") || strings.Contains(output, "-- mailbox") {
+		if strings.Contains(output, "--write-argv-tail-sentinel") {
 			t.Fatalf("output leaks argv tail: %q", output)
 		}
 	}
@@ -210,7 +253,7 @@ func TestReadEnvelopeShape(t *testing.T) {
 	rig := newConfigRig(t, g, `
 default_account = "work"
 [accounts.work]
-read_credential_cmd = ["record-read"]
+read_credential_cmd = ["record-read", "--read-argv-tail-sentinel"]
 read_interactive = true
 `)
 	var stdout, stderr bytes.Buffer
@@ -239,6 +282,76 @@ read_interactive = true
 		envelope.Error.Config != rig.configPath {
 		t.Fatalf("envelope = %+v", envelope)
 	}
+	for _, output := range []string{stdout.String(), stderr.String()} {
+		if strings.Contains(output, "--read-argv-tail-sentinel") {
+			t.Fatalf("output leaks argv tail: %q", output)
+		}
+	}
+}
+
+func TestUnsetEnvironmentCredentialEnvelopesHideVariableNames(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    string
+		argv      []string
+		code      string
+		configKey string
+		variable  string
+	}{
+		{
+			name: "read",
+			config: `
+default_account = "work"
+[accounts.work]
+read_credential_env = "DISTINCTIVE_READ_ENV_NAME"
+`,
+			argv:      []string{"inbox", "--json"},
+			code:      "needs_read_credential",
+			configKey: "accounts.work.read_credential_env",
+			variable:  "DISTINCTIVE_READ_ENV_NAME",
+		},
+		{
+			name: "write",
+			config: `
+default_account = "work"
+[accounts.work]
+read_credential_env = "TEST_READ_OAUTH"
+write_credential_env = "DISTINCTIVE_WRITE_ENV_NAME"
+`,
+			argv:      []string{"archive", "t1", "--json"},
+			code:      "needs_write_credential",
+			configKey: "accounts.work.write_credential_env",
+			variable:  "DISTINCTIVE_WRITE_ENV_NAME",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := newGmailTestServer(t)
+			rig := newConfigRig(t, g, test.config)
+			var stdout, stderr bytes.Buffer
+			if code := Run(test.argv, &stdout, &stderr); code != 1 {
+				t.Fatalf("exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+			}
+			var envelope struct {
+				Error struct {
+					Code      string `json:"code"`
+					ConfigKey string `json:"config_key"`
+					Config    string `json:"config"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode envelope %q: %v", stdout.String(), err)
+			}
+			for _, output := range []string{stdout.String(), stderr.String()} {
+				if strings.Contains(output, test.variable) {
+					t.Fatalf("output leaks credential environment variable: %q", output)
+				}
+			}
+			if envelope.Error.Code != test.code || envelope.Error.ConfigKey != test.configKey || envelope.Error.Config != rig.configPath {
+				t.Fatalf("envelope = %+v", envelope)
+			}
+		})
+	}
 }
 
 func TestNonInteractiveWriteCmdActsFromCLI(t *testing.T) {
@@ -251,13 +364,17 @@ write_credential_cmd = ["record-write"]
 write_interactive    = false
 `)
 	const token = "cli-write-token-1234567890"
-	rig.replaceCommand(t, "record-write", "#!/bin/sh\nprintf '%s\\n' "+token+"\n")
+	rig.replaceCommand(t, "record-write", "#!/bin/sh\nprintf '%s %s\\n' \"$0\" \"$*\" >> "+rig.spawnLog+"\nprintf '%s\\n' "+token+"\n")
 	g.writeToken = token
 	var stdout, stderr bytes.Buffer
 	if code := Run([]string{"archive", "t1"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("archive = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if got := strings.Count(strings.TrimSpace(rig.recordedSpawns(t)), "\n") + 1; got != 1 {
+	spawns := strings.TrimSpace(rig.recordedSpawns(t))
+	if spawns == "" {
+		t.Fatal("credential command did not write the spawn log")
+	}
+	if got := strings.Count(spawns, "\n") + 1; got != 1 {
 		t.Fatalf("credential command spawns = %d, want 1", got)
 	}
 	if len(g.directRequests) != 1 {
@@ -526,6 +643,33 @@ read_interactive = true
 	}
 	if got := strings.Count(stdout.String(), "MAILBOX_TOKEN pins one identity for all accounts"); got != 1 {
 		t.Fatalf("pinning note count = %d, output=%q", got, stdout.String())
+	}
+}
+
+func TestStatusReturnsFailureForUnresolvedCredential(t *testing.T) {
+	g := newGmailTestServer(t)
+	newConfigRig(t, g, `
+default_account = "work"
+[accounts.work]
+read_credential_env = "UNSET_STATUS_CREDENTIAL"
+`)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"status", "--json"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("status exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var output struct {
+		Accounts []struct {
+			Error string `json:"error"`
+		} `json:"accounts"`
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("decode status %q: %v", stdout.String(), err)
+	}
+	if output.OK || len(output.Accounts) != 1 ||
+		!strings.Contains(output.Accounts[0].Error, "accounts.work.read_credential_env") {
+		t.Fatalf("failed status output = %+v", output)
 	}
 }
 
