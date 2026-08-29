@@ -139,6 +139,10 @@ func (m inboxModel) title(account auth.Account, envToken bool) string {
 }
 
 func (m inboxModel) rowsView(width int, labelNameByID map[string]string, height int) string {
+	return m.rowsViewAt(width, labelNameByID, height, time.Now().Local())
+}
+
+func (m inboxModel) rowsViewAt(width int, labelNameByID map[string]string, height int, now time.Time) string {
 	if len(m.rows) == 0 {
 		return "No threads."
 	}
@@ -158,7 +162,7 @@ func (m inboxModel) rowsView(width int, labelNameByID map[string]string, height 
 		if _, selected := m.selected[thread.ID]; selected {
 			selection = "*"
 		}
-		from, subject, date := metadata(thread)
+		from, subject, date := metadataAt(thread, now)
 		prefix := cursor + selection + " "
 		first := prefix + truncateSender(from, max(0, innerWidth-lipgloss.Width(prefix)))
 		indent := "     "
@@ -297,18 +301,25 @@ func (m app) startAction(action string, ids, add, remove []string, advance bool)
 }
 
 func metadata(thread *gmail.Thread) (from, subject, date string) {
+	return metadataAt(thread, time.Now().Local())
+}
+
+func metadataAt(thread *gmail.Thread, now time.Time) (from, subject, date string) {
 	message := gmail.LatestMessage(thread)
 	if message == nil {
 		return "", "", ""
 	}
-	dateTime := time.UnixMilli(message.InternalDate).Local()
-	now := time.Now().Local()
-	if dateTime.Year() == now.Year() && dateTime.Month() == now.Month() && dateTime.Day() == now.Day() {
-		date = dateTime.Format("15:04")
-	} else {
-		date = dateTime.Format("Jan 02")
-	}
+	date = formatInboxDate(time.UnixMilli(message.InternalDate).Local(), now)
 	return render.SanitizeTerminal(gmail.Sender(message.Header("From"))), render.SanitizeTerminal(message.Header("Subject")), date
+}
+
+func formatInboxDate(dateTime, now time.Time) string {
+	dateTime = dateTime.Local()
+	now = now.Local()
+	if dateTime.Year() == now.Year() && dateTime.Month() == now.Month() && dateTime.Day() == now.Day() {
+		return dateTime.Format("15:04")
+	}
+	return dateTime.Format("Jan 02")
 }
 
 func threadUnread(thread *gmail.Thread) bool {

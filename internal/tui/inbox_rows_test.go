@@ -78,7 +78,7 @@ func TestTruncatePreservesGraphemesAndDisplayWidth(t *testing.T) {
 }
 
 func TestMetadataUsesSharedHeadersAndLatestMessageDate(t *testing.T) {
-	newerTime := time.Now().Local().AddDate(0, 0, -1)
+	newerTime := time.Date(2000, time.August, 26, 12, 0, 0, 0, time.Local)
 	older := &gmail.Message{
 		InternalDate: newerTime.AddDate(0, 0, -1).UnixMilli(),
 		Payload:      &gmail.MessagePart{Headers: []gmail.Header{{Name: "From", Value: "Old <old@example.com>"}, {Name: "Subject", Value: "Old"}}},
@@ -92,37 +92,60 @@ func TestMetadataUsesSharedHeadersAndLatestMessageDate(t *testing.T) {
 	}
 
 	from, subject, date := metadata(&gmail.Thread{Messages: []*gmail.Message{older, newer}})
-	if from != "Example Commenter (via Google Docs) <comments-noreply@docs.google.com>" || subject != "Résumé for José" || date != newerTime.Format("Jan 02") {
+	if from != "Example Commenter (via Google Docs) <comments-noreply@docs.google.com>" || subject != "Résumé for José" || date != "Aug 26" {
 		t.Fatalf("metadata() = (%q, %q, %q), want newest decoded message", from, subject, date)
 	}
 }
 
-func TestMetadataFormatsTodayAsTimeAndOlderMessageAsDate(t *testing.T) {
-	today := time.Now().Local()
-	today = time.Date(today.Year(), today.Month(), today.Day(), 12, 34, 0, 0, time.Local)
-	older := today.AddDate(0, 0, -1)
-
-	todayThread := threadFixture(1, "")
-	todayThread.Messages[0].InternalDate = today.UnixMilli()
-	olderThread := threadFixture(2, "")
-	olderThread.Messages[0].InternalDate = older.UnixMilli()
-	_, _, todayDate := metadata(todayThread)
-	_, _, olderDate := metadata(olderThread)
-
-	if got, want := todayDate, "12:34"; got != want {
-		t.Fatalf("today metadata date = %q, want 24-hour time %q", got, want)
+func TestFormatInboxDateUsesLocalCalendarDay(t *testing.T) {
+	tests := []struct {
+		name string
+		date time.Time
+		now  time.Time
+		want string
+	}{
+		{
+			name: "midnight on same day",
+			date: time.Date(2026, time.August, 29, 0, 0, 0, 0, time.Local),
+			now:  time.Date(2026, time.August, 29, 0, 0, 0, 0, time.Local),
+			want: "00:00",
+		},
+		{
+			name: "23:59 on same day",
+			date: time.Date(2026, time.August, 29, 23, 59, 0, 0, time.Local),
+			now:  time.Date(2026, time.August, 29, 23, 59, 0, 0, time.Local),
+			want: "23:59",
+		},
+		{
+			name: "previous day at midnight",
+			date: time.Date(2026, time.August, 29, 23, 59, 0, 0, time.Local),
+			now:  time.Date(2026, time.August, 30, 0, 0, 0, 0, time.Local),
+			want: "Aug 29",
+		},
+		{
+			name: "midnight remains today at 23:59",
+			date: time.Date(2026, time.August, 30, 0, 0, 0, 0, time.Local),
+			now:  time.Date(2026, time.August, 30, 23, 59, 0, 0, time.Local),
+			want: "00:00",
+		},
 	}
-	if got, want := olderDate, older.Format("Jan 02"); got != want {
-		t.Fatalf("older metadata date = %q, want date %q", got, want)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := formatInboxDate(test.date, test.now); got != test.want {
+				t.Fatalf("formatInboxDate(%s, %s) = %q, want %q", test.date, test.now, got, test.want)
+			}
+		})
 	}
 }
 
 func TestRowsRenderSenderAndSubjectOnSeparateLines(t *testing.T) {
 	rows := testThreads(1)
+	now := time.Date(2026, time.August, 29, 23, 59, 0, 0, time.Local)
+	rows[0].Messages[0].InternalDate = time.Date(2026, time.August, 29, 12, 34, 0, 0, time.Local).UnixMilli()
 	rows[0].Messages[0].LabelIDs = append(rows[0].Messages[0].LabelIDs, "STARRED", "Label_7")
 	model, _ := newTestApp(rows)
-	_, _, date := metadata(rows[0])
-	rendered := ansi.Strip(model.list.rowsView(40, nil, 2))
+	_, _, date := metadataAt(rows[0], now)
+	rendered := ansi.Strip(model.list.rowsViewAt(40, nil, 2, now))
 	lines := strings.Split(rendered, "\n")
 	if len(lines) != 2 || !strings.Contains(lines[0], "Sender 1 <sender@example.test>") || strings.Contains(lines[0], date) || !strings.Contains(lines[1], "Subject 1") || !strings.HasSuffix(lines[1], date) || strings.Contains(lines[1], "STARRED") || strings.Contains(lines[1], "Label_7") {
 		t.Fatalf("two-line row = %#v", lines)
@@ -143,23 +166,20 @@ func TestNarrowRowsPreserveDateWhileTruncatingSubject(t *testing.T) {
 
 func TestRowsRightAlignMixedDateAndTimeColumn(t *testing.T) {
 	rows := testThreads(2)
-	today := time.Now().Local()
-	rows[0].Messages[0].InternalDate = time.Date(today.Year(), today.Month(), today.Day(), 12, 34, 0, 0, time.Local).UnixMilli()
-	rows[1].Messages[0].InternalDate = today.AddDate(0, 0, -1).UnixMilli()
+	now := time.Date(2026, time.August, 29, 23, 59, 0, 0, time.Local)
+	rows[0].Messages[0].InternalDate = time.Date(2026, time.August, 29, 12, 34, 0, 0, time.Local).UnixMilli()
+	rows[1].Messages[0].InternalDate = time.Date(2026, time.August, 28, 12, 34, 0, 0, time.Local).UnixMilli()
 	model, _ := newTestApp(rows)
 	const width = 50
 
-	lines := strings.Split(ansi.Strip(model.list.rowsView(width, nil, 6)), "\n")
-	for _, want := range []string{"12:34", today.AddDate(0, 0, -1).Format("Jan 02")} {
-		var line string
-		for _, candidate := range lines {
-			if strings.HasSuffix(candidate, want) {
-				line = candidate
-				break
-			}
-		}
-		if line == "" || lipgloss.Width(line) != width-1 {
-			t.Fatalf("date %q line = %q, want right-aligned in column %d", want, line, width-1)
+	lines := strings.Split(ansi.Strip(model.list.rowsViewAt(width, nil, 6, now)), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("rows = %#v, want two rows with one separator", lines)
+	}
+	for index, want := range []string{"12:34", "Aug 28"} {
+		sender, subject := lines[index*3], lines[index*3+1]
+		if strings.Contains(sender, want) || !strings.HasSuffix(subject, want) || lipgloss.Width(subject) != width-1 {
+			t.Fatalf("row %d = (sender=%q subject=%q), want date %q only at the subject line's right edge", index, sender, subject, want)
 		}
 	}
 }
