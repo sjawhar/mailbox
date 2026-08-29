@@ -100,7 +100,7 @@ bad) printf '%s\n' 'short' ;;
 chatter) printf 'chatter\nnoise\n' ;;
 malformed) printf '%s\n' '{"access_token": broken' ;;
 diag) printf '%s\n' 'diagnostic.command.token-1234567890'; printf 'grant expires in 7d\033]52;c;steal\a\n' >&2 ;;
-oversize) i=0; while [ "$i" -lt 17000 ]; do printf x; i=$((i + 1)); done ;;
+oversize) i=0; while [ "$i" -lt 17000 ]; do printf x; i=$((i + 1)); done; printf completed > "${PROBE_COMPLETED_FILE:-/dev/null}" ;;
 sleep) sleep 30 ;;
 descendant) (sleep 30 >&1 &) ;;
 *) echo "unknown stub mode" >&2; exit 64 ;;
@@ -114,8 +114,9 @@ printf '%s\n' 'write.command.token-value-1234567890'`)
 		config:   filepath.Join(stubs, "config.toml"),
 		leakFile: leak,
 		extra: map[string]string{
-			"PROBE_SPAWN_FILE": filepath.Join(stubs, "spawns"),
-			"PROBE_ARGV_FILE":  filepath.Join(stubs, "argv"),
+			"PROBE_SPAWN_FILE":     filepath.Join(stubs, "spawns"),
+			"PROBE_ARGV_FILE":      filepath.Join(stubs, "argv"),
+			"PROBE_COMPLETED_FILE": filepath.Join(stubs, "completed"),
 		},
 	}
 }
@@ -306,7 +307,7 @@ func TestRouting(t *testing.T) {
 		"command bare token bad charset is rejected":            "bad|bare token",
 		"command JSON-leading malformed output is a hard error": "malformed|decode __mint stdout",
 		"command chatter is rejected rather than laundered":     "chatter|bare token",
-		"command oversized stdout is rejected":                  "oversize|credential command",
+		"command oversized stdout is rejected":                  "oversize|output exceeded",
 	} {
 		name, fixture := name, fixture
 		t.Run(name, func(t *testing.T) {
@@ -320,6 +321,19 @@ func TestRouting(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("command capture cap stops helper before it completes", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
+		pe.extra["STUB_MODE"] = "oversize"
+		got := execProbe(t, pe)
+		if got.exit == 0 || !strings.Contains(got.stderr, "output exceeded") {
+			t.Fatalf("exit, stderr = %d, %q; want capture-cap failure", got.exit, got.stderr)
+		}
+		if _, err := os.Stat(pe.extra["PROBE_COMPLETED_FILE"]); !os.IsNotExist(err) {
+			t.Fatalf("helper ran after capture cap: %v", err)
+		}
+	})
 
 	t.Run("interactive command is structurally refused in batch and allowed in TUI", func(t *testing.T) {
 		config := readCommandConfig(readCmd+"read_interactive = true\n", "", 0)

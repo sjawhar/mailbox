@@ -155,6 +155,9 @@ func runCredentialCmd(ctx context.Context, cfg *Config, acct *AccountConfig, src
 
 	err := cmd.Run()
 	diagnostic := diagnosticFrom(stderr.String())
+	if stdout.err != nil {
+		return Acquired{}, credentialCommandError(src, diagnostic, stdout.err)
+	}
 	if err != nil {
 		if errors.Is(deadline.Err(), context.DeadlineExceeded) {
 			return Acquired{}, credentialCommandError(src, diagnostic, ErrCredentialTimeout)
@@ -260,11 +263,16 @@ func parseMintOutput(data []byte) (Token, error) {
 type cappedBuffer struct {
 	limit int
 	buf   bytes.Buffer
+	err   error
 }
 
 func (b *cappedBuffer) Write(data []byte) (int, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
 	if b.buf.Len()+len(data) > b.limit {
-		return 0, fmt.Errorf("output exceeded %d bytes", b.limit)
+		b.err = fmt.Errorf("output exceeded %d bytes", b.limit)
+		return 0, b.err
 	}
 	return b.buf.Write(data)
 }
