@@ -248,7 +248,7 @@ func (m app) labelPickerView() string {
 	if len(labels) == 0 {
 		lines = append(lines, "No matching labels.")
 	}
-	lines = append(lines, helpStyle.Render("j/k move · enter toggle · esc cancel"), m.statusView())
+	lines = append(lines, helpStyle.Render("↑/↓ move · enter toggle · esc cancel"), m.statusView())
 	return strings.Join(lines, "\n")
 }
 
@@ -258,10 +258,10 @@ func (m app) updateLabelKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.label.Blur()
 		m.view = listView
 		return m, nil
-	case keyDown, "down":
+	case "down":
 		m.labelCursor = min(len(m.filteredLabels())-1, m.labelCursor+1)
 		return m, nil
-	case keyUp, "up":
+	case "up":
 		m.labelCursor = max(0, m.labelCursor-1)
 		return m, nil
 	case "enter":
@@ -288,7 +288,7 @@ func (m app) filteredLabels() []gmail.Label {
 	filter := strings.ToLower(m.label.Value())
 	labels := make([]gmail.Label, 0, len(m.ctx.labels))
 	for _, label := range m.ctx.labels {
-		if strings.Contains(strings.ToLower(label.Name), filter) {
+		if label.Type == "user" && strings.Contains(strings.ToLower(label.Name), filter) {
 			labels = append(labels, label)
 		}
 	}
