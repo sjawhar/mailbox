@@ -137,9 +137,10 @@ func (cc *cmdCtx) actionResult(account string, source *auth.Source, action, verb
 		if err := writeJSON(cc.stdout, output); err != nil {
 			return cc.runtimeError(account, source, wrapError("write JSON", err))
 		}
-		return 0
+	} else {
+		fmt.Fprintf(cc.stdout, "%s %d thread(s)\n", verb, len(ids))
 	}
-	fmt.Fprintf(cc.stdout, "%s %d thread(s)\n", verb, len(ids))
+	cc.emitCredentialDiagnostic(source, auth.ClassWrite)
 	return 0
 }
 

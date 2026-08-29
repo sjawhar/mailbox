@@ -39,3 +39,11 @@ func TestMintSubcommandRejectsMissingEnv(t *testing.T) {
 		t.Fatalf("result = %d, %q, %q", code, stdout.String(), stderr.String())
 	}
 }
+
+func TestMintEnvFlagValidation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"__mint", "--env", "1BAD"}, &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "invalid __mint --env value") {
+		t.Fatalf("invalid env result = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+	}
+}

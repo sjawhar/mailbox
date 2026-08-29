@@ -71,9 +71,10 @@ func runAttachment(cc *cmdCtx, args []string) int {
 		if err := writeJSON(next.stdout, output); err != nil {
 			return next.runtimeError(account, source, wrapError("write JSON", err))
 		}
-		return 0
+	} else {
+		fmt.Fprintf(next.stdout, "saved %s\n", render.SanitizeTerminal(path))
 	}
-	fmt.Fprintf(next.stdout, "saved %s\n", render.SanitizeTerminal(path))
+	next.emitCredentialDiagnostic(source, auth.ClassRead)
 	return 0
 }
 
@@ -88,11 +89,12 @@ func (cc *cmdCtx) attachmentList(account string, source *auth.Source, threadID s
 		if err := writeJSON(cc.stdout, output); err != nil {
 			return cc.runtimeError(account, source, wrapError("write JSON", err))
 		}
-		return 0
+	} else {
+		fmt.Fprintln(cc.stdout, "n\tfilename\tmime\tsize")
+		for _, attachment := range attachments {
+			fmt.Fprintf(cc.stdout, "%d\t%s\t%s\t%d\n", attachment.N, render.SanitizeTerminal(attachment.Filename), render.SanitizeTerminal(attachment.MimeType), attachment.Size)
+		}
 	}
-	fmt.Fprintln(cc.stdout, "n\tfilename\tmime\tsize")
-	for _, attachment := range attachments {
-		fmt.Fprintf(cc.stdout, "%d\t%s\t%s\t%d\n", attachment.N, render.SanitizeTerminal(attachment.Filename), render.SanitizeTerminal(attachment.MimeType), attachment.Size)
-	}
+	cc.emitCredentialDiagnostic(source, auth.ClassRead)
 	return 0
 }

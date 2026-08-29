@@ -782,8 +782,13 @@ func TestAttachmentDefaultDanglingSymlinkDoesNotWriteTarget(t *testing.T) {
 func TestStatusJSON(t *testing.T) {
 	g := newGmailTestServer(t)
 	code, value, _ := runJSON(t, g, "status", "--json")
-	if code != 0 || value["route"] != "env-token" || value["ok"] != true {
-		t.Fatalf("status = (%d, %#v), want env-token status", code, value)
+	accounts, ok := value["accounts"].([]any)
+	if code != 0 || !ok || len(accounts) != 1 || value["ok"] != true {
+		t.Fatalf("status = (%d, %#v), want one successful account", code, value)
+	}
+	row := accounts[0].(map[string]any)
+	if row["name"] != "work" || row["route"] != "env-token" || row["pinned"] != true {
+		t.Fatalf("status account = %#v", row)
 	}
 }
 
@@ -793,7 +798,10 @@ func TestStatusHumanWritesAllStatusLinesToStdout(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("status exit = %d", code)
 	}
-	for _, line := range []string{"account: work", "route: env-token", "cache: absent", "profile: user@example.com"} {
+	for _, line := range []string{
+		"config: ", "account: work (default)", "read: env", "write: not configured",
+		"route: env-token", "cache: absent", "profile: user@example.com",
+	} {
 		if !strings.Contains(stdout, line) {
 			t.Errorf("stdout %q does not contain %q", stdout, line)
 		}
@@ -814,7 +822,7 @@ func TestStatusJSONWriteFailurePrintsDiagnostic(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("status exit = %d, want 1", code)
 	}
-	for _, line := range []string{"account: work", "route: env-token", "cache: absent", "mailbox: write JSON"} {
+	for _, line := range []string{"mailbox: write JSON"} {
 		if !strings.Contains(stderr.String(), line) {
 			t.Errorf("stderr %q does not contain %q", stderr.String(), line)
 		}

@@ -49,5 +49,6 @@ func runOpen(cc *cmdCtx, args []string) int {
 			return next.runtimeError(account, source, wrapError("write JSON", err))
 		}
 	}
+	next.emitCredentialDiagnostic(source, auth.ClassRead)
 	return 0
 }

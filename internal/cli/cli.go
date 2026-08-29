@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/refs"
+	"github.com/sjawhar/mailbox/internal/render"
 )
 
 type cmdCtx struct {
@@ -129,6 +130,10 @@ func (cc *cmdCtx) writeRuntimeError(account string, source *auth.Source, err err
 }
 
 func (cc *cmdCtx) runtimeErrorForScope(_ string, source *auth.Source, err error, write bool) int {
+	var credentialError *auth.NeedsCredentialError
+	if errors.As(err, &credentialError) {
+		return cc.needsCredential(credentialError)
+	}
 	fmt.Fprintf(cc.stderr, "mailbox: %v\n", err)
 	if source != nil && gmail.IsInsufficientScope(err) {
 		class, route, scope := auth.ClassRead, source.LastRoute(), "gmail.readonly"
@@ -145,6 +150,40 @@ func (cc *cmdCtx) runtimeErrorForScope(_ string, source *auth.Source, err error,
 		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ScopeHint(source.Account(), class, route, scope))
 	}
 	return 1
+}
+
+func (cc *cmdCtx) needsCredential(err *auth.NeedsCredentialError) int {
+	if !cc.json {
+		fmt.Fprintf(cc.stderr, "mailbox: %v\n", err)
+		return 1
+	}
+	output := struct {
+		Error struct {
+			Code      string `json:"code"`
+			Account   string `json:"account"`
+			ConfigKey string `json:"config_key"`
+			Config    string `json:"config"`
+		} `json:"error"`
+	}{}
+	output.Error.Code = "needs_" + string(err.Class) + "_credential"
+	output.Error.Account = err.Account
+	output.Error.ConfigKey = err.ConfigKey
+	output.Error.Config = err.ConfigPath
+	if writeErr := writeJSON(cc.stdout, output); writeErr != nil {
+		fmt.Fprintf(cc.stderr, "mailbox: write credential error JSON: %v\n", writeErr)
+	}
+	return 1
+}
+
+func (cc *cmdCtx) emitCredentialDiagnostic(source *auth.Source, class auth.Class) {
+	if source == nil {
+		return
+	}
+	diagnostic := render.SanitizeTerminal(source.TakeDiagnostic(class))
+	diagnostic = strings.TrimSpace(strings.NewReplacer("\r", " ", "\n", " ").Replace(diagnostic))
+	if diagnostic != "" {
+		fmt.Fprintf(cc.stderr, "mailbox: credential helper: %s\n", diagnostic)
+	}
 }
 
 func (cc *cmdCtx) retryWrite(source *auth.Source, action func() error) error {
