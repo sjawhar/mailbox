@@ -215,7 +215,7 @@ func (s *tmuxSession) findText(text string, timeout time.Duration) (string, bool
 		if strings.Contains(pane, text) {
 			return pane, true
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	return s.Capture(), false
 }
@@ -444,6 +444,7 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 		"STUB_TOKEN_URL":         gmail.token.URL,
 	}
 	session := newTmuxSession(t, env, binary)
+	cleanupCredentialHelper(t, session, approve)
 	session.WaitFor("Mailbox — work inbox", 15*time.Second)
 	session.WaitFor("PTY smoke", 15*time.Second)
 	assertNoSpawns(t, argvFile)
@@ -451,6 +452,7 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 	session.SendKeys("e")
 	attribution := "waiting for PTY approval; approve only this request — work write access via " + approve
 	session.WaitFor(attribution, 5*time.Second)
+	assertNoSpawns(t, argvFile)
 	session.WaitFor("archive completed", 15*time.Second)
 
 	lines := waitForFileLines(t, argvFile, time.Second)
@@ -511,9 +513,7 @@ write_label = "Q"
 		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
 		"MAILBOX_CACHE_DIR":      cache,
 	}, binary)
-	t.Cleanup(func() {
-		stopCredentialSession(session, approve)
-	})
+	cleanupCredentialHelper(t, session, approve)
 	session.WaitFor("Mailbox — work inbox", 15*time.Second)
 	session.WaitFor("PTY smoke", 15*time.Second)
 	return session, config, approve
@@ -532,6 +532,13 @@ func stopCredentialSession(session *tmuxSession, helper string) {
 		}
 	}
 	killCredentialProcessGroup(session.t, helper)
+}
+
+func cleanupCredentialHelper(t *testing.T, session *tmuxSession, helper string) {
+	t.Helper()
+	t.Cleanup(func() {
+		stopCredentialSession(session, helper)
+	})
 }
 
 func killCredentialProcessGroup(t *testing.T, helper string) {
@@ -582,6 +589,9 @@ func TestTUIQuitDeflectsThenTimeoutForceAbandons(t *testing.T) {
 		waitForFileLines(t, filepath.Join(filepath.Dir(approve), "approve-started"), 5*time.Second)
 		time.Sleep(200 * time.Millisecond)
 		writeAttributionPane, writeAttributionVisible := session.findText("work write access via", 2*time.Second)
+		if !writeAttributionVisible {
+			t.Fatalf("write attribution missing before first quit; pane:\n%s", writeAttributionPane)
+		}
 		session.SendKeys("q")
 		firstQuitPane, found := session.findText("waiting for unlock", 2*time.Second)
 		if !found || !strings.Contains(firstQuitPane, "press again to abandon") {
@@ -747,6 +757,7 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 		"MAILBOX_TOKEN_URL":      "http://127.0.0.1:1/decoy",
 		"STUB_TOKEN_URL":         gmail.token.URL,
 	}, binary)
+	cleanupCredentialHelper(t, session, approve)
 	session.WaitFor("PTY smoke", 15*time.Second)
 	session.SendKeys("e")
 	session.WaitFor("waiting for PTY approval", 5*time.Second)
@@ -817,12 +828,23 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 		"MAILBOX_CACHE_DIR":      cache,
 		"STUB_TOKEN_URL":         gmail.token.URL,
 	}, binary)
+	cleanupCredentialHelper(t, session, readApprove)
 	pane, found := session.findText("work read access via", 5*time.Second)
 	if !found || !strings.Contains(pane, filepath.Base(readApprove)) {
 		t.Fatalf("interactive-read attribution missing; helper spawns=%q; Gmail authorizations=%q; pane:\n%s", fileLines(t, readArgv), gmail.recordedReadAuths(), pane)
 	}
+	assertNoSpawns(t, readArgv)
 	assertNoSpawns(t, writeArgv)
 	session.WaitFor("PTY smoke", 15*time.Second)
+	readAuths := gmail.recordedReadAuths()
+	if len(readAuths) == 0 {
+		t.Fatal("interactive read unlock reached the inbox without a Gmail request")
+	}
+	for _, authorization := range readAuths {
+		if authorization != "Bearer pty-mut-tok" {
+			t.Fatalf("interactive read Gmail authorization = %q, want Bearer pty-mut-tok", authorization)
+		}
+	}
 	lines := waitForFileLines(t, readArgv, time.Second)
 	if len(lines) != 1 {
 		t.Fatalf("read helper spawns = %q, want one", lines)
