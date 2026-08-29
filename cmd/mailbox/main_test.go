@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"github.com/sjawhar/mailbox/internal/auth"
+	"os"
+	"strings"
+	"testing"
+)
 
 func TestBare(t *testing.T) {
 	t.Parallel()
@@ -55,5 +61,39 @@ func TestVersionRequested(t *testing.T) {
 				t.Errorf("versionRequested(%q) = %t, want %t", test.args, got, test.want)
 			}
 		})
+	}
+}
+
+func TestTopLevelFlagGrammarDrivesBareAndCLIPaths(t *testing.T) {
+	originalTUI := runTUI
+	t.Cleanup(func() { runTUI = originalTUI })
+	t.Setenv("MAILBOX_CONFIG", "")
+	if err := os.Unsetenv("MAILBOX_CONFIG"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MAILBOX_TOKEN", "test-token")
+	tuiCalls := 0
+	runTUI = func(_ *auth.Config, account *auth.AccountConfig) error {
+		tuiCalls++
+		if account.Name != "default" {
+			t.Fatalf("bare account = %q, want default", account.Name)
+		}
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := dispatch([]string{"--json"}, &stdout, &stderr, true); code != 0 || tuiCalls != 1 {
+		t.Fatalf("bare --json = (%d, calls=%d, stdout=%q, stderr=%q)", code, tuiCalls, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := dispatch([]string{"--json", "help"}, &stdout, &stderr, false); code != 0 || !strings.Contains(stdout.String(), "inbox") {
+		t.Fatalf("--json help = (%d, %q, %q)", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := dispatch([]string{"--not-a-real-flag"}, &stdout, &stderr, true); code != 2 {
+		t.Fatalf("invalid top-level flag = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
 	}
 }

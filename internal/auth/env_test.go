@@ -173,8 +173,8 @@ func TestCredentialChildEnvironPassthroughExactness(t *testing.T) {
 	}
 }
 
-// This fails if a non-positive, malformed, overflowing, or huge valid
-// inherited depth can evade the credential command recursion bound.
+// This fails if child-depth normalization changes the shared parser's handling
+// of non-positive, malformed, overflowing, or huge inherited sentinels.
 func TestCredentialChildEnvironClampsInvalidDepth(t *testing.T) {
 	cfg := envTestConfig(t)
 	work, ok := cfg.Account("work")

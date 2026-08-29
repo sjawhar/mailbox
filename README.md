@@ -178,6 +178,7 @@ writes nothing to disk, and does not load configuration.
 Move account and credential choices into `config.toml`:
 
 | Previous setting | Configuration equivalent |
+| --- | --- |
 | `--account` or an account-selection environment variable | Configured account names and `default_account`; use `--account NAME` or `MAILBOX_ACCOUNT` to select one for an invocation. |
 | Per-account read credential environment variable | `accounts.<name>.read_credential_env` |
 | Token-broker command or its executable-location environment variable | `accounts.<name>.read_credential_cmd` |

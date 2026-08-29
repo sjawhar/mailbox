@@ -72,19 +72,37 @@ func PrintHelp(output io.Writer) {
 	fmt.Fprintln(output, "configuration: $XDG_CONFIG_HOME/mailbox/config.toml (or ~/.config/mailbox/config.toml); MAILBOX_CONFIG overrides")
 }
 
+// TopLevelFlags are the shared grammar for one-shot and bare mailbox entry
+// points. The main package uses the same parser before deciding whether to
+// launch the TUI.
+type TopLevelFlags struct {
+	Account string
+	JSON    bool
+	Help    bool
+}
+
+// ParseTopLevel parses global flags and returns the remaining subcommand
+// arguments. The caller owns rendering parse errors.
+func ParseTopLevel(args []string) (TopLevelFlags, []string, error) {
+	flags := flag.NewFlagSet("mailbox", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	account := flags.String("account", "", "account name from config")
+	jsonOutput := flags.Bool("json", false, "machine output")
+	help := flags.Bool("help", false, "show help")
+	shortHelp := flags.Bool("h", false, "show help")
+	if err := flags.Parse(args); err != nil {
+		return TopLevelFlags{}, nil, err
+	}
+	return TopLevelFlags{Account: *account, JSON: *jsonOutput, Help: *help || *shortHelp}, flags.Args(), nil
+}
+
 // Run executes a one-shot command. args excludes the program name.
 func Run(args []string, stdout, stderr io.Writer) int {
-	global := flag.NewFlagSet("mailbox", flag.ContinueOnError)
-	global.SetOutput(io.Discard)
-	accountFlag := global.String("account", "", "account name from config")
-	jsonFlag := global.Bool("json", false, "machine output")
-	helpFlag := global.Bool("help", false, "show help")
-	shortHelpFlag := global.Bool("h", false, "show help")
-	if err := global.Parse(args); err != nil {
+	global, rest, err := ParseTopLevel(args)
+	if err != nil {
 		return failUsage(stderr, err)
 	}
-	rest := global.Args()
-	if *helpFlag || *shortHelpFlag {
+	if global.Help {
 		PrintHelp(stdout)
 		return 0
 	}
@@ -92,7 +110,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return failUsage(stderr, nil)
 	}
 
-	cc := &cmdCtx{accountFlag: *accountFlag, json: *jsonFlag, stdout: stdout, stderr: stderr, rawArgs: args}
+	cc := &cmdCtx{accountFlag: global.Account, json: global.JSON, stdout: stdout, stderr: stderr, rawArgs: args}
 	if rest[0] == "__mint" {
 		return runMint(cc, rest[1:])
 	}

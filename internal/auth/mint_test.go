@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,6 +156,59 @@ read_credential_env = "PERSONAL_READ"
 	}
 	if got, want := strings.TrimSpace(string(data)), "kept||||||"; got != want {
 		t.Fatalf("credential child environment = %q, want %q", got, want)
+	}
+}
+
+func TestCredentialCommandDepthSpawnGate(t *testing.T) {
+	dir := t.TempDir()
+	spawnFile := filepath.Join(dir, "spawned")
+	writeStub(t, dir, "depth-helper", `printf spawned > "$DEPTH_SPAWN_FILE"; printf '%s\n' depth.command.token-value-1234567890`)
+	acct := &AccountConfig{Name: "work"}
+	src := &CredentialSource{Class: ClassRead, Kind: SourceCmd, Argv: []string{"depth-helper"}, Argv0: filepath.Join(dir, "depth-helper"), ConfigKey: "accounts.work.read_credential_cmd"}
+	acct.Read = src
+	cfg := &Config{Path: "/tmp/config.toml", Accounts: []*AccountConfig{acct}, CredentialTimeout: defaultCredentialTimeout}
+	for _, test := range []struct {
+		name      string
+		depth     string
+		wantSpawn bool
+	}{
+		{name: "negative", depth: "-5", wantSpawn: true},
+		{name: "empty", depth: "", wantSpawn: true},
+		{name: "malformed", depth: "abc"},
+		{name: "maximum integer", depth: "9223372036854775807"},
+		{name: "overflowing", depth: "9999999999999999999999999999999999999999"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(credentialDepthEnvironment, test.depth)
+			t.Setenv("DEPTH_SPAWN_FILE", spawnFile)
+			if err := os.Remove(spawnFile); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			_, err := runCredentialCmd(context.Background(), cfg, acct, src)
+			if test.wantSpawn {
+				if err != nil {
+					t.Fatalf("runCredentialCmd error = %v", err)
+				}
+				if _, err := os.Stat(spawnFile); err != nil {
+					t.Fatalf("credential command did not spawn: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "recursion") {
+				t.Fatalf("runCredentialCmd error = %v, want loud recursion refusal", err)
+			}
+			if _, err := os.Stat(spawnFile); !os.IsNotExist(err) {
+				t.Fatalf("credential command spawned despite depth refusal: %v", err)
+			}
+		})
+	}
+}
+
+func TestCredentialCommandErrorFoldsDiagnosticToOneLine(t *testing.T) {
+	src := &CredentialSource{ConfigKey: "accounts.work.read_credential_cmd", Argv0: "/tmp/helper"}
+	err := credentialCommandError(src, diagnosticFrom("first helper line\nsecond helper line"), errors.New("helper failed"))
+	if strings.Contains(err.Error(), "\n") || !strings.Contains(err.Error(), "first helper line second helper line") {
+		t.Fatalf("credential command error = %q", err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"strconv"
@@ -36,11 +37,9 @@ func CredentialChildEnviron(cfg *Config, acct *AccountConfig) []string {
 		}
 	}
 
-	depth := 0
-	if current, ok := environmentValue(parent, credentialDepthEnvironment); ok {
-		if parsed, err := strconv.Atoi(current); err == nil && parsed > 0 {
-			depth = parsed
-		}
+	depth, err := credentialDepth(parent)
+	if err != nil {
+		depth = 0
 	}
 	if depth >= maximumCredentialChildDepth {
 		depth = maximumCredentialChildDepth - 1
@@ -99,6 +98,21 @@ func isConfiguredCredentialEnvironment(cfg *Config, name string) bool {
 		}
 	}
 	return false
+}
+
+func credentialDepth(env []string) (int, error) {
+	current, ok := environmentValue(env, credentialDepthEnvironment)
+	if !ok || current == "" {
+		return 0, nil
+	}
+	depth, err := strconv.Atoi(current)
+	if err != nil {
+		return 0, fmt.Errorf("parse credential depth: %w", err)
+	}
+	if depth < 0 {
+		return 0, nil
+	}
+	return depth, nil
 }
 
 func environmentValue(env []string, want string) (string, bool) {

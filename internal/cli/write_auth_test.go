@@ -136,7 +136,7 @@ func TestBatchWriteExecutesNonInteractiveConfiguredCommand(t *testing.T) {
 	}
 }
 
-func TestCLINeverSpawnsConfiguredCredentialCmds(t *testing.T) {
+func TestCLINeverSpawnsInteractiveCredentialCmds(t *testing.T) {
 	commands := [][]string{
 		{"archive", "t1"}, {"trash", "t1"}, {"mark", "read", "t1"},
 		{"label", "add", "Newsletters", "t1"},
