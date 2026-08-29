@@ -39,7 +39,7 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 		})
 	}
 	if err != nil {
-		return next.runtimeError(account, source, err)
+		return next.writeRuntimeError(account, source, err)
 	}
 	verb := "trashed"
 	if action == "archive" {
@@ -78,7 +78,7 @@ func runMark(cc *cmdCtx, args []string) int {
 	if err := next.retryWrite(source, func() error {
 		return client.ModifyThreads(context.Background(), ids, add, remove)
 	}); err != nil {
-		return next.runtimeError(account, source, err)
+		return next.writeRuntimeError(account, source, err)
 	}
 	return next.actionResult(account, source, "mark", "marked "+mode, ids)
 }
@@ -117,7 +117,7 @@ func runLabel(cc *cmdCtx, args []string) int {
 	if err := next.retryWrite(source, func() error {
 		return client.ModifyThreads(context.Background(), ids, add, remove)
 	}); err != nil {
-		return next.runtimeError(account, source, err)
+		return next.writeRuntimeError(account, source, err)
 	}
 	verb := "labeled"
 	if mode == "rm" {
@@ -135,7 +135,7 @@ func (cc *cmdCtx) actionResult(account string, source *auth.Source, action, verb
 			OK        bool     `json:"ok"`
 		}{Account: account, Action: action, ThreadIDs: ids, OK: true}
 		if err := writeJSON(cc.stdout, output); err != nil {
-			return cc.runtimeError(account, source, wrapError("write JSON", err))
+			return cc.writeRuntimeError(account, source, wrapError("write JSON", err))
 		}
 	} else {
 		fmt.Fprintf(cc.stdout, "%s %d thread(s)\n", verb, len(ids))

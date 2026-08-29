@@ -25,16 +25,69 @@ type cmdCtx struct {
 	acct        *auth.AccountConfig
 }
 
+type commandSpec struct {
+	name        string
+	description string
+	run         func(*cmdCtx, []string) int
+}
+
+func commandSpecs() []commandSpec {
+	return []commandSpec{
+		{name: "inbox", description: "list inbox threads", run: runInbox},
+		{name: "search", description: "search threads", run: runSearch},
+		{name: "read", description: "read a thread", run: runRead},
+		{name: "open", description: "open thread HTML in a browser", run: runOpen},
+		{name: "archive", description: "archive threads", run: func(cc *cmdCtx, args []string) int { return runBulk(cc, "archive", args) }},
+		{name: "trash", description: "move threads to trash", run: func(cc *cmdCtx, args []string) int { return runBulk(cc, "trash", args) }},
+		{name: "mark", description: "mark threads read or unread", run: runMark},
+		{name: "label", description: "add or remove a label", run: runLabel},
+		{name: "attachment", description: "list or save attachments", run: runAttachment},
+		{name: "status", description: "show configured account status", run: runStatus},
+	}
+}
+
+func commandByName(name string) (commandSpec, bool) {
+	for _, command := range commandSpecs() {
+		if command.name == name {
+			return command, true
+		}
+	}
+	return commandSpec{}, false
+}
+
+// PrintHelp writes the public command and configuration summary.
+func PrintHelp(output io.Writer) {
+	fmt.Fprintln(output, "usage: mailbox [--account NAME] [--json] <command> [options]")
+	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, "global flags:")
+	fmt.Fprintln(output, "  --account NAME   account name from config")
+	fmt.Fprintln(output, "  --json           machine-readable output")
+	fmt.Fprintln(output, "  --help, -h       show this help")
+	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, "commands:")
+	for _, command := range commandSpecs() {
+		fmt.Fprintf(output, "  %-12s %s\n", command.name, command.description)
+	}
+	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, "configuration: $XDG_CONFIG_HOME/mailbox/config.toml (or ~/.config/mailbox/config.toml); MAILBOX_CONFIG overrides")
+}
+
 // Run executes a one-shot command. args excludes the program name.
 func Run(args []string, stdout, stderr io.Writer) int {
 	global := flag.NewFlagSet("mailbox", flag.ContinueOnError)
 	global.SetOutput(io.Discard)
 	accountFlag := global.String("account", "", "account name from config")
 	jsonFlag := global.Bool("json", false, "machine output")
+	helpFlag := global.Bool("help", false, "show help")
+	shortHelpFlag := global.Bool("h", false, "show help")
 	if err := global.Parse(args); err != nil {
 		return failUsage(stderr, err)
 	}
 	rest := global.Args()
+	if *helpFlag || *shortHelpFlag {
+		PrintHelp(stdout)
+		return 0
+	}
 	if len(rest) == 0 {
 		return failUsage(stderr, nil)
 	}
@@ -43,37 +96,23 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	if rest[0] == "__mint" {
 		return runMint(cc, rest[1:])
 	}
-	cfg, err := auth.LoadConfig()
-	if err != nil {
-		fmt.Fprintf(stderr, "mailbox: %v\n", err)
-		return 1
+	if rest[0] == "help" {
+		PrintHelp(stdout)
+		return 0
 	}
-	cc.cfg = cfg
-
-	switch rest[0] {
-	case "inbox":
-		return runInbox(cc, rest[1:])
-	case "search":
-		return runSearch(cc, rest[1:])
-	case "read":
-		return runRead(cc, rest[1:])
-	case "open":
-		return runOpen(cc, rest[1:])
-	case "archive", "trash":
-		return runBulk(cc, rest[0], rest[1:])
-	case "mark":
-		return runMark(cc, rest[1:])
-	case "label":
-		return runLabel(cc, rest[1:])
-	case "attachment":
-		return runAttachment(cc, rest[1:])
-	case "status":
-		return runStatus(cc, rest[1:])
-	default:
+	command, found := commandByName(rest[0])
+	if !found {
 		fmt.Fprintf(stderr, "mailbox: unknown command %q\n", rest[0])
 		usage(stderr)
 		return 2
 	}
+	cfg, err := auth.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
+		return 1
+	}
+	cc.cfg = cfg
+	return command.run(cc, rest[1:])
 }
 
 func (cc *cmdCtx) flags(name string) (*flag.FlagSet, *string, *bool) {
@@ -130,11 +169,18 @@ func (cc *cmdCtx) writeRuntimeError(account string, source *auth.Source, err err
 }
 
 func (cc *cmdCtx) runtimeErrorForScope(_ string, source *auth.Source, err error, write bool) int {
+	if source != nil {
+		class := auth.ClassRead
+		if write {
+			class = auth.ClassWrite
+		}
+		cc.emitCredentialDiagnostic(source, class)
+	}
 	var credentialError *auth.NeedsCredentialError
 	if errors.As(err, &credentialError) {
 		return cc.needsCredential(credentialError)
 	}
-	fmt.Fprintf(cc.stderr, "mailbox: %v\n", err)
+	fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
 	if source != nil && gmail.IsInsufficientScope(err) {
 		class, route, scope := auth.ClassRead, source.LastRoute(), "gmail.readonly"
 		if write {
@@ -154,7 +200,7 @@ func (cc *cmdCtx) runtimeErrorForScope(_ string, source *auth.Source, err error,
 
 func (cc *cmdCtx) needsCredential(err *auth.NeedsCredentialError) int {
 	if !cc.json {
-		fmt.Fprintf(cc.stderr, "mailbox: %v\n", err)
+		fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
 		return 1
 	}
 	output := struct {
@@ -207,7 +253,7 @@ func failUsage(stderr io.Writer, err error) int {
 }
 
 func usage(stderr io.Writer) {
-	fmt.Fprintln(stderr, "usage: mailbox [--account NAME] [--json] <inbox|search|read|open|archive|trash|mark|label|attachment|status> [options]")
+	PrintHelp(stderr)
 }
 
 func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {

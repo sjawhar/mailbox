@@ -230,6 +230,18 @@ func TestLoadConfigTrustChecks(t *testing.T) {
 	})
 }
 
+func TestLoadConfigSanitizesExplicitPathErrors(t *testing.T) {
+	payload := "\x1b]52;c;clipboard\a"
+	t.Setenv("MAILBOX_CONFIG", filepath.Join(t.TempDir(), "missing-"+payload+".toml"))
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("LoadConfig unexpectedly accepted missing config")
+	}
+	if strings.Contains(err.Error(), "\x1b") || strings.Contains(err.Error(), "clipboard") {
+		t.Fatalf("config error leaked terminal control text: %q", err)
+	}
+}
+
 func TestLoadConfigAbsentDefaultPathIsNoConfigMode(t *testing.T) {
 	t.Setenv("MAILBOX_CONFIG", "")
 	os.Unsetenv("MAILBOX_CONFIG")
@@ -241,6 +253,11 @@ func TestLoadConfigAbsentDefaultPathIsNoConfigMode(t *testing.T) {
 	}
 	if !cfg.NoConfig() || len(cfg.Accounts) != 1 || cfg.Accounts[0].Name != "default" || cfg.Accounts[0].Read != nil {
 		t.Fatalf("cfg = %+v, want implicit sourceless default account", cfg)
+	}
+	wantPath := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "mailbox", "config.toml")
+	needs := credentialError(cfg, cfg.Accounts[0], ClassRead, nil, ReasonNoSource)
+	if !strings.Contains(needs.Error(), wantPath) {
+		t.Fatalf("no-config guidance = %q, want %q", needs, wantPath)
 	}
 }
 

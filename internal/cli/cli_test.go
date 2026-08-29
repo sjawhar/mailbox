@@ -923,6 +923,66 @@ func mustJSON(t *testing.T, value any) []byte {
 	return contents
 }
 
+func TestCLIStartupConfigErrorSanitizesTerminalText(t *testing.T) {
+	payload := "\x1b]52;c;clipboard\a"
+	t.Setenv("MAILBOX_CONFIG", filepath.Join(t.TempDir(), "missing-"+payload+".toml"))
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"inbox"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "\x1b") || strings.Contains(stderr.String(), "clipboard") {
+		t.Fatalf("CLI startup error leaked terminal control text: %q", stderr.String())
+	}
+}
+
+func TestCLICredentialCommandErrorSanitizesTerminalText(t *testing.T) {
+	payload := "\x1b]52;c;clipboard\a"
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "broken-"+payload)
+	if err := os.WriteFile(helper, []byte("#!/definitely/missing-interpreter\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.toml")
+	tomlHelper := strings.Replace(helper, payload, `\u001b]52;c;clipboard\u0007`, 1)
+	config := "default_account = \"work\"\n[accounts.work]\nread_credential_cmd = [\"" + tomlHelper + "\"]\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MAILBOX_CONFIG", configPath)
+	t.Setenv("MAILBOX_TOKEN", "")
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"inbox"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "\x1b") || strings.Contains(stderr.String(), "clipboard") {
+		t.Fatalf("CLI command error leaked terminal control text: %q", stderr.String())
+	}
+}
+
+func TestHelpListsEveryPublicCommand(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("Run(%q) exit = %d, stdout=%q, stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+		for _, command := range []string{"inbox", "search", "read", "open", "archive", "trash", "mark", "label", "attachment", "status"} {
+			if !strings.Contains(stdout.String(), command) {
+				t.Fatalf("help for %q omitted %q: %q", args, command, stdout.String())
+			}
+		}
+		if !strings.Contains(stdout.String(), "XDG_CONFIG_HOME") {
+			t.Fatalf("help for %q omitted config location: %q", args, stdout.String())
+		}
+	}
+}
+
+func TestInvalidGlobalFlagRemainsUsageError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--not-a-real-flag"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("invalid flag exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func googleError(status int, reason string) map[string]any {
 	return map[string]any{"error": map[string]any{"code": status, "message": "scope denied", "errors": []map[string]string{{"reason": reason}}}}
 }

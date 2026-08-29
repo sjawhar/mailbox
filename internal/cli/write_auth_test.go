@@ -484,7 +484,7 @@ func TestNoConfigTokenOnlyMode(t *testing.T) {
 	stderr.Reset()
 	t.Setenv("MAILBOX_TOKEN", "")
 	if code := Run([]string{"inbox"}, &stdout, &stderr); code != 1 ||
-		!strings.Contains(stderr.String(), "~/.config/mailbox/config.toml") ||
+		!strings.Contains(stderr.String(), filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "mailbox", "config.toml")) ||
 		!strings.Contains(stderr.String(), "README") {
 		t.Fatalf("no-config inbox = (%d, %q, %q)", code, stdout.String(), stderr.String())
 	}
@@ -697,6 +697,55 @@ read_interactive    = false
 	}
 	if got, want := stderr.String(), "mailbox: credential helper: grant expires soon reapprove tomorrow\n"; got != want {
 		t.Fatalf("credential diagnostic = %q, want %q", got, want)
+	}
+}
+
+func TestReadDiagnosticEmittedOnceWhenOperationFails(t *testing.T) {
+	g := newGmailTestServer(t)
+	g.readForbidden = true
+	rig := newConfigRig(t, g, `
+default_account = "work"
+[accounts.work]
+read_credential_cmd = ["record-read"]
+read_interactive = false
+`)
+	rig.replaceCommand(t, "record-read", "#!/bin/sh\nprintf '%s\\n' read-token-1234567890\nprintf '%s\\n' 'grant expires soon' >&2\n")
+	g.writeToken = "read-token-1234567890"
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"read", "t1", "--json"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("inbox exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := strings.Count(stderr.String(), "credential helper: grant expires soon"); got != 1 {
+		t.Fatalf("diagnostic count = %d, stderr=%q", got, stderr.String())
+	}
+}
+
+func TestWriteDiagnosticEmittedOnceOnSuccessAndFailure(t *testing.T) {
+	for _, failure := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "operation failure"}[failure], func(t *testing.T) {
+			g := newGmailTestServer(t)
+			g.forbidden = failure
+			rig := newConfigRig(t, g, `
+default_account = "work"
+[accounts.work]
+read_credential_env = "UNUSED_READ"
+write_credential_cmd = ["record-write"]
+write_interactive = false
+`)
+			rig.replaceCommand(t, "record-write", "#!/bin/sh\nprintf '%s\\n' write-token-1234567890\nprintf '%s\\n' 'approval complete' >&2\n")
+			g.writeToken = "write-token-1234567890"
+			var stdout, stderr bytes.Buffer
+			code := Run([]string{"archive", "t1"}, &stdout, &stderr)
+			if failure && code != 1 {
+				t.Fatalf("failure exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if !failure && code != 0 {
+				t.Fatalf("success exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if got := strings.Count(stderr.String(), "credential helper: approval complete"); got != 1 {
+				t.Fatalf("diagnostic count = %d, stderr=%q", got, stderr.String())
+			}
+		})
 	}
 }
 

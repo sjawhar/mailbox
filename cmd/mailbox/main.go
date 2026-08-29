@@ -27,8 +27,14 @@ func main() {
 	fs := flag.NewFlagSet("mailbox", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	accountFlag := fs.String("account", "", "account name from config")
+	helpFlag := fs.Bool("help", false, "show help")
+	shortHelpFlag := fs.Bool("h", false, "show help")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
+	}
+	if *helpFlag || *shortHelpFlag {
+		cli.PrintHelp(os.Stdout)
+		return
 	}
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
 		fmt.Fprintln(os.Stderr, "mailbox: no subcommand and stdout is not a terminal — agents use subcommands (try 'mailbox inbox --json')")

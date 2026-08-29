@@ -296,6 +296,9 @@ func credentialError(cfg *Config, acct *AccountConfig, class Class, src *Credent
 	configPath := ""
 	if cfg != nil {
 		configPath = cfg.Path
+		if cfg.NoConfig() {
+			configPath = cfg.DefaultPath
+		}
 	}
 	configKey := ""
 	if src != nil {

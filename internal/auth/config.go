@@ -23,6 +23,15 @@ const (
 	maxConfigBytes           = 262144
 )
 
+type sanitizedWrappedError struct {
+	message string
+	err     error
+}
+
+func (e *sanitizedWrappedError) Error() string { return e.message }
+
+func (e *sanitizedWrappedError) Unwrap() error { return e.err }
+
 var (
 	accountNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 	envVarNamePattern  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -74,6 +83,7 @@ type AccountConfig struct {
 
 type Config struct {
 	Path              string
+	DefaultPath       string
 	DefaultAccount    string
 	Accounts          []*AccountConfig
 	ScrubEnv          []string
@@ -110,7 +120,7 @@ func LoadConfig() (*Config, error) {
 	data, err := readTrustedConfig(path)
 	if err != nil {
 		if !explicit && errors.Is(err, os.ErrNotExist) {
-			return noConfig(), nil
+			return noConfig(path), nil
 		}
 		return nil, err
 	}
@@ -151,8 +161,9 @@ func configPath() (string, bool, error) {
 	return path, false, nil
 }
 
-func noConfig() *Config {
+func noConfig(defaultPath string) *Config {
 	return &Config{
+		DefaultPath:       defaultPath,
 		Accounts:          []*AccountConfig{{Name: "default"}},
 		CredentialTimeout: defaultCredentialTimeout,
 	}
@@ -161,7 +172,10 @@ func noConfig() *Config {
 func readTrustedConfig(path string) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, fmt.Errorf("config %s: open: %w", path, err)
+		return nil, &sanitizedWrappedError{
+			message: fmt.Sprintf("config %s: open: %s", safeForTerminal(path), safeForTerminal(err.Error())),
+			err:     err,
+		}
 	}
 	defer f.Close()
 
@@ -407,7 +421,8 @@ func compileCredentialSource(configPath, accountName string, class Class, enviro
 }
 
 func configError(path, format string, args ...any) error {
-	return fmt.Errorf("config %s: %s", path, fmt.Sprintf(format, args...))
+	message := safeForTerminal(fmt.Sprintf(format, args...))
+	return fmt.Errorf("config %s: %s", safeForTerminal(path), message)
 }
 
 func (c *Config) NoConfig() bool {
@@ -478,7 +493,7 @@ type NeedsCredentialError struct {
 
 func (e *NeedsCredentialError) Error() string {
 	if e.Reason == ReasonNoConfig {
-		return fmt.Sprintf("account %q has no usable %s credential: %s — create ~/.config/mailbox/config.toml (see README, Configuration) or set MAILBOX_TOKEN", safeForTerminal(e.Account), e.Class, e.Reason)
+		return fmt.Sprintf("account %q has no usable %s credential: %s — create %s (see README, Configuration) or set MAILBOX_TOKEN", safeForTerminal(e.Account), e.Class, e.Reason, safeForTerminal(e.ConfigPath))
 	}
 	return fmt.Sprintf("account %q has no usable %s credential: %s — %s (config: %s)", safeForTerminal(e.Account), e.Class, e.Reason, safeForTerminal(e.ConfigKey), safeForTerminal(e.ConfigPath))
 }
