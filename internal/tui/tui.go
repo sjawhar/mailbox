@@ -463,6 +463,8 @@ func (m *app) surfaceError(err error) {
 	}
 }
 
+// unlockStatusNote renders only the most recent queued diagnostic because the
+// TUI status surface is one line and cannot display multiple notes at once.
 func unlockStatusNote(value string) string {
 	value = strings.TrimSpace(render.SanitizeTerminal(value))
 	if newline := strings.LastIndex(value, "\n"); newline >= 0 {

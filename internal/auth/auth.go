@@ -37,7 +37,7 @@ type readFlight struct {
 	err   error
 }
 
-const maxPendingDiagnostics = 4
+const maxPendingDiagnostics = 32
 
 // Source resolves one configured account's read and write credentials. It is
 // safe for concurrent use and keeps each credential class independent.
@@ -240,8 +240,9 @@ func (s *Source) LastRoute() Route {
 	return s.lastRoute
 }
 
-// TakeDiagnostic returns and clears credential-command completion notes for one
-// class in acquisition order, ensuring a surface emits each note at most once.
+// TakeDiagnostic drains queued credential-command completion notes for one
+// class in acquisition order. The queue is bounded; when full, oldest notes
+// are dropped before newer completed acquisitions are appended.
 func (s *Source) TakeDiagnostic(class Class) string {
 	switch class {
 	case ClassRead:

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -118,13 +119,13 @@ func TestSourceCallerOverridePinsReadCacheAndAcquisition(t *testing.T) {
 	}
 }
 
-func TestDiagnosticQueueRetainsOnlyNewestBoundedEntries(t *testing.T) {
+func TestDiagnosticQueueBoundsOldestEntries(t *testing.T) {
 	var diagnostics []string
-	for _, diagnostic := range []string{"one", "two", "three", "four", "five"} {
-		diagnostics = appendDiagnostic(diagnostics, diagnostic)
+	for index := range maxPendingDiagnostics + 1 {
+		diagnostics = appendDiagnostic(diagnostics, fmt.Sprintf("diagnostic-%d", index))
 	}
-	if got, want := strings.Join(diagnostics, ","), "two,three,four,five"; got != want {
-		t.Fatalf("diagnostics = %q, want %q", got, want)
+	if len(diagnostics) != maxPendingDiagnostics || diagnostics[0] != "diagnostic-1" || diagnostics[len(diagnostics)-1] != fmt.Sprintf("diagnostic-%d", maxPendingDiagnostics) {
+		t.Fatalf("bounded diagnostics = %v", diagnostics)
 	}
 }
 

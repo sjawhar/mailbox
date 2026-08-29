@@ -735,7 +735,7 @@ read_interactive = false
 	}
 }
 
-func TestReadDiagnosticEmittedOnceWhenOperationFails(t *testing.T) {
+func TestReadDiagnosticDrainsWhenOperationFails(t *testing.T) {
 	g := newGmailTestServer(t)
 	g.readForbidden = true
 	rig := newConfigRig(t, g, `
@@ -755,7 +755,7 @@ read_interactive = false
 	}
 }
 
-func TestWriteDiagnosticEmittedOnceOnSuccessAndFailure(t *testing.T) {
+func TestWriteDiagnosticDrainsOnSuccessAndFailure(t *testing.T) {
 	for _, failure := range []bool{false, true} {
 		t.Run(map[bool]string{false: "success", true: "operation failure"}[failure], func(t *testing.T) {
 			g := newGmailTestServer(t)
