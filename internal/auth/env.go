@@ -7,7 +7,10 @@ import (
 	"strings"
 )
 
-const credentialDepthEnvironment = "MAILBOX_CREDENTIAL_DEPTH"
+const (
+	credentialDepthEnvironment  = "MAILBOX_CREDENTIAL_DEPTH"
+	maximumCredentialChildDepth = 2
+)
 
 // configScrubbedEnviron returns the parent environment minus the unconditional
 // deny set, configured credential environment variables, and configured scrub
@@ -41,6 +44,9 @@ func CredentialChildEnviron(cfg *Config, acct *AccountConfig) []string {
 		if parsed, err := strconv.Atoi(current); err == nil && parsed > 0 {
 			depth = parsed
 		}
+	}
+	if depth >= maximumCredentialChildDepth {
+		depth = maximumCredentialChildDepth - 1
 	}
 	return setEnvironmentValue(child, credentialDepthEnvironment, strconv.Itoa(depth+1))
 }

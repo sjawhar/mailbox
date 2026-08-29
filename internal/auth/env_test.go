@@ -173,21 +173,32 @@ func TestCredentialChildEnvironPassthroughExactness(t *testing.T) {
 	}
 }
 
-// This fails if a non-positive, malformed, or overflowing inherited recursion
-// depth survives instead of being treated as the initial invocation.
+// This fails if a non-positive, malformed, overflowing, or huge valid
+// inherited depth can evade the credential command recursion bound.
 func TestCredentialChildEnvironClampsInvalidDepth(t *testing.T) {
 	cfg := envTestConfig(t)
 	work, ok := cfg.Account("work")
 	if !ok {
 		t.Fatal("work account missing")
 	}
-	for _, current := range []string{"-5", "abc", "", "9999999999999999999999999999999999999999"} {
-		t.Run(current, func(t *testing.T) {
-			t.Setenv("MAILBOX_CREDENTIAL_DEPTH", current)
+	for _, test := range []struct {
+		name    string
+		current string
+		want    string
+	}{
+		{name: "negative", current: "-5", want: "1"},
+		{name: "malformed", current: "abc", want: "1"},
+		{name: "empty", current: "", want: "1"},
+		{name: "overflowing", current: "9999999999999999999999999999999999999999", want: "1"},
+		{name: "max-int64", current: "9223372036854775807", want: "2"},
+		{name: "max-int64-minus-one", current: "9223372036854775806", want: "2"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("MAILBOX_CREDENTIAL_DEPTH", test.current)
 
 			got := envNames(CredentialChildEnviron(cfg, work))
-			if got["MAILBOX_CREDENTIAL_DEPTH"] != "1" {
-				t.Fatalf("depth = %q, want 1 for invalid parent depth %q", got["MAILBOX_CREDENTIAL_DEPTH"], current)
+			if got["MAILBOX_CREDENTIAL_DEPTH"] != test.want {
+				t.Fatalf("depth = %q, want %s for parent depth %q", got["MAILBOX_CREDENTIAL_DEPTH"], test.want, test.current)
 			}
 		})
 	}
