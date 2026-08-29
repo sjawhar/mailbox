@@ -2,12 +2,12 @@ package auth
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sjawhar/mailbox/internal/paths"
@@ -84,8 +84,17 @@ func sourceFingerprint(account string, class Class, src *CredentialSource) strin
 	case SourceCmd:
 		identity = append([]string{src.Argv0}, src.Argv[1:]...)
 	}
-	preimage := strings.Join(append([]string{account, string(class), string(src.Kind)}, identity...), "\x00")
-	sum := sha256.Sum256([]byte(preimage))
+	components := append([]string{account, string(class), string(src.Kind)}, identity...)
+	preimageLen := 8 * len(components)
+	for _, component := range components {
+		preimageLen += len(component)
+	}
+	preimage := make([]byte, 0, preimageLen)
+	for _, component := range components {
+		preimage = binary.BigEndian.AppendUint64(preimage, uint64(len(component)))
+		preimage = append(preimage, component...)
+	}
+	sum := sha256.Sum256(preimage)
 	return hex.EncodeToString(sum[:])[:16]
 }
 

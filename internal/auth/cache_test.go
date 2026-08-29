@@ -31,7 +31,6 @@ func TestSourceFingerprintDistinguishesIdentity(t *testing.T) {
 	}{
 		{"account", sourceFingerprint("Work", ClassRead, testSource())},
 		{"class", sourceFingerprint("work", ClassWrite, testSource())},
-		{"kind", sourceFingerprint("work", ClassRead, &CredentialSource{Kind: SourceEnv, EnvVar: "V"})},
 		{"argv tail", sourceFingerprint("work", ClassRead, &CredentialSource{Kind: SourceCmd, Argv: []string{"my-token-helper", "--scopes", "y"}, Argv0: "/abs/my-token-helper"})},
 		{"argv0", sourceFingerprint("work", ClassRead, &CredentialSource{Kind: SourceCmd, Argv: []string{"my-token-helper", "--scopes", "x"}, Argv0: "/other/my-token-helper"})},
 	}
@@ -39,6 +38,33 @@ func TestSourceFingerprintDistinguishesIdentity(t *testing.T) {
 		if variant.fp == base {
 			t.Errorf("fingerprint ignores %s", variant.name)
 		}
+	}
+}
+func TestSourceFingerprintIncludesSourceKind(t *testing.T) {
+	env := sourceFingerprint("work", ClassRead, &CredentialSource{Kind: SourceEnv, EnvVar: "identity"})
+	cmd := sourceFingerprint("work", ClassRead, &CredentialSource{
+		Kind:  SourceCmd,
+		Argv:  []string{"identity"},
+		Argv0: "identity",
+	})
+	if env == cmd {
+		t.Fatal("fingerprint ignores source kind")
+	}
+}
+
+func TestSourceFingerprintFramesNULCommandArguments(t *testing.T) {
+	first := sourceFingerprint("work", ClassRead, &CredentialSource{
+		Kind:  SourceCmd,
+		Argv:  []string{"helper", "a", "b"},
+		Argv0: "/abs/helper",
+	})
+	second := sourceFingerprint("work", ClassRead, &CredentialSource{
+		Kind:  SourceCmd,
+		Argv:  []string{"helper", "a\x00b"},
+		Argv0: "/abs/helper",
+	})
+	if first == second {
+		t.Fatal("fingerprint collides for distinct NUL-containing command arguments")
 	}
 }
 
