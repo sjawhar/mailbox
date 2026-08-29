@@ -83,10 +83,10 @@ func TestTabSingleAccountIsNoOp(t *testing.T) {
 }
 
 func TestTabUnderEnvTokenIsNoOpWithNotice(t *testing.T) {
+	t.Setenv("MAILBOX_TOKEN", "test-token")
 	cfg := testConfigWithAccounts(testAccount("work"), testAccount("personal"))
 	api := &fakeAPI{threads: testThreads(1), attachments: make(map[string][]byte)}
 	model := newTestModelWithConfig(cfg, "work", api)
-	model.ctx.lastRoute = func() auth.Route { return auth.RouteEnvToken }
 	originalFactory := newAccountCtx
 	t.Cleanup(func() { newAccountCtx = originalFactory })
 	factoryCalls := 0

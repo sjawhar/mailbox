@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -141,6 +142,7 @@ type app struct {
 	unlockRetry        asyncOperation
 	unlockRetryGen     uint64
 	unlockRetryCommand func(asyncRequest) tea.Cmd
+	pinned             bool
 	generations        [asyncOperationCount]uint64
 }
 
@@ -170,6 +172,7 @@ func newApp(account *accountCtx) app {
 		viewport: viewport.New(layout.readerWidth, defaultViewportHeight),
 		spinner:  spinner.New(),
 		layout:   layout,
+		pinned:   os.Getenv("MAILBOX_TOKEN") != "",
 	}
 	model.generations[listOperation] = 1
 	model.unlockRetry = asyncOperationCount
@@ -440,9 +443,7 @@ func (m *app) clearListingStatus() {
 	m.clearStatus()
 }
 
-func (m app) usesEnvToken() bool {
-	return m.ctx != nil && m.ctx.lastRoute() == auth.RouteEnvToken
-}
+func (m app) usesEnvToken() bool { return m.pinned }
 
 func (m *app) surfaceError(err error) {
 	if !m.canSurfaceStatus() {

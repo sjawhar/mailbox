@@ -284,13 +284,14 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m app) startAction(action string, ids, add, remove []string, advance bool) (tea.Model, tea.Cmd) {
+	if m.unlocking {
+		m.deflectUnlock()
+		return m, nil
+	}
 	if len(ids) == 0 {
 		return m, nil
 	}
 	if m.pending != nil {
-		if m.deflectUnlock() {
-			return m, nil
-		}
 		return m, nil
 	}
 	m.pending = &pendingAction{action: action, ids: ids, add: add, remove: remove, advance: advance}
