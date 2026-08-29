@@ -48,7 +48,7 @@ func TestWideHelpIncludesSelectionBinding(t *testing.T) {
 	}
 }
 
-func TestPreviewScopeErrorIncludesProvisioningHint(t *testing.T) {
+func TestPreviewScopeErrorNamesConfiguredReadSource(t *testing.T) {
 	api := &fakeAPI{threads: testThreads(1), getErr: &gmail.APIError{Status: 403, Reason: "insufficientPermissions", Message: "scope missing"}}
 	model := newTestModel(api, "work")
 	model.setSize(120, model.layout.height)

@@ -65,8 +65,20 @@ type errMsg struct {
 
 func (message errMsg) requestRef() asyncRequest { return message.request }
 
+// unlockArmedMsg creates a status-to-spawn fence for credential commands.
+// Bubble Tea renders the attribution set by startUnlock before this message
+// dispatches the acquirer.
+type unlockArmedMsg struct {
+	request asyncRequest
+	class   auth.Class
+}
+
+func (message unlockArmedMsg) requestRef() asyncRequest { return message.request }
+
 type unlockDoneMsg struct {
 	request asyncRequest
+	class   auth.Class
+	note    string
 	err     error
 }
 
@@ -167,9 +179,10 @@ func trashThreadsCmd(request asyncRequest, ids []string) tea.Cmd {
 	}
 }
 
-func unlockCmd(request asyncRequest) tea.Cmd {
+func unlockCmd(request asyncRequest, class auth.Class, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
-		return unlockDoneMsg{request: request, err: request.ctx.unlock(context.Background())}
+		note, err := request.ctx.unlock(ctx, class)
+		return unlockDoneMsg{request: request, class: class, note: note, err: err}
 	}
 }
 

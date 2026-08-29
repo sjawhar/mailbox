@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -137,6 +138,26 @@ func testConfig() *auth.Config {
 	return &auth.Config{Accounts: []*auth.AccountConfig{work, personal}, DefaultAccount: "work"}
 }
 
+func testAccount(name string) *auth.AccountConfig {
+	return &auth.AccountConfig{
+		Name: name,
+		Read: &auth.CredentialSource{
+			Class:     auth.ClassRead,
+			Kind:      auth.SourceEnv,
+			EnvVar:    "TEST_" + strings.ToUpper(name),
+			ConfigKey: "accounts." + name + ".read_credential_env",
+		},
+	}
+}
+
+func testConfigWithAccounts(accounts ...*auth.AccountConfig) *auth.Config {
+	return &auth.Config{
+		Path:           "/tmp/mailbox/config.toml",
+		Accounts:       accounts,
+		DefaultAccount: accounts[0].Name,
+	}
+}
+
 func testAccountCtx(cfg *auth.Config, acct *auth.AccountConfig, api gmailAPI) *accountCtx {
 	return &accountCtx{
 		cfg:             cfg,
@@ -147,8 +168,10 @@ func testAccountCtx(cfg *auth.Config, acct *auth.AccountConfig, api gmailAPI) *a
 		writeRoute:      func() auth.Route { return auth.RouteCmd },
 		writeReady:      func() bool { return true },
 		invalidateWrite: func() {},
-		unlock:          func(context.Context) error { return nil },
-		takeWriteDiagnostic: func() string {
+		unlock: func(context.Context, auth.Class) (string, error) {
+			return "", nil
+		},
+		takeDiagnostic: func(auth.Class) string {
 			return ""
 		},
 	}
@@ -162,6 +185,16 @@ func newTestApp(rows []*gmail.Thread) (app, *fakeAPI) {
 func newTestModel(api gmailAPI, account string) app {
 	cfg := testConfig()
 	acct, _ := cfg.Account(account)
+	model := newApp(testAccountCtx(cfg, acct, api))
+	model.list.rows = append([]*gmail.Thread(nil), testAPIThreads(api)...)
+	return model
+}
+
+func newTestModelWithConfig(cfg *auth.Config, account string, api gmailAPI) app {
+	acct, ok := cfg.Account(account)
+	if !ok {
+		panic("test account missing: " + account)
+	}
 	model := newApp(testAccountCtx(cfg, acct, api))
 	model.list.rows = append([]*gmail.Thread(nil), testAPIThreads(api)...)
 	return model

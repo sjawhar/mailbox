@@ -127,12 +127,13 @@ func (m app) inboxView() string {
 }
 
 func (m inboxModel) title(account string, envToken bool) string {
+	account = render.SanitizeTerminal(account)
 	title := fmt.Sprintf("Mailbox — %s inbox", account)
 	if m.query != "" {
 		title = fmt.Sprintf("Mailbox — %s search: %s", account, m.query)
 	}
 	if envToken {
-		return title + " [env token]"
+		return title + " [pinned]"
 	}
 	return title
 }
