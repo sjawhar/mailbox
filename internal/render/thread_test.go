@@ -22,16 +22,16 @@ func TestRenderThread(t *testing.T) {
 		t.Fatalf("RenderThread() ID = %q, want thread-render", got.ID)
 	}
 	if got.Subject != "Quarterly report" {
-		t.Fatalf("RenderThread() Subject = %q, want first message subject", got.Subject)
+		t.Fatalf("RenderThread() Subject = %q, want oldest message subject", got.Subject)
 	}
-	if len(got.Messages) != 2 || got.Messages[0].ID != first.ID || got.Messages[1].ID != second.ID {
-		t.Fatalf("RenderThread() messages = %#v, want oldest-to-newest %q then %q", got.Messages, first.ID, second.ID)
+	if len(got.Messages) != 2 || got.Messages[0].ID != second.ID || got.Messages[1].ID != first.ID {
+		t.Fatalf("RenderThread() messages = %#v, want newest-to-oldest %q then %q", got.Messages, second.ID, first.ID)
 	}
-	if got.Messages[0].Date.Location() != time.UTC || !got.Messages[0].Date.Equal(time.UnixMilli(first.InternalDate).UTC()) {
-		t.Fatalf("first rendered date = %v, want UTC InternalDate", got.Messages[0].Date)
+	if got.Messages[0].Date.Location() != time.UTC || !got.Messages[0].Date.Equal(time.UnixMilli(second.InternalDate).UTC()) {
+		t.Fatalf("first rendered date = %v, want newest UTC InternalDate", got.Messages[0].Date)
 	}
 
-	wantParticipants := []string{"Reports <reports@corp.example>", "notifications@github.com"}
+	wantParticipants := []string{"notifications@github.com", "Reports <reports@corp.example>"}
 	if !reflect.DeepEqual(got.Participants, wantParticipants) {
 		t.Fatalf("RenderThread() Participants = %#v, want %#v", got.Participants, wantParticipants)
 	}
@@ -39,16 +39,18 @@ func TestRenderThread(t *testing.T) {
 	if len(got.Messages[0].Links) != 1 || len(got.Messages[1].Links) != 1 {
 		t.Fatalf("RenderThread() links = %#v, want one link per message", got.Messages)
 	}
-	if got.Messages[1].Links[0].N != len(got.Messages[0].Links)+1 {
-		t.Fatalf("second message link number = %d, want thread-wide continuation after %d first-message links", got.Messages[1].Links[0].N, len(got.Messages[0].Links))
+	for index, link := range got.AllLinks() {
+		if want := index + 1; link.N != want {
+			t.Fatalf("AllLinks()[%d].N = %d, want %d in render order", index, link.N, want)
+		}
 	}
-	wantLinks := append(append([]Link(nil), got.Messages[0].Links...), got.Messages[1].Links...)
-	if !reflect.DeepEqual(got.AllLinks(), wantLinks) {
-		t.Fatalf("AllLinks() = %#v, want %#v", got.AllLinks(), wantLinks)
+	markdown := got.Markdown()
+	if newest, oldest := strings.Index(markdown, "notifications@github.com"), strings.Index(markdown, "Reports <reports@corp.example>"); newest < 0 || oldest < 0 || newest > oldest {
+		t.Fatalf("Markdown() = %q, want newest message before oldest", markdown)
 	}
 
-	if len(got.Messages[0].Attachments) != 1 || got.Messages[0].Attachments[0].N != 1 {
-		t.Fatalf("first message attachments = %#v, want thread-wide attachment N 1", got.Messages[0].Attachments)
+	if len(got.Messages[1].Attachments) != 1 || got.Messages[1].Attachments[0].N != 1 {
+		t.Fatalf("oldest message attachments = %#v, want thread-wide attachment N 1", got.Messages[1].Attachments)
 	}
 	assertRenderedThreadJSONShape(t, got)
 }
@@ -187,11 +189,11 @@ func assertRenderedThreadJSONShape(t *testing.T, thread *RenderedThread) {
 	}
 
 	var attachments []map[string]json.RawMessage
-	if err := json.Unmarshal(messages[0]["attachments"], &attachments); err != nil {
+	if err := json.Unmarshal(messages[1]["attachments"], &attachments); err != nil {
 		t.Fatal(err)
 	}
 	if len(attachments) != 1 {
-		t.Fatalf("JSON attachments = %s, want one attachment", messages[0]["attachments"])
+		t.Fatalf("JSON attachments = %s, want one attachment", messages[1]["attachments"])
 	}
 	assertExactJSONKeys(t, attachments[0], []string{"n", "filename", "mime", "size"})
 }

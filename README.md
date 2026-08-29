@@ -36,7 +36,7 @@ Run `mailbox` without a subcommand in a terminal to open the interactive TUI. Fo
 | --- | --- |
 | `mailbox inbox [--unread] [--max N]` | List inbox threads. `--unread` limits results to unread threads; `--max` defaults to 25 (range 1–500). |
 | `mailbox search <query> [--max N]` | Search with Gmail query syntax. |
-| `mailbox read <ref> [--full]` | Render a thread; `--full` retains quoted history. |
+| `mailbox read <ref> [--full]` | Render a thread newest first; `--full` retains quoted history. |
 | `mailbox open <ref>` | Open the newest HTML message in the system browser. |
 | `mailbox archive <ref>...` | Remove `INBOX` from one or more threads. |
 | `mailbox trash <ref>...` | Move one or more threads to Trash. |
