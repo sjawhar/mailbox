@@ -53,6 +53,29 @@ func TestPreviewInteractiveReadFailureStartsUnlock(t *testing.T) {
 	}
 }
 
+func TestInFlightReadUnlockDeflectsListRequestsWithoutReplacingOwnership(t *testing.T) {
+	model, _, recorder, _ := newUnlockApp(2)
+	ctx, cancel, class := context.Background(), func() {}, auth.ClassRead
+	model.unlocking = true
+	model.unlockCtx = ctx
+	model.unlockCancel = cancel
+	model.unlockClass = class
+
+	for _, pressed := range []string{"j", "k", keyRefresh} {
+		next, command := update(t, model, key(pressed))
+		if command != nil {
+			t.Fatalf("%q started a command during an unlock", pressed)
+		}
+		if next.unlockCtx != ctx || next.unlockCancel == nil || next.unlockClass != class || !next.unlocking {
+			t.Fatalf("%q replaced unlock ownership: %#v", pressed, next)
+		}
+		model = next
+	}
+	if recorder.calls != 0 {
+		t.Fatalf("competing list input invoked %d helpers", recorder.calls)
+	}
+}
+
 func TestReadUnlockReissuesAttachmentAndHTMLOpen(t *testing.T) {
 	needsCredential := func(model app) *auth.NeedsCredentialError {
 		return &auth.NeedsCredentialError{

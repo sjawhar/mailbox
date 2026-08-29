@@ -222,6 +222,10 @@ func labelChips(thread *gmail.Thread, labelNameByID map[string]string) string {
 }
 
 func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.unlocking {
+		m.deflectUnlock()
+		return m, nil
+	}
 	switch message.String() {
 	case keyDown, "down":
 		m.list.move(1)

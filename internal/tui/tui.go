@@ -652,6 +652,10 @@ func (m app) startUnlock() (tea.Model, tea.Cmd) {
 const unlockRenderFence = 50 * time.Millisecond
 
 func (m app) startClassUnlock(class auth.Class, retry asyncOperation) (tea.Model, tea.Cmd) {
+	if m.unlocking {
+		m.deflectUnlock()
+		return m, nil
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.unlocking = true
 	m.unlockCtx = ctx
