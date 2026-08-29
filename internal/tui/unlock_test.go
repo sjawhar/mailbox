@@ -5,8 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sjawhar/mailbox/internal/auth"
@@ -14,9 +17,172 @@ import (
 )
 
 type unlockRecorder struct {
-	calls int
-	err   error
-	note  string
+	calls   int
+	classes []auth.Class
+	err     error
+	note    string
+}
+
+func TestPreviewInteractiveReadFailureStartsUnlock(t *testing.T) {
+	model, api, _, _ := newUnlockApp(1)
+	model.ctx.acct.Read = &auth.CredentialSource{
+		Class:       auth.ClassRead,
+		Kind:        auth.SourceCmd,
+		Argv:        []string{"/abs/read-approver"},
+		Argv0:       "/abs/read-approver",
+		Interactive: true,
+		ConfigKey:   "accounts.work.read_credential_cmd",
+	}
+	needsCredential := &auth.NeedsCredentialError{
+		Account:    "work",
+		Class:      auth.ClassRead,
+		ConfigKey:  "accounts.work.read_credential_cmd",
+		ConfigPath: model.cfg.Path,
+		Reason:     auth.ReasonInteractive,
+	}
+	api.getErr = needsCredential
+	model.setSize(160, 45)
+	model.preview.requestedID = model.list.rows[0].ID
+	model.preview.loading = true
+	request := model.beginRequest(previewOperation)
+	model, fetch := update(t, model, previewRequestMsg{request: request, threadID: model.list.rows[0].ID})
+	model, fence := update(t, model, runCmd(t, fetch))
+
+	if !model.unlocking || fence == nil {
+		t.Fatalf("preview credential failure = unlocking:%t fence:%v", model.unlocking, fence != nil)
+	}
+}
+
+func TestReadUnlockReissuesAttachmentAndHTMLOpen(t *testing.T) {
+	needsCredential := func(model app) *auth.NeedsCredentialError {
+		return &auth.NeedsCredentialError{
+			Account:    "work",
+			Class:      auth.ClassRead,
+			ConfigKey:  "accounts.work.read_credential_cmd",
+			ConfigPath: model.cfg.Path,
+			Reason:     auth.ReasonInteractive,
+		}
+	}
+
+	for _, test := range []struct {
+		name      string
+		operation asyncOperation
+	}{
+		{name: "attachment", operation: attachmentOperation},
+		{name: "html open", operation: openOperation},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model, _, _, _ := newUnlockApp(1)
+			retries := 0
+			request := model.beginRequest(test.operation)
+			model, fence := update(t, model, errMsg{
+				request: request,
+				err:     needsCredential(model),
+				retry: func(request asyncRequest) tea.Cmd {
+					return func() tea.Msg {
+						retries++
+						if test.operation == attachmentOperation {
+							return attachmentSavedMsg{request: request, path: "/tmp/report.pdf"}
+						}
+						return openedMsg{request: request, target: "/tmp/message.html", clearLoading: true}
+					}
+				},
+			})
+			model, command := resolveUnlock(t, model, fence)
+			model, _ = update(t, model, runCmd(t, command))
+			if retries != 1 {
+				t.Fatalf("%s retries = %d, want 1", test.name, retries)
+			}
+		})
+	}
+}
+
+func TestUnlockForceAbandonKillsProcessGroup(t *testing.T) {
+	directory := t.TempDir()
+	parentPath := filepath.Join(directory, "parent")
+	childPath := filepath.Join(directory, "child")
+	script := filepath.Join(directory, "hang")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\n(sleep 30) &\nprintf '%s' \"$!\" > \"$2\"\nwait\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MAILBOX_TOKEN", "")
+	acct := testAccount("work")
+	acct.Write = &auth.CredentialSource{
+		Class:       auth.ClassWrite,
+		Kind:        auth.SourceCmd,
+		Argv:        []string{script, parentPath, childPath},
+		Argv0:       script,
+		Interactive: true,
+		ConfigKey:   "accounts.work.write_credential_cmd",
+	}
+	cfg := testConfigWithAccounts(acct)
+	ctx, err := newAccountCtx(cfg, acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx.api = &fakeAPI{threads: testThreads(1), attachments: make(map[string][]byte)}
+	model := newApp(ctx)
+	model.list.rows = testThreads(1)
+	model, fence := update(t, model, key("e"))
+	armed := runCmd(t, fence)
+	model, acquire := update(t, model, armed)
+	batch, ok := acquire().(tea.BatchMsg)
+	if !ok || len(batch) == 0 {
+		t.Fatalf("unlock command = %T, want tea.BatchMsg", acquire())
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- batch[0]() }()
+	parent := waitForPID(t, parentPath)
+	child := waitForPID(t, childPath)
+	defer syscall.Kill(-parent, syscall.SIGKILL)
+
+	model, _ = update(t, model, key("q"))
+	model, quit := update(t, model, key("q"))
+	if quit == nil {
+		t.Fatal("second quit did not abandon unlock")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("unlock command did not observe the cancel context")
+	}
+	for _, pid := range []int{parent, child} {
+		waitForStoppedProcess(t, pid)
+	}
+}
+
+func waitForPID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		value, err := os.ReadFile(path)
+		if err == nil {
+			pid, parseErr := strconv.Atoi(strings.TrimSpace(string(value)))
+			if parseErr == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("credential helper did not write PID at %s", path)
+	return 0
+}
+
+func waitForStoppedProcess(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		stat, readErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+		if readErr == nil && strings.Contains(string(stat), ") Z ") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("credential process %d survived abandon", pid)
 }
 
 func newUnlockApp(rows int) (app, *fakeAPI, *unlockRecorder, *int) {
@@ -32,6 +198,7 @@ func newUnlockApp(rows int) (app, *fakeAPI, *unlockRecorder, *int) {
 	ctx.invalidateWrite = func() { invalidations++ }
 	ctx.unlock = func(_ context.Context, class auth.Class) (string, error) {
 		recorder.calls++
+		recorder.classes = append(recorder.classes, class)
 		if recorder.err == nil && class == auth.ClassWrite {
 			ready = true
 		}
@@ -423,7 +590,10 @@ func TestWriteUnlockRequiresKeypress(t *testing.T) {
 	}
 
 	initial := runCmd(t, model.Init())
-	model, _ = update(t, model, initial)
+	model, launch := update(t, model, initial)
+	if launch != nil {
+		model, _ = update(t, model, runCmd(t, launch))
+	}
 	_ = model.View()
 	if recorder.calls != 0 || model.unlocking {
 		t.Fatalf("non-keypress path started write unlock: calls=%d unlocking=%t", recorder.calls, model.unlocking)
@@ -553,8 +723,8 @@ func TestReadUnlockStatusRendersBeforeAcquisition(t *testing.T) {
 	}
 	model, acquire := update(t, model, armed)
 	_ = runCmd(t, acquire)
-	if recorder.calls != 1 {
-		t.Fatalf("read unlock acquisitions = %d, want 1 after armed message", recorder.calls)
+	if recorder.calls != 1 || len(recorder.classes) != 1 || recorder.classes[0] != auth.ClassRead {
+		t.Fatalf("read unlock calls/classes = %d/%v, want 1/%s", recorder.calls, recorder.classes, auth.ClassRead)
 	}
 }
 

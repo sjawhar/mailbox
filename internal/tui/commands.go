@@ -61,6 +61,7 @@ func (message actionDoneMsg) requestRef() asyncRequest { return message.request 
 type errMsg struct {
 	request asyncRequest
 	err     error
+	retry   func(asyncRequest) tea.Cmd
 }
 
 func (message errMsg) requestRef() asyncRequest { return message.request }
@@ -208,7 +209,13 @@ func saveAttachmentCmd(request asyncRequest, attachment render.Attachment) tea.C
 		}
 		contents, err := request.ctx.api.GetAttachment(context.Background(), attachment.MessageID, attachment.AttachmentID)
 		if err != nil {
-			return errMsg{request: request, err: err}
+			return errMsg{
+				request: request,
+				err:     err,
+				retry: func(retry asyncRequest) tea.Cmd {
+					return saveAttachmentCmd(retry, attachment)
+				},
+			}
 		}
 		if err := render.WriteAttachment(path, contents, overwrite); err != nil {
 			if errors.Is(err, os.ErrExist) {
@@ -233,7 +240,13 @@ func openHTMLCmd(request asyncRequest, thread *gmail.Thread) tea.Cmd {
 	return func() tea.Msg {
 		_, path, err := render.WriteHTMLBackstop(context.Background(), thread, request.ctx.api.GetAttachment)
 		if err != nil {
-			return errMsg{request: request, err: err}
+			return errMsg{
+				request: request,
+				err:     err,
+				retry: func(retry asyncRequest) tea.Cmd {
+					return openHTMLCmd(retry, thread)
+				},
+			}
 		}
 		if err := openURL(path, auth.ScrubbedEnviron(request.ctx.cfg)); err != nil {
 			return errMsg{request: request, err: err}

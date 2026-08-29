@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -127,19 +128,20 @@ type app struct {
 	viewport    viewport.Model
 	spinner     spinner.Model
 
-	status         string
-	statusError    bool
-	statusNote     string
-	loading        bool
-	layout         layoutMetrics
-	pending        *pendingAction
-	unlocking      bool
-	unlockCtx      context.Context
-	unlockCancel   context.CancelFunc
-	unlockClass    auth.Class
-	unlockRetry    asyncOperation
-	unlockRetryGen uint64
-	generations    [asyncOperationCount]uint64
+	status             string
+	statusError        bool
+	statusNote         string
+	loading            bool
+	layout             layoutMetrics
+	pending            *pendingAction
+	unlocking          bool
+	unlockCtx          context.Context
+	unlockCancel       context.CancelFunc
+	unlockClass        auth.Class
+	unlockRetry        asyncOperation
+	unlockRetryGen     uint64
+	unlockRetryCommand func(asyncRequest) tea.Cmd
+	generations        [asyncOperationCount]uint64
 }
 
 const envTokenIdentityNotice = "MAILBOX_TOKEN pins one identity for all accounts"
@@ -292,6 +294,10 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 			return m, nil
 		}
 		m.preview.loading = false
+		if updated, command, handled := m.handleReadUnlock(message.request, message.err, nil); handled {
+			m = updated.(app)
+			return m, command
+		}
 		m.preview.err = render.SanitizeTerminal(message.err.Error())
 		m.surfaceError(message.err)
 		return m, nil
@@ -376,17 +382,9 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		if m.unlocking {
 			return m, nil
 		}
-		var needsCredential *auth.NeedsCredentialError
-		if errors.As(message.err, &needsCredential) &&
-			needsCredential.Class == auth.ClassRead &&
-			needsCredential.Reason == auth.ReasonInteractive {
-			if m.isUnlockRetry(message.request) {
-				m.loading = false
-				m.pending = nil
-				m.surfaceError(message.err)
-				return m, nil
-			}
-			return m.startClassUnlock(auth.ClassRead, message.request.operation)
+		if updated, command, handled := m.handleReadUnlock(message.request, message.err, message.retry); handled {
+			m = updated.(app)
+			return m, command
 		}
 		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pending.retried {
 			m.pending.retried = true
@@ -642,6 +640,14 @@ func (m app) startUnlock() (tea.Model, tea.Cmd) {
 	return m.startClassUnlock(auth.ClassWrite, actionOperation)
 }
 
+// unlockRenderFence waits one-plus Bubble Tea frame intervals before arming an
+// interactive credential command. It never spawns a credential command or
+// refreshes automatically: it only delays a human-caused unlock. Bubble Tea has
+// no render acknowledgement, so this proves a frame interval elapsed with the
+// attribution in View, not that bytes reached a terminal. In practice helper
+// spawn, IPC, decrypt, and hardware approval take orders of magnitude longer.
+const unlockRenderFence = 50 * time.Millisecond
+
 func (m app) startClassUnlock(class auth.Class, retry asyncOperation) (tea.Model, tea.Cmd) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.unlocking = true
@@ -650,13 +656,16 @@ func (m app) startClassUnlock(class auth.Class, retry asyncOperation) (tea.Model
 	m.unlockClass = class
 	m.unlockRetry = retry
 	m.unlockRetryGen = 0
+	if class != auth.ClassRead {
+		m.unlockRetryCommand = nil
+	}
 	m.loading = true
 	m.status = m.unlockStatus(class)
 	m.statusError = false
 	request := m.beginRequest(unlockOperation)
-	return m, func() tea.Msg {
+	return m, tea.Tick(unlockRenderFence, func(time.Time) tea.Msg {
 		return unlockArmedMsg{request: request, class: class}
-	}
+	})
 }
 
 func (m app) unlockStatus(class auth.Class) string {
@@ -711,16 +720,15 @@ func (m app) retryUnlockedRead() (tea.Model, tea.Cmd) {
 		request := m.beginRequest(labelOperation)
 		m.unlockRetryGen = request.generation
 		return m, m.loadingCmd(listLabelsCmd(request))
-	case actionOperation:
-		if m.pending == nil {
+	case attachmentOperation, openOperation:
+		if m.unlockRetryCommand == nil {
 			m.loading = false
 			m.clearUnlockRetry()
 			return m, nil
 		}
-		model, command := m.dispatchPending()
-		updated := model.(app)
-		updated.unlockRetryGen = updated.generations[actionOperation]
-		return updated, command
+		request := m.beginRequest(m.unlockRetry)
+		m.unlockRetryGen = request.generation
+		return m, m.loadingCmd(m.unlockRetryCommand(request))
 	default:
 		m.loading = false
 		m.clearUnlockRetry()
@@ -738,6 +746,7 @@ func (m app) isUnlockRetry(request asyncRequest) bool {
 func (m *app) clearUnlockRetry() {
 	m.unlockRetry = asyncOperationCount
 	m.unlockRetryGen = 0
+	m.unlockRetryCommand = nil
 }
 
 func retryResult(message tea.Msg) (complete, success bool) {
@@ -749,6 +758,24 @@ func retryResult(message tea.Msg) (complete, success bool) {
 	default:
 		return false, false
 	}
+}
+
+func (m app) handleReadUnlock(request asyncRequest, err error, retry func(asyncRequest) tea.Cmd) (tea.Model, tea.Cmd, bool) {
+	var needsCredential *auth.NeedsCredentialError
+	if !errors.As(err, &needsCredential) ||
+		needsCredential.Class != auth.ClassRead ||
+		needsCredential.Reason != auth.ReasonInteractive {
+		return m, nil, false
+	}
+	if m.isUnlockRetry(request) {
+		m.loading = false
+		m.pending = nil
+		m.surfaceError(err)
+		return m, nil, true
+	}
+	m.unlockRetryCommand = retry
+	model, command := m.startClassUnlock(auth.ClassRead, request.operation)
+	return model, command, true
 }
 
 // dispatchPending re-issues the buffered action exactly once after an unlock.
