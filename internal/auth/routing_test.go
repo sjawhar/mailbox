@@ -100,6 +100,7 @@ bad) printf '%s\n' 'short' ;;
 chatter) printf 'chatter\nnoise\n' ;;
 malformed) printf '%s\n' '{"access_token": broken' ;;
 diag) printf '%s\n' 'diagnostic.command.token-1234567890'; printf 'grant expires in 7d\033]52;c;steal\a\n' >&2 ;;
+oversize) i=0; while [ "$i" -lt 17000 ]; do printf x; i=$((i + 1)); done ;;
 sleep) sleep 30 ;;
 descendant) (sleep 30 >&1 &) ;;
 *) echo "unknown stub mode" >&2; exit 64 ;;
@@ -259,6 +260,34 @@ func TestRouting(t *testing.T) {
 		}
 	})
 
+	t.Run("expired fingerprinted cache reacquires and rewrites", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
+		source := &CredentialSource{
+			Class: ClassRead,
+			Kind:  SourceCmd,
+			Argv:  []string{"token-helper", "--read"},
+			Argv0: filepath.Join(pe.stubs, "token-helper"),
+		}
+		fingerprint := sourceFingerprint("work", ClassRead, source)
+		path := filepath.Join(pe.cache, "work."+fingerprint+".token.json")
+		stale := fmt.Sprintf(`{"access_token":"expired-token","route":"cmd","expiry":%q,"fingerprint":%q}`, time.Now().Add(-time.Minute).Format(time.RFC3339), fingerprint)
+		if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertProbeSuccess(t, execProbe(t, pe), RouteCmd, "command-json-token")
+		if spawns := readSpawns(t, pe); len(spawns) != 1 {
+			t.Fatalf("credential command spawns = %v, want one reacquisition", spawns)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "expired-token") || !strings.Contains(string(data), "command-json-token") {
+			t.Fatalf("cache after reacquisition = %q", data)
+		}
+	})
+
 	t.Run("command bare token is accepted but never cached", func(t *testing.T) {
 		pe := newProbeEnv(t)
 		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
@@ -277,6 +306,7 @@ func TestRouting(t *testing.T) {
 		"command bare token bad charset is rejected":            "bad|bare token",
 		"command JSON-leading malformed output is a hard error": "malformed|decode __mint stdout",
 		"command chatter is rejected rather than laundered":     "chatter|bare token",
+		"command oversized stdout is rejected":                  "oversize|credential command",
 	} {
 		name, fixture := name, fixture
 		t.Run(name, func(t *testing.T) {
@@ -376,17 +406,29 @@ func TestRouting(t *testing.T) {
 		}
 	})
 
-	t.Run("write source acquires on batch only when non-interactive and never caches", func(t *testing.T) {
+	t.Run("write source acquires on batch without touching populated read cache", func(t *testing.T) {
 		pe := newProbeEnv(t)
 		writeProbeConfig(t, pe, readCommandConfig(readCmd, writeCmd+"write_interactive = false\n", 0))
+		readSource := &CredentialSource{
+			Class: ClassRead,
+			Kind:  SourceCmd,
+			Argv:  []string{"token-helper", "--read"},
+			Argv0: filepath.Join(pe.stubs, "token-helper"),
+		}
+		fingerprint := sourceFingerprint("work", ClassRead, readSource)
+		path := filepath.Join(pe.cache, "work."+fingerprint+".token.json")
+		before := []byte(fmt.Sprintf(`{"access_token":"read-cache-token","route":"cmd","expiry":%q,"fingerprint":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339), fingerprint))
+		if err := os.WriteFile(path, before, 0o600); err != nil {
+			t.Fatal(err)
+		}
 		pe.extra["PROBE_CLASS"] = "write"
 		assertProbeSuccess(t, execProbe(t, pe), RouteCmd, "write.command.token-value-1234567890")
-		entries, err := os.ReadDir(pe.cache)
+		after, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(entries) != 0 {
-			t.Fatalf("cache entries = %v, want no write-token cache", entries)
+		if string(after) != string(before) {
+			t.Fatalf("write acquisition changed read cache: before=%q after=%q", before, after)
 		}
 	})
 

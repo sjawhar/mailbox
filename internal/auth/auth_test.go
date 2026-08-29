@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -25,6 +27,33 @@ func (a *staticAcquirer) Acquire(context.Context, *AccountConfig, Class) (Acquir
 func readTestConfig() (*Config, *AccountConfig) {
 	acct := &AccountConfig{Name: "work", Read: &CredentialSource{Class: ClassRead, Kind: SourceEnv, EnvVar: "TEST_READ", ConfigKey: "accounts.work.read_credential_env"}}
 	return &Config{Path: "/tmp/mailbox.toml", Accounts: []*AccountConfig{acct}, CredentialTimeout: defaultCredentialTimeout}, acct
+}
+
+func TestRefreshRefusesRedirectsFromLoopbackTokenEndpoint(t *testing.T) {
+	redirectHits := 0
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		redirectHits++
+		if err := request.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"exfiltrated","expires_in":3600}`))
+	}))
+	t.Cleanup(redirectTarget.Close)
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		http.Redirect(w, request, redirectTarget.URL, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+	t.Setenv("MAILBOX_TOKEN_URL", redirector.URL)
+
+	_, _, err := refreshAccessToken(context.Background(), "accounts.work.read_credential_env", oauthJSON())
+	if err == nil {
+		t.Fatal("refresh followed a redirect from the loopback endpoint")
+	}
+	if redirectHits != 0 {
+		t.Fatalf("redirect target received %d credential POSTs", redirectHits)
+	}
 }
 
 func TestSourceUsesFingerprintBoundReadCacheAndInvalidatesWithoutAcquiring(t *testing.T) {
@@ -60,6 +89,18 @@ func TestSourceCallerOverridePinsReadCacheAndAcquisition(t *testing.T) {
 	t.Setenv("MAILBOX_CACHE_DIR", cache)
 	t.Setenv("MAILBOX_TOKEN", "caller-token")
 	cfg, acct := readTestConfig()
+	fingerprint := sourceFingerprint(acct.Name, ClassRead, acct.Read)
+	if err := writeCache(acct.Name, fingerprint, cachedToken{AccessToken: "cached-token", Route: RouteEnv, Expiry: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := cachePath(acct.Name, fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	source := NewSource(cfg, acct)
 	acquirer := &staticAcquirer{token: Token{AccessToken: "fresh-token", Route: RouteEnv, Expiry: time.Now().Add(time.Hour)}}
 	if got, err := source.ReadCredentials(acquirer).AccessToken(context.Background()); err != nil || got != "caller-token" {
@@ -68,12 +109,12 @@ func TestSourceCallerOverridePinsReadCacheAndAcquisition(t *testing.T) {
 	if err := source.Invalidate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := os.ReadDir(cache)
+	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 || acquirer.calls != 0 {
-		t.Fatalf("cache, acquisitions = %v, %d; want none, zero", entries, acquirer.calls)
+	if string(after) != string(before) || acquirer.calls != 0 {
+		t.Fatalf("cache, acquisitions changed under caller override: %q, %d", after, acquirer.calls)
 	}
 }
 

@@ -110,10 +110,97 @@ func TestMintProbeUsesEnvContract(t *testing.T) {
 	}
 }
 
+func TestCredentialCommandChildEnvironmentIsIsolated(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "child-env")
+	writeStub(t, dir, "env-helper", `
+printf '%s|%s|%s|%s|%s|%s|%s\n' "${PASSTHROUGH:-}" "${MAILBOX_TOKEN:-}" "${MAILBOX_TOKEN_URL:-}" "${MAILBOX_CONFIG:-}" "${PERSONAL_READ:-}" "${SCRUB_THIS:-}" "${PATTERN_OAUTH:-}" > "$ENV_RECORD"
+printf '%s\n' 'isolated.command.token-value-1234567890'`)
+	configPath := filepath.Join(dir, "config.toml")
+	config := `default_account = "work"
+scrub_env = ["SCRUB_THIS"]
+scrub_env_patterns = ["PATTERN_*"]
+[accounts.work]
+read_credential_cmd = ["env-helper"]
+credential_env_passthrough = ["PASSTHROUGH"]
+[accounts.personal]
+read_credential_env = "PERSONAL_READ"
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("MAILBOX_CONFIG", configPath)
+	t.Setenv("MAILBOX_TOKEN", "must-not-leak")
+	t.Setenv("MAILBOX_TOKEN_URL", "http://must-not-leak")
+	t.Setenv("PERSONAL_READ", "cross-account-credential")
+	t.Setenv("SCRUB_THIS", "configured-scrub")
+	t.Setenv("PATTERN_OAUTH", "pattern-scrub")
+	t.Setenv("PASSTHROUGH", "kept")
+	t.Setenv("ENV_RECORD", record)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, ok := cfg.Account("work")
+	if !ok {
+		t.Fatal("work account missing")
+	}
+	if _, err := runCredentialCmd(context.Background(), cfg, work, work.Read); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(data)), "kept||||||"; got != want {
+		t.Fatalf("credential child environment = %q, want %q", got, want)
+	}
+}
+
+func TestParseCredentialOutputRejectsTwoTrailingNewlines(t *testing.T) {
+	if _, err := parseCredentialOutput([]byte("bare.command.token-value-1234567890\n\n")); err == nil {
+		t.Fatal("credential output with two trailing newlines was accepted")
+	}
+}
+
+func TestTailBufferKeepsFinalSanitizedDiagnosticWithinCaps(t *testing.T) {
+	var tail tailBuffer
+	tail.limit = mintStderrLimit
+	final := "approval final note \x1b]52;c;clipboard\a"
+	if _, err := tail.Write(append(bytes.Repeat([]byte("x"), mintStderrLimit+1024), []byte(final)...)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(tail.String()); got != mintStderrLimit {
+		t.Fatalf("tail length = %d, want %d", got, mintStderrLimit)
+	}
+	if !strings.Contains(tail.String(), final) {
+		t.Fatalf("tail lost final diagnostic: %q", tail.String())
+	}
+	diagnostic := diagnosticFrom(tail.String())
+	if len(diagnostic) > diagnosticLimit || strings.Contains(diagnostic, "\x1b") || !strings.Contains(diagnostic, "approval final note") {
+		t.Fatalf("diagnostic = %q", diagnostic)
+	}
+}
+
 func TestParseMintOutputRejectsUnknownOrTrailingContent(t *testing.T) {
 	cases := [][]byte{
 		[]byte(`{"access_token":"token","expiry":"2099-01-01T00:00:00Z","extra":true}`),
 		[]byte(`{"access_token":"token","expiry":"2099-01-01T00:00:00Z"}{}`),
+	}
+	for _, output := range cases {
+		if _, err := parseMintOutput(output); err == nil {
+			t.Fatalf("parseMintOutput accepted %q", output)
+		}
+	}
+}
+
+func TestParseMintOutputRejectsMissingOrInvalidTokenFields(t *testing.T) {
+	cases := [][]byte{
+		[]byte(`{"access_token":"","expiry":"2099-01-01T00:00:00Z"}`),
+		[]byte(`{"access_token":"token","expiry":"2000-01-01T00:00:00Z"}`),
+		[]byte(`{"access_token":"token","expiry":"not-a-time"}`),
+		bytes.Repeat([]byte("x"), mintStdoutLimit+1),
 	}
 	for _, output := range cases {
 		if _, err := parseMintOutput(output); err == nil {

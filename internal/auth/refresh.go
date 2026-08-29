@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,6 +14,12 @@ import (
 )
 
 const defaultTokenURL = "https://oauth2.googleapis.com/token"
+
+var tokenHTTPClient = &http.Client{
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return errors.New("credential refresh redirects are refused")
+	},
+}
 
 type authorizedUser struct {
 	ClientID     string `json:"client_id"`
@@ -80,7 +87,7 @@ func refreshAccessToken(ctx context.Context, sourceName, rawJSON string) (access
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	response, err := http.DefaultClient.Do(request)
+	response, err := tokenHTTPClient.Do(request)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("oauth refresh for %s: %w", safeForTerminal(sourceName), err)
 	}

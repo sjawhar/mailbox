@@ -86,6 +86,54 @@ func TestWriteTokenUsesOneFlightForConcurrentUnlocks(t *testing.T) {
 	}
 }
 
+func TestWriteTokenFailureIsSingleFlightAndCanRetry(t *testing.T) {
+	source := writeTestSource()
+	want := errors.New("approval denied")
+	acquirer := &countingAcquirer{delay: 100 * time.Millisecond, err: want}
+	var group sync.WaitGroup
+	errs := make(chan error, 4)
+	for range 4 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			_, err := source.WriteToken(context.Background(), acquirer)
+			errs <- err
+		}()
+	}
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		if !errors.Is(err, want) {
+			t.Fatalf("concurrent WriteToken error = %v, want %v", err, want)
+		}
+	}
+	if acquirer.count() != 1 {
+		t.Fatalf("failed acquisitions = %d, want 1", acquirer.count())
+	}
+
+	acquirer.err = nil
+	acquirer.token = Token{AccessToken: "retried-token", Route: RouteCmd, Expiry: time.Now().Add(time.Hour)}
+	if got, err := source.WriteToken(context.Background(), acquirer); err != nil || got != "retried-token" {
+		t.Fatalf("WriteToken retry = %q, %v", got, err)
+	}
+	if acquirer.count() != 2 {
+		t.Fatalf("acquisitions after retry = %d, want 2", acquirer.count())
+	}
+}
+
+func TestWriteTokenReusesMemorySlotSequentially(t *testing.T) {
+	source := writeTestSource()
+	acquirer := &countingAcquirer{token: Token{AccessToken: "write-token", Route: RouteCmd, Expiry: time.Now().Add(time.Hour)}}
+	for range 3 {
+		if got, err := source.WriteToken(context.Background(), acquirer); err != nil || got != "write-token" {
+			t.Fatalf("WriteToken = %q, %v", got, err)
+		}
+	}
+	if acquirer.count() != 1 {
+		t.Fatalf("sequential acquisitions = %d, want 1", acquirer.count())
+	}
+}
+
 func TestWriteCredentialsNeverAcquiresAfterInvalidation(t *testing.T) {
 	source := writeTestSource()
 	acquirer := &countingAcquirer{token: Token{AccessToken: "write-token", Route: RouteCmd, Expiry: time.Now().Add(time.Hour)}}

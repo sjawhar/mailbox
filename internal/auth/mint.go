@@ -177,9 +177,6 @@ func credentialCommandError(src *CredentialSource, diagnostic string, err error)
 }
 
 func parseCredentialOutput(output []byte) (Token, error) {
-	if len(output) > 0 && output[len(output)-1] == '\n' {
-		output = output[:len(output)-1]
-	}
 	if len(output) == 0 {
 		return Token{}, errors.New("credential command returned empty stdout")
 	}
@@ -302,7 +299,7 @@ func (b *tailBuffer) String() string { return b.buf.String() }
 func diagnosticFrom(value string) string {
 	value = render.SanitizeTerminal(strings.TrimSpace(value))
 	if len(value) > diagnosticLimit {
-		return value[:diagnosticLimit]
+		return value[len(value)-diagnosticLimit:]
 	}
 	return value
 }
