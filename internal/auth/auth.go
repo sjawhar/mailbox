@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,23 +37,25 @@ type readFlight struct {
 	err   error
 }
 
+const maxPendingDiagnostics = 4
+
 // Source resolves one configured account's read and write credentials. It is
 // safe for concurrent use and keeps each credential class independent.
 type Source struct {
 	cfg  *Config
 	acct *AccountConfig
 
-	mu             sync.Mutex
-	mem            *Token
-	lastRoute      Route
-	readFlight     *readFlight
-	readDiagnostic string
+	mu              sync.Mutex
+	mem             *Token
+	lastRoute       Route
+	readFlight      *readFlight
+	readDiagnostics []string
 
-	wrMu         sync.Mutex
-	wrToken      *Token
-	wrFlight     *writeFlight
-	wrRoute      Route
-	wrDiagnostic string
+	wrMu          sync.Mutex
+	wrToken       *Token
+	wrFlight      *writeFlight
+	wrRoute       Route
+	wrDiagnostics []string
 }
 
 func NewSource(cfg *Config, acct *AccountConfig) *Source {
@@ -126,7 +129,7 @@ func (s *Source) Resolve(ctx context.Context, acq Acquirer) (Token, error) {
 		flight.token = acquired.Token
 		s.mem = &acquired.Token
 		s.lastRoute = acquired.Token.Route
-		s.readDiagnostic = acquired.Diagnostic
+		s.readDiagnostics = appendDiagnostic(s.readDiagnostics, acquired.Diagnostic)
 	}
 	s.readFlight = nil
 	close(flight.done)
@@ -237,25 +240,36 @@ func (s *Source) LastRoute() Route {
 	return s.lastRoute
 }
 
-// TakeDiagnostic returns and clears the credential-command completion note for
-// one class, ensuring a surface emits it at most once.
+// TakeDiagnostic returns and clears credential-command completion notes for one
+// class in acquisition order, ensuring a surface emits each note at most once.
 func (s *Source) TakeDiagnostic(class Class) string {
 	switch class {
 	case ClassRead:
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		diagnostic := s.readDiagnostic
-		s.readDiagnostic = ""
-		return diagnostic
+		diagnostics := strings.Join(s.readDiagnostics, "\n")
+		s.readDiagnostics = nil
+		return diagnostics
 	case ClassWrite:
 		s.wrMu.Lock()
 		defer s.wrMu.Unlock()
-		diagnostic := s.wrDiagnostic
-		s.wrDiagnostic = ""
-		return diagnostic
+		diagnostics := strings.Join(s.wrDiagnostics, "\n")
+		s.wrDiagnostics = nil
+		return diagnostics
 	default:
 		return ""
 	}
+}
+
+func appendDiagnostic(diagnostics []string, diagnostic string) []string {
+	if diagnostic == "" {
+		return diagnostics
+	}
+	diagnostics = append(diagnostics, diagnostic)
+	if len(diagnostics) <= maxPendingDiagnostics {
+		return diagnostics
+	}
+	return append([]string(nil), diagnostics[len(diagnostics)-maxPendingDiagnostics:]...)
 }
 
 // ScopeHint identifies the configured source without exposing credential

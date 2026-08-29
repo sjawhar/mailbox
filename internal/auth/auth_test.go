@@ -118,6 +118,16 @@ func TestSourceCallerOverridePinsReadCacheAndAcquisition(t *testing.T) {
 	}
 }
 
+func TestDiagnosticQueueRetainsOnlyNewestBoundedEntries(t *testing.T) {
+	var diagnostics []string
+	for _, diagnostic := range []string{"one", "two", "three", "four", "five"} {
+		diagnostics = appendDiagnostic(diagnostics, diagnostic)
+	}
+	if got, want := strings.Join(diagnostics, ","), "two,three,four,five"; got != want {
+		t.Fatalf("diagnostics = %q, want %q", got, want)
+	}
+}
+
 func TestScopeHintNamesOnlyConfigMetadata(t *testing.T) {
 	acct := &AccountConfig{Name: "work", Write: &CredentialSource{Class: ClassWrite, Kind: SourceCmd, Argv0: "/opt/helper", Argv: []string{"helper", "--secret", "value"}, ConfigKey: "accounts.work.write_credential_cmd"}}
 	hint := ScopeHint(acct, ClassWrite, RouteCmd, "gmail.modify")

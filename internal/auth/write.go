@@ -57,7 +57,7 @@ func (s *Source) WriteToken(ctx context.Context, acq Acquirer) (string, error) {
 		flight.token = acquired.Token
 		s.wrToken = &acquired.Token
 		s.wrRoute = acquired.Token.Route
-		s.wrDiagnostic = acquired.Diagnostic
+		s.wrDiagnostics = appendDiagnostic(s.wrDiagnostics, acquired.Diagnostic)
 	}
 	s.wrFlight = nil
 	close(flight.done)

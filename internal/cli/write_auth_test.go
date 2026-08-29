@@ -700,6 +700,41 @@ read_interactive    = false
 	}
 }
 
+func TestReadDiagnosticsSurvive401Reacquisition(t *testing.T) {
+	for _, retryDiagnostic := range []bool{true, false} {
+		t.Run(map[bool]string{true: "both helpers diagnose", false: "retry is quiet"}[retryDiagnostic], func(t *testing.T) {
+			g := newGmailTestServer(t)
+			g.readFailures = 1
+			rig := newConfigRig(t, g, `
+default_account = "work"
+[accounts.work]
+read_credential_cmd = ["record-read"]
+read_interactive = false
+`)
+			countFile := filepath.Join(t.TempDir(), "read-count")
+			t.Setenv("DIAG_COUNT_FILE", countFile)
+			retryLine := ":"
+			if retryDiagnostic {
+				retryLine = `printf '%s\n' 'retry helper note' >&2`
+			}
+			rig.replaceCommand(t, "record-read", "#!/bin/sh\nn=0\nif [ -f \"$DIAG_COUNT_FILE\" ]; then read n < \"$DIAG_COUNT_FILE\"; fi\nn=$((n + 1))\nprintf '%s\n' \"$n\" > \"$DIAG_COUNT_FILE\"\nprintf '%s\n' read-token-1234567890\nif [ \"$n\" = 1 ]; then printf '%s\n' 'first helper note' >&2; else "+retryLine+"; fi\n")
+			g.writeToken = "read-token-1234567890"
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"read", "t1", "--json"}, &stdout, &stderr); code != 0 {
+				t.Fatalf("read exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if got := strings.Count(stderr.String(), "first helper note"); got != 1 {
+				t.Fatalf("first diagnostic count = %d, stderr=%q", got, stderr.String())
+			}
+			if retryDiagnostic {
+				if got := strings.Count(stderr.String(), "retry helper note"); got != 1 || strings.Index(stderr.String(), "first helper note") > strings.Index(stderr.String(), "retry helper note") {
+					t.Fatalf("retry diagnostics out of order or duplicated: %q", stderr.String())
+				}
+			}
+		})
+	}
+}
+
 func TestReadDiagnosticEmittedOnceWhenOperationFails(t *testing.T) {
 	g := newGmailTestServer(t)
 	g.readForbidden = true

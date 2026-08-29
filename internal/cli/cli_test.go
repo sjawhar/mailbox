@@ -37,6 +37,7 @@ type gmailTestServer struct {
 	rawMessageID   string
 	forbidden      bool
 	readForbidden  bool
+	readFailures   int
 	writeToken     string
 }
 
@@ -93,6 +94,11 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/threads/") && r.Method == http.MethodGet:
 		if g.readForbidden {
 			writeResponse(g.t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions"))
+			return
+		}
+		if g.readFailures > 0 {
+			g.readFailures--
+			writeResponse(g.t, w, http.StatusUnauthorized, googleError(http.StatusUnauthorized, "authError"))
 			return
 		}
 		if g.rawMessageID != "" && strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/threads/"+g.rawMessageID) {
