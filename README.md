@@ -1,6 +1,6 @@
 # mailbox
 
-A Gmail triage CLI and split-pane terminal UI for work and personal accounts.
+A Gmail triage CLI and split-pane terminal UI for multiple accounts.
 
 Use one-shot commands with `--json` in scripts, or launch `mailbox` in a terminal for the interactive split-pane TUI. Mailbox batches Gmail metadata and multi-thread changes for efficient large inboxes, and sanitizes mail-derived text before rendering it in a terminal.
 
@@ -47,7 +47,7 @@ Run `mailbox` without a subcommand in a terminal to open the interactive TUI. Fo
 
 `inbox` and `search` assign numbered references for the selected account. A number resolves only against that account's most recent listing; a raw Gmail thread ID or message ID is always accepted. JSON listings expose the durable Gmail IDs, so automation should use IDs instead of numbered references.
 
-`--account work|personal` selects an account and overrides `GWS_ACCOUNT`. When neither is set, mailbox uses `work`; `GWS_ACCOUNT` must be `work` or `personal`.
+`--account NAME` selects a configured account and takes precedence over `MAILBOX_ACCOUNT`; when neither is set, mailbox uses `default_account`.
 
 Every command in the table accepts `--json`. It writes one JSON value to standard output and reserves standard error for diagnostics. A listing has this shape:
 
@@ -69,74 +69,126 @@ Every command in the table accepts `--json`. It writes one JSON value to standar
 }
 ```
 
+## Configuration
+
+Mailbox reads TOML from `$XDG_CONFIG_HOME/mailbox/config.toml`; when
+`XDG_CONFIG_HOME` is unset, the default is `~/.config/mailbox/config.toml`.
+Set `MAILBOX_CONFIG` to use a different path. The configuration file must be
+a regular file owned by the current user and must not be group- or
+world-writable.
+
+```toml
+# ~/.config/mailbox/config.toml
+default_account = "primary"              # required when more than one account exists
+scrub_env = ["ACME_SESSION_FILE"]        # exact names removed from child environments
+scrub_env_patterns = ["ACME_*_OAUTH"]    # glob patterns removed from child environments
+credential_timeout_secs = 120            # command deadline; the default is 120
+
+[accounts.primary]
+# Each class has exactly one source: _credential_env or _credential_cmd.
+read_credential_cmd = ["my-token-helper", "--scopes", "gmail.readonly"]
+read_interactive = false                 # false by default for a command source
+write_credential_cmd = ["my-approver", "--", "mailbox", "__mint", "--env", "ACME_OAUTH_JSON"]
+write_interactive = true                 # true by default for a command source
+write_label = "Approval required"        # optional text shown while the TUI waits
+credential_env_passthrough = ["ACME_SESSION_FILE"]
+
+# Instead of either command above, its class can read a value directly:
+# read_credential_env = "ACME_OAUTH_JSON"
+# write_credential_env = "ACME_WRITE_OAUTH_JSON"
+```
+
+Each `[accounts.NAME]` table needs a read source. A write source is optional.
+For each class, choose exactly one of `_credential_env` and
+`_credential_cmd`; an environment source holds either an `authorized_user`
+JSON value or a bare access token. A command source is an argv array resolved
+when the configuration loads. Its stdout is either the strict
+`{"access_token": ..., "expiry": ...}` object emitted by `__mint`, or a bare
+token: a leading `{` selects the JSON form, and invalid JSON is an error rather
+than a fallback to a bare token.
+
+| Key | Meaning |
+| --- | --- |
+| `default_account` | Account selected when neither `--account` nor `MAILBOX_ACCOUNT` is set. It is required when more than one account is configured. |
+| `accounts.<name>` | Named account table. Names may contain letters, numbers, hyphens, and underscores. |
+| `scrub_env` | Exact environment-variable names removed from every mailbox child process. |
+| `scrub_env_patterns` | Shell-style glob patterns for additional names removed from every mailbox child process. |
+| `credential_timeout_secs` | Positive command timeout in seconds. The default is 120 seconds. Timeout cancels the credential helper's process group. |
+| `read_credential_env`, `write_credential_env` | The environment variable containing an `authorized_user` JSON value or bare token for that class. |
+| `read_interactive`, `write_interactive` | Applies only to a command source. Read defaults to `false`; write defaults to `true`. Batch surfaces refuse interactive sources; only the TUI executes them. |
+| `write_label` | Optional label shown by the TUI while a write credential command is awaiting approval. |
+| `credential_env_passthrough` | Per-account allow-list restored only for that account's credential command after scrubbing. It cannot restore a credential variable or an unconditionally denied value. |
+
+Mailbox scrubs `MAILBOX_TOKEN`, `MAILBOX_TOKEN_URL`, `MAILBOX_CONFIG`, every
+configured credential variable, and the names selected by `scrub_env` and
+`scrub_env_patterns` from child environments. A credential command receives
+only its account's declared `credential_env_passthrough` values in addition to
+that scrubbed environment.
+
+Without a configuration file, mailbox provides one implicit `default` account
+that is usable only with `MAILBOX_TOKEN`.
+
 ## Authentication
 
-Mailbox separates two credential classes per account (`work`, `personal`) and never mixes them:
+> **Breaking change in v0.4.0:** every use other than `MAILBOX_TOKEN` requires
+> a configuration file.
 
-| Class | Gmail scope | Resolution order | Tier |
-| --- | --- | --- | --- |
-| Read (`inbox`, `search`, `read`, `open`, `attachment`, `status`) | `gmail.readonly` | `MAILBOX_TOKEN` → valid local cache → work broker on Amazon EC2 → `GWS_{WORK,PERSONAL}_READ_OAUTH` (re-exec under `secrets` when unset) | agent |
-| Mutation (`archive`, `trash`, `mark`, `label`) | `gmail.modify` | `MAILBOX_TOKEN` → `GWS_{WORK,PERSONAL}_MODIFY_OAUTH` | human (YubiKey) |
+Mailbox keeps credentials separate by class:
+
+| Class | Commands | Gmail scope |
+| --- | --- | --- |
+| Read | `inbox`, `search`, `read`, `open`, `attachment`, `status` | `gmail.readonly` |
+| Write | `archive`, `trash`, `mark`, `label` | `gmail.modify` |
+
+For each account and class, resolution is `MAILBOX_TOKEN`, then a valid read
+cache entry (read only), then the configured source. `MAILBOX_TOKEN` is an
+override for both classes; if its scope is insufficient for a write, mailbox
+reports that error rather than trying another source. The read cache stores
+only expiring tokens. Every entry is bound to its configured source, so
+changing that source invalidates its cache entry.
 
 | Environment variable | Contract |
 | --- | --- |
-| `MAILBOX_TOKEN` | Any bearer access token. Used verbatim for both classes, never cached, highest precedence. If it lacks `gmail.modify`, mutations fail with a typed scope error — there is no fallback to another credential. |
-| `GWS_WORK_READ_OAUTH` / `GWS_PERSONAL_READ_OAUTH` | `authorized_user` OAuth credentials with `gmail.readonly` for the read path. Agent tier. |
-| `GWS_WORK_MODIFY_OAUTH` / `GWS_PERSONAL_MODIFY_OAUTH` | `authorized_user` OAuth credentials with `gmail.modify`. Human tier: acquiring one through `secrets` requires a watched YubiKey approval. |
-| `MAILBOX_BROKER` | Optional path to the broker executable (work reads on EC2). Mailbox invokes it as `MAILBOX_BROKER --scopes gmail.readonly`; it prints an access token on stdout. |
-| `MAILBOX_CACHE_DIR` | Optional access-token cache directory (read tokens ONLY — mutation tokens are never written to disk). Default: `$XDG_CACHE_HOME/mailbox`, else `~/.cache/mailbox` (Linux) or `~/Library/Caches/mailbox` (macOS). |
+| `MAILBOX_TOKEN` | Bearer token override for both classes. It is never cached. |
+| `MAILBOX_CONFIG` | Overrides the configuration-file path. |
+| `MAILBOX_ACCOUNT` | Selects a configured account unless `--account` is present. |
+| `MAILBOX_CACHE_DIR` | Overrides the read-token cache directory. Cache entries are readable only by the current user. |
+| `MAILBOX_TOKEN_URL` | Loopback-only test and debugging override for the token endpoint. It is scrubbed from every child process. |
 
-### Mutation credentials
+When a one-shot command needs an unavailable write credential, it exits with
+status 1 and names the configuration key and file:
 
-The interactive TUI is the only surface that may trigger a `secrets` approval:
-the first mutation keypress for an account mints a `gmail.modify` access token
-through `secrets GWS_<ACCOUNT>_MODIFY_OAUTH -- mailbox __mint --account <a>`
-(status line: `unlocking <account> mutations (GWS_<ACCOUNT>_MODIFY_OAUTH) —
-touch your YubiKey if it blinks`). The minted token lives in process memory
-only and expires after about an hour; the next mutation after expiry re-mints
-on that keypress.
-
-One-shot CLI mutations never invoke `secrets` for a modify key and never
-re-exec for a read credential: with the credential in the environment they
-refresh in-process, act, and exit — nothing cached, nothing spawned, even on
-a cold cache (their internal reads ride the same `gmail.modify` token).
-Without the credential they fail loudly with exit code 1 and the exact
-remedy:
-
-```
-mailbox: mutation credentials for work are human-tier; run: secrets GWS_WORK_MODIFY_OAUTH -- mailbox archive 42
+```text
+mailbox: account "primary" has no usable write credential: interactive source; this surface cannot prompt — accounts.primary.write_credential_cmd (config: /path/to/config.toml)
 ```
 
-With `--json`, the same failure is a machine-readable envelope on stdout:
+With `--json`, the same condition writes this envelope to standard output:
 
 ```json
-{"error":{"code":"needs_mutation_credential","key":"GWS_WORK_MODIFY_OAUTH","command":"secrets GWS_WORK_MODIFY_OAUTH -- mailbox archive 42 --json"}}
+{"error":{"code":"needs_write_credential","account":"primary","config_key":"accounts.primary.write_credential_cmd","config":"/path/to/config.toml"}}
 ```
 
-`mailbox __mint` is internal: it is the short-lived child of the TUI's mint
-flow described above. It refuses to run when `MAILBOX_TOKEN` is set, reads
-only `GWS_<ACCOUNT>_MODIFY_OAUTH` from its own environment, prints a single
-JSON object (`access_token`, RFC 3339 `expiry`) to stdout, and writes nothing
-to disk.
+The read analogue uses `needs_read_credential` and the configured read key.
+`mailbox __mint --env VAR` is an internal credential-helper child: it refuses
+`MAILBOX_TOKEN`, reads only `VAR`, prints one JSON object to standard output,
+writes nothing to disk, and does not load configuration.
 
-### Read credentials
+## Migrating from v0.3.0 and earlier
 
-Set a READ OAuth variable directly or let mailbox re-exec itself under
-`secrets GWS_<ACCOUNT>_READ_OAUTH --` when the variable is unset and a
-`secrets` CLI is on `PATH`. Google OAuth consent with the
-`https://www.googleapis.com/auth/gmail.readonly` scope produces the
-`authorized_user` credential shape:
+Move account and credential choices into `config.toml`:
 
-```json
-{
-  "type": "authorized_user",
-  "client_id": "CLIENT_ID",
-  "client_secret": "CLIENT_SECRET",
-  "refresh_token": "REFRESH_TOKEN"
-}
-```
+| Previous setting | Configuration equivalent |
+| --- | --- |
+| `--account` or an account-selection environment variable | Configured account names and `default_account`; use `--account NAME` or `MAILBOX_ACCOUNT` to select one for an invocation. |
+| Per-account read credential environment variable | `accounts.<name>.read_credential_env` |
+| Token-broker command or its executable-location environment variable | `accounts.<name>.read_credential_cmd` |
+| Per-account write credential environment variable | `accounts.<name>.write_credential_cmd` when an approval helper supplies the credential, or `accounts.<name>.write_credential_env` when it is already present. |
+| Former re-exec and hosting-detection controls | No direct replacement. Put the required behavior in an explicit credential command. |
 
-Exit codes: `0` success, `1` runtime or credential failure, `2` usage errors.
+Any variable the previous version scrubbed by pattern must now be listed in
+`scrub_env` or `scrub_env_patterns`. Mailbox no longer re-executes itself under
+a credential manager and no longer auto-detects a hosting environment; model
+both behaviors as explicit credential commands in the account configuration.
 
 ## License
 

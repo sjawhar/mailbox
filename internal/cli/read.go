@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/render"
 	"golang.org/x/term"
 )
@@ -45,22 +46,23 @@ func runRead(cc *cmdCtx, args []string) int {
 		if err := writeJSON(next.stdout, output); err != nil {
 			return next.runtimeError(account, source, wrapError("write JSON", err))
 		}
-		return 0
-	}
-	markdown := rendered.Markdown()
-	if !isTerminal(next.stdout) {
-		if _, err := io.WriteString(next.stdout, markdown); err != nil {
-			return next.runtimeError(account, source, wrapError("write markdown", err))
+	} else {
+		markdown := rendered.Markdown()
+		if !isTerminal(next.stdout) {
+			if _, err := io.WriteString(next.stdout, markdown); err != nil {
+				return next.runtimeError(account, source, wrapError("write markdown", err))
+			}
+		} else {
+			pretty, err := renderMarkdown(next.stdout, markdown)
+			if err != nil {
+				return next.runtimeError(account, source, err)
+			}
+			if _, err := io.WriteString(next.stdout, pretty); err != nil {
+				return next.runtimeError(account, source, wrapError("write terminal output", err))
+			}
 		}
-		return 0
 	}
-	pretty, err := renderMarkdown(next.stdout, markdown)
-	if err != nil {
-		return next.runtimeError(account, source, err)
-	}
-	if _, err := io.WriteString(next.stdout, pretty); err != nil {
-		return next.runtimeError(account, source, wrapError("write terminal output", err))
-	}
+	next.emitCredentialDiagnostic(source, auth.ClassRead)
 	return 0
 }
 

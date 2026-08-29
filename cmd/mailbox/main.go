@@ -1,9 +1,9 @@
-// Command mailbox is a Gmail triage CLI + TUI for the work/personal accounts.
+// Command mailbox is a Gmail triage CLI and TUI.
 package main
 
 import (
-	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/sjawhar/mailbox/internal/auth"
@@ -14,40 +14,51 @@ import (
 
 var version = "dev" // set via -ldflags "-X main.version=…"
 
+var runTUI = tui.Run
+
 func main() {
-	args := os.Args[1:]
+	if code := dispatch(os.Args[1:], os.Stdout, os.Stderr, term.IsTerminal(int(os.Stdout.Fd()))); code != 0 {
+		os.Exit(code)
+	}
+}
+
+func dispatch(args []string, stdout, stderr io.Writer, terminal bool) int {
 	if versionRequested(args) {
-		fmt.Printf("mailbox %s\n", version)
-		return
+		fmt.Fprintf(stdout, "mailbox %s\n", version)
+		return 0
 	}
-	if !bare(args) {
-		os.Exit(cli.Run(args, os.Stdout, os.Stderr))
-	}
-	// Bare invocation (only global flags): the TUI path.
-	fs := flag.NewFlagSet("mailbox", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	accountFlag := fs.String("account", "", "work|personal")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(2)
-	}
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
-		fmt.Fprintln(os.Stderr, "mailbox: no subcommand and stdout is not a terminal — agents use subcommands (try 'mailbox inbox --json')")
-		os.Exit(2)
-	}
-	account, err := auth.ResolveAccount(*accountFlag)
+	flags, rest, err := cli.ParseTopLevel(args)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "mailbox:", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "mailbox: %v\n", err)
+		cli.PrintHelp(stderr)
+		return 2
 	}
-	src := auth.NewSource(account)
-	if err := src.EnsureEnv(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "mailbox:", err)
-		os.Exit(1)
+	if flags.Help {
+		cli.PrintHelp(stdout)
+		return 0
 	}
-	if err := tui.Run(account); err != nil {
-		fmt.Fprintln(os.Stderr, "mailbox:", err)
-		os.Exit(1)
+	if len(rest) != 0 {
+		return cli.Run(args, stdout, stderr)
 	}
+	if !terminal {
+		fmt.Fprintln(stderr, "mailbox: no subcommand and stdout is not a terminal — agents use subcommands (try 'mailbox inbox --json')")
+		return 2
+	}
+	cfg, err := auth.LoadConfig()
+	if err != nil {
+		fmt.Fprintln(stderr, "mailbox:", err)
+		return 1
+	}
+	account, err := cfg.ResolveAccount(flags.Account)
+	if err != nil {
+		fmt.Fprintln(stderr, "mailbox:", err)
+		return 1
+	}
+	if err := runTUI(cfg, account); err != nil {
+		fmt.Fprintln(stderr, "mailbox:", err)
+		return 1
+	}
+	return 0
 }
 
 // versionRequested reports whether a version flag appears in the top-level
@@ -77,27 +88,8 @@ func versionRequested(args []string) bool {
 	return false
 }
 
-// bare reports whether args contain no subcommand — only flags and their
-// values. `--account personal` must count as bare: skip the value token of
-// any flag that takes one (`--account`/`-account` without '=').
+// bare reports whether the shared top-level grammar contains no subcommand.
 func bare(args []string) bool {
-	skipNext := false
-	for _, a := range args {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		if a == "--" {
-			return false // cli.Run treats every following argument as positional.
-		}
-		if a == "--account" || a == "-account" {
-			skipNext = true
-			continue
-		}
-		if len(a) > 0 && a[0] == '-' {
-			continue // --json, --account=personal, etc.
-		}
-		return false // a positional: subcommand present
-	}
-	return true
+	flags, rest, err := cli.ParseTopLevel(args)
+	return err == nil && !flags.Help && len(rest) == 0
 }

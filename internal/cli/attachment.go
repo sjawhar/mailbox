@@ -67,32 +67,34 @@ func runAttachment(cc *cmdCtx, args []string) int {
 			File     string `json:"file"`
 			Filename string `json:"filename"`
 			Size     int64  `json:"size"`
-		}{Account: string(account), File: path, Filename: attachment.Filename, Size: attachment.Size}
+		}{Account: account, File: path, Filename: attachment.Filename, Size: attachment.Size}
 		if err := writeJSON(next.stdout, output); err != nil {
 			return next.runtimeError(account, source, wrapError("write JSON", err))
 		}
-		return 0
+	} else {
+		fmt.Fprintf(next.stdout, "saved %s\n", render.SanitizeTerminal(path))
 	}
-	fmt.Fprintf(next.stdout, "saved %s\n", render.SanitizeTerminal(path))
+	next.emitCredentialDiagnostic(source, auth.ClassRead)
 	return 0
 }
 
-func (cc *cmdCtx) attachmentList(account auth.Account, source *auth.Source, threadID string, attachments []render.Attachment) int {
+func (cc *cmdCtx) attachmentList(account string, source *auth.Source, threadID string, attachments []render.Attachment) int {
 	if cc.json {
 		attachments = normalizeAttachments(attachments)
 		output := struct {
 			Account     string              `json:"account"`
 			ThreadID    string              `json:"threadId"`
 			Attachments []render.Attachment `json:"attachments"`
-		}{Account: string(account), ThreadID: threadID, Attachments: attachments}
+		}{Account: account, ThreadID: threadID, Attachments: attachments}
 		if err := writeJSON(cc.stdout, output); err != nil {
 			return cc.runtimeError(account, source, wrapError("write JSON", err))
 		}
-		return 0
+	} else {
+		fmt.Fprintln(cc.stdout, "n\tfilename\tmime\tsize")
+		for _, attachment := range attachments {
+			fmt.Fprintf(cc.stdout, "%d\t%s\t%s\t%d\n", attachment.N, render.SanitizeTerminal(attachment.Filename), render.SanitizeTerminal(attachment.MimeType), attachment.Size)
+		}
 	}
-	fmt.Fprintln(cc.stdout, "n\tfilename\tmime\tsize")
-	for _, attachment := range attachments {
-		fmt.Fprintf(cc.stdout, "%d\t%s\t%s\t%d\n", attachment.N, render.SanitizeTerminal(attachment.Filename), render.SanitizeTerminal(attachment.MimeType), attachment.Size)
-	}
+	cc.emitCredentialDiagnostic(source, auth.ClassRead)
 	return 0
 }

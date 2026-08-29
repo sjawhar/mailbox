@@ -4,269 +4,261 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// stubSecretsMint writes a stub `secrets` that records its argv and prints
-// stdoutScript's output INSTEAD of exec'ing the real child — the hostile
-// "shim chatter" adversary of F11.
-func stubSecretsMint(t *testing.T, dir, stdoutScript string) (argvFile string) {
-	t.Helper()
-	argvFile = filepath.Join(dir, "secrets-argv")
-	writeStub(t, dir, "secrets",
-		`printf '%s\n' "$0" "$@" > `+argvFile+`
-`+stdoutScript)
-	return argvFile
-}
-
-// mintProbeMain impersonates the real `mailbox __mint` child when ExecMinter
-// re-execs this test binary (dispatched from TestMain): it records the
-// environment THIS child actually inherited — the F3 contract is about the
-// exec'd child, not the secrets stub — then runs the real child logic so the
-// parent parses real output.
 func mintProbeMain() {
-	if err := os.WriteFile(os.Getenv("PROBE_MINT_ENV_FILE"), []byte(strings.Join(os.Environ(), "\n")), 0o600); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if len(os.Args) != 4 || os.Args[2] != "--env" {
+		os.Exit(64)
+	}
+	if path := os.Getenv("PROBE_MINT_ENV_FILE"); path != "" {
+		_ = os.WriteFile(path, []byte(strings.Join(os.Environ(), "\n")), 0o600)
+	}
+	if err := RunMintChild(context.Background(), os.Args[3], os.Stdout); err != nil {
+		_, _ = os.Stderr.WriteString(err.Error() + "\n")
 		os.Exit(1)
 	}
-	if len(os.Args) != 4 || os.Args[2] != "--account" {
-		fmt.Fprintf(os.Stderr, "mint probe: unexpected argv %q\n", os.Args)
-		os.Exit(1)
+}
+
+func TestRunMintChildContract(t *testing.T) {
+	t.Run("rejects invalid --env names before looking up the environment", func(t *testing.T) {
+		for _, value := range []string{"", "BAD-NAME", "A=B"} {
+			var stdout bytes.Buffer
+			if err := RunMintChild(context.Background(), value, &stdout); err == nil {
+				t.Fatalf("RunMintChild accepted invalid environment name %q", value)
+			}
+		}
+	})
+
+	t.Run("refuses MAILBOX_TOKEN verbatim", func(t *testing.T) {
+		t.Setenv("MAILBOX_TOKEN", "caller-token")
+		var stdout bytes.Buffer
+		err := RunMintChild(context.Background(), "MINT_OAUTH", &stdout)
+		if err == nil || !strings.Contains(err.Error(), "MAILBOX_TOKEN must not be set in a __mint child") {
+			t.Fatalf("RunMintChild error = %v, want MAILBOX_TOKEN refusal", err)
+		}
+	})
+
+	t.Run("emits one strict object without loading config or writing the cache", func(t *testing.T) {
+		cache := t.TempDir()
+		t.Setenv("MAILBOX_CACHE_DIR", cache)
+		t.Setenv("MINT_OAUTH", oauthJSON())
+		t.Setenv("MAILBOX_TOKEN_URL", tokenServer(t, 200, `{"access_token":"minted-token","expires_in":3600}`))
+		t.Setenv("MAILBOX_CONFIG", filepath.Join(t.TempDir(), "missing-config.toml"))
+		var stdout bytes.Buffer
+		if err := RunMintChild(context.Background(), "MINT_OAUTH", &stdout); err != nil {
+			t.Fatal(err)
+		}
+		token, err := parseMintOutput(stdout.Bytes())
+		if err != nil || token.AccessToken != "minted-token" {
+			t.Fatalf("strict mint output = %+v, %v", token, err)
+		}
+		entries, err := os.ReadDir(cache)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("mint cache entries = %v, want none", entries)
+		}
+	})
+
+	t.Run("rejects malformed JSON rather than emitting a partial object", func(t *testing.T) {
+		t.Setenv("MINT_OAUTH", `{"client_id":""}`)
+		var stdout bytes.Buffer
+		if err := RunMintChild(context.Background(), "MINT_OAUTH", &stdout); err == nil || stdout.Len() != 0 {
+			t.Fatalf("RunMintChild error, stdout = %v, %q; want loud failure with no output", err, stdout.String())
+		}
+	})
+}
+
+func TestMintProbeUsesEnvContract(t *testing.T) {
+	cache := t.TempDir()
+	envFile := filepath.Join(t.TempDir(), "mint-env")
+	server := tokenServer(t, 200, `{"access_token":"minted-token","expires_in":3600}`)
+	cmd := exec.Command(os.Args[0], "__mint", "--env", "MINT_OAUTH")
+	cmd.Env = []string{
+		"PROBE_MINT_ENV_FILE=" + envFile,
+		"MINT_OAUTH=" + oauthJSON(),
+		"MAILBOX_TOKEN_URL=" + server,
+		"MAILBOX_CACHE_DIR=" + cache,
+		"MAILBOX_CREDENTIAL_DEPTH=1",
 	}
-	account, err := ResolveAccount(os.Args[3])
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		t.Fatalf("__mint child: %v: %s", err, output)
 	}
-	if err := RunMintChild(context.Background(), account, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	token, err := parseMintOutput(output)
+	if err != nil || token.AccessToken != "minted-token" {
+		t.Fatalf("child output = %+v, %v", token, err)
 	}
-	os.Exit(0)
-}
-
-func execMinterEnv(t *testing.T, stubs string) {
-	t.Helper()
-	clearCredentialEnv(t)
-	t.Setenv("PATH", stubs+":/usr/bin:/bin")
-}
-
-func TestExecMinterEnvFastPathNeverSpawns(t *testing.T) {
-	execMinterEnv(t, t.TempDir()) // PATH has no secrets binary: a spawn would fail loudly
-	t.Setenv("GWS_WORK_MODIFY_OAUTH", oauthJSON())
-	t.Setenv("MAILBOX_TOKEN_URL", tokenServer(t, http.StatusOK, `{"access_token":"env-tok","expires_in":3600}`))
-
-	minter := &ExecMinter{}
-	token, err := minter.Mint(context.Background(), AccountWork)
-	if err != nil || token.AccessToken != "env-tok" || token.Route != RouteMutationEnv {
-		t.Fatalf("Mint = %+v, %v, want env fast-path token", token, err)
-	}
-}
-
-// mintChildBannedNames is the exhaustive list of credential-class variables
-// that must never reach the __mint child (F3). Each is seeded as a decoy so
-// its absence in the child is meaningful. Of the credential class, exactly
-// two variables are allowed in the child: the secrets-injected modify key
-// and SECRETSD_SESSION_TOKEN_FILE.
-var mintChildBannedNames = []string{
-	"GWS_WORK_READ_OAUTH",
-	"GWS_PERSONAL_READ_OAUTH",
-	"GWS_WORK_MAIL_OAUTH",
-	"GWS_PERSONAL_MAIL_OAUTH",
-	"GWS_WORK_MODIFY_OAUTH", // the NON-injected account's modify key (mint targets personal)
-	"MAILBOX_TOKEN",
-	"MAILBOX_SECRETS_REEXEC",
-}
-
-// The full spawn chain with a REAL exec'd child: the stub secrets injects the
-// key and execs `<self> __mint --account personal` exactly like the real
-// secrets does; mintProbeMain (via TestMain) records the environment the
-// child actually inherited, then runs the real child logic against the stub
-// token endpoint, so the parent parses REAL child output (F3 both directions,
-// argv shape, and the exec chain itself).
-func TestExecMinterSpawnShapeAndRealChildEnv(t *testing.T) {
-	stubs := t.TempDir()
-	argvFile := filepath.Join(stubs, "secrets-argv")
-	writeStub(t, stubs, "secrets",
-		`printf '%s\n' "$0" "$@" > `+argvFile+`
-key="$1"; shift; [ "$1" = "--" ] && shift
-export "$key=$STUB_SECRET_VALUE"
-export "MAILBOX_TOKEN_URL=$STUB_MINT_TOKEN_URL"
-exec "$@"`)
-	execMinterEnv(t, stubs)
-	envFile := filepath.Join(t.TempDir(), "mint-child-env")
-	t.Setenv("PROBE_MINT_ENV_FILE", envFile)
-	t.Setenv("STUB_SECRET_VALUE", oauthJSON())
-	t.Setenv("MAILBOX_TOKEN_URL", "http://parent-decoy.invalid")
-	mintTokenURL := tokenServer(t, http.StatusOK, `{"access_token":"minted-tok","expires_in":3600}`)
-	t.Setenv("STUB_MINT_TOKEN_URL", mintTokenURL)
-	t.Setenv("SECRETSD_SESSION_TOKEN_FILE", "/run/user/1000/secretsd/session")
-	for _, name := range mintChildBannedNames {
-		t.Setenv(name, "decoy-should-not-leak")
-	}
-
-	minter := &ExecMinter{}
-	token, err := minter.Mint(context.Background(), AccountPersonal)
-	if err != nil || token.AccessToken != "minted-tok" || token.Route != RouteMint {
-		t.Fatalf("Mint = %+v, %v", token, err)
-	}
-
-	// argv shape: secrets <KEY> -- <abs-self> __mint --account <a>
-	argvData, err := os.ReadFile(argvFile)
+	env, err := os.ReadFile(envFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	self, err := os.Executable()
+	if !strings.Contains(string(env), "MAILBOX_CREDENTIAL_DEPTH=1") {
+		t.Fatalf("child environment = %q, want depth sentinel", env)
+	}
+	entries, err := os.ReadDir(cache)
 	if err != nil {
 		t.Fatal(err)
 	}
-	argv := strings.Split(strings.TrimSpace(string(argvData)), "\n")
-	want := []string{filepath.Join(stubs, "secrets"), "GWS_PERSONAL_MODIFY_OAUTH", "--", self, "__mint", "--account", "personal"}
-	if len(argv) != len(want) {
-		t.Fatalf("secrets argv = %q, want %q", argv, want)
-	}
-	for i := range want {
-		if argv[i] != want[i] {
-			t.Fatalf("secrets argv[%d] = %q, want %q", i, argv[i], want[i])
-		}
-	}
-
-	// The environment the real exec'd child inherited (F3, both directions).
-	envData, err := os.ReadFile(envFile)
-	if err != nil {
-		t.Fatalf("mint child never ran: %v", err)
-	}
-	childEnv := "\n" + string(envData) + "\n"
-	if !strings.Contains(childEnv, "\nSECRETSD_SESSION_TOKEN_FILE=/run/user/1000/secretsd/session\n") {
-		t.Fatal("mint child env lacks SECRETSD_SESSION_TOKEN_FILE (F3 re-injection)")
-	}
-	if !strings.Contains(childEnv, "\nGWS_PERSONAL_MODIFY_OAUTH="+oauthJSON()+"\n") {
-		t.Fatal("mint child env lacks the secrets-injected modify key: exec chain broken")
-	}
-	if strings.Contains(childEnv, "\nMAILBOX_TOKEN_URL=http://parent-decoy.invalid\n") {
-		t.Fatal("mint child env inherited the parent MAILBOX_TOKEN_URL")
-	}
-	if !strings.Contains(childEnv, "\nMAILBOX_TOKEN_URL="+mintTokenURL+"\n") {
-		t.Fatal("mint child env lacks the stub-injected MAILBOX_TOKEN_URL")
-	}
-	for _, name := range mintChildBannedNames {
-		if strings.Contains(childEnv, "\n"+name+"=") {
-			t.Fatalf("mint child env leaked %s: %q", name, childEnv)
-		}
-	}
-	// Sweep: of the credential class, ONLY the injected key may remain — any
-	// other GWS_*_OAUTH variable reaching the child is a scrub failure, even
-	// one this list has never heard of.
-	for _, line := range strings.Split(strings.TrimSpace(string(envData)), "\n") {
-		name, _, found := strings.Cut(line, "=")
-		if !found {
-			continue
-		}
-		if strings.HasPrefix(name, "GWS_") && strings.HasSuffix(name, "_OAUTH") && name != "GWS_PERSONAL_MODIFY_OAUTH" {
-			t.Fatalf("unexpected OAuth credential in mint child env: %q", line)
-		}
+	if len(entries) != 0 {
+		t.Fatalf("mint cache entries = %v, want none", entries)
 	}
 }
 
-func TestExecMinterStrictStdout(t *testing.T) {
-	cases := []struct {
-		name   string
-		script string
+func TestCredentialCommandChildEnvironmentIsIsolated(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "child-env")
+	writeStub(t, dir, "env-helper", `
+printf '%s|%s|%s|%s|%s|%s|%s\n' "${PASSTHROUGH:-}" "${MAILBOX_TOKEN:-}" "${MAILBOX_TOKEN_URL:-}" "${MAILBOX_CONFIG:-}" "${PERSONAL_READ:-}" "${SCRUB_THIS:-}" "${PATTERN_OAUTH:-}" > "$ENV_RECORD"
+printf '%s\n' 'isolated.command.token-value-1234567890'`)
+	configPath := filepath.Join(dir, "config.toml")
+	config := `default_account = "work"
+scrub_env = ["SCRUB_THIS"]
+scrub_env_patterns = ["PATTERN_*"]
+[accounts.work]
+read_credential_cmd = ["env-helper"]
+credential_env_passthrough = ["PASSTHROUGH"]
+[accounts.personal]
+read_credential_env = "PERSONAL_READ"
+`
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	t.Setenv("MAILBOX_CONFIG", configPath)
+	t.Setenv("MAILBOX_TOKEN", "must-not-leak")
+	t.Setenv("MAILBOX_TOKEN_URL", "http://must-not-leak")
+	t.Setenv("PERSONAL_READ", "cross-account-credential")
+	t.Setenv("SCRUB_THIS", "configured-scrub")
+	t.Setenv("PATTERN_OAUTH", "pattern-scrub")
+	t.Setenv("PASSTHROUGH", "kept")
+	t.Setenv("ENV_RECORD", record)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, ok := cfg.Account("work")
+	if !ok {
+		t.Fatal("work account missing")
+	}
+	if _, err := runCredentialCmd(context.Background(), cfg, work, work.Read); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(data)), "kept||||||"; got != want {
+		t.Fatalf("credential child environment = %q, want %q", got, want)
+	}
+}
+
+func TestCredentialCommandDepthSpawnGate(t *testing.T) {
+	dir := t.TempDir()
+	spawnFile := filepath.Join(dir, "spawned")
+	writeStub(t, dir, "depth-helper", `printf spawned > "$DEPTH_SPAWN_FILE"; printf '%s\n' depth.command.token-value-1234567890`)
+	acct := &AccountConfig{Name: "work"}
+	src := &CredentialSource{Class: ClassRead, Kind: SourceCmd, Argv: []string{"depth-helper"}, Argv0: filepath.Join(dir, "depth-helper"), ConfigKey: "accounts.work.read_credential_cmd"}
+	acct.Read = src
+	cfg := &Config{Path: "/tmp/config.toml", Accounts: []*AccountConfig{acct}, CredentialTimeout: defaultCredentialTimeout}
+	for _, test := range []struct {
+		name      string
+		depth     string
+		wantSpawn bool
 	}{
-		{name: "unknown fields", script: `printf '{"access_token":"t","expiry":"2999-01-02T15:04:05Z","extra":"x"}\n'`},
-		{name: "trailing bytes", script: `printf '{"access_token":"t","expiry":"2999-01-02T15:04:05Z"}\ngarbage\n'`},
-		{name: "two objects", script: `printf '{"access_token":"t","expiry":"2999-01-02T15:04:05Z"}{"access_token":"u","expiry":"2999-01-02T15:04:05Z"}\n'`},
-		{name: "oversize", script: `head -c 20000 /dev/zero | tr '\0' 'a'`},
-		{name: "empty token", script: `printf '{"access_token":"","expiry":"2999-01-02T15:04:05Z"}\n'`},
-		{name: "expired token", script: `printf '{"access_token":"t","expiry":"2001-01-02T15:04:05Z"}\n'`},
-		{name: "bad expiry", script: `printf '{"access_token":"t","expiry":"tomorrow"}\n'`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			stubs := t.TempDir()
-			stubSecretsMint(t, stubs, tc.script)
-			execMinterEnv(t, stubs)
-			minter := &ExecMinter{}
-			if _, err := minter.Mint(context.Background(), AccountWork); err == nil {
-				t.Fatal("Mint accepted a corrupt __mint stdout (F11)")
+		{name: "negative", depth: "-5", wantSpawn: true},
+		{name: "empty", depth: "", wantSpawn: true},
+		{name: "malformed", depth: "abc"},
+		{name: "maximum integer", depth: "9223372036854775807"},
+		{name: "overflowing", depth: "9999999999999999999999999999999999999999"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(credentialDepthEnvironment, test.depth)
+			t.Setenv("DEPTH_SPAWN_FILE", spawnFile)
+			if err := os.Remove(spawnFile); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			_, err := runCredentialCmd(context.Background(), cfg, acct, src)
+			if test.wantSpawn {
+				if err != nil {
+					t.Fatalf("runCredentialCmd error = %v", err)
+				}
+				if _, err := os.Stat(spawnFile); err != nil {
+					t.Fatalf("credential command did not spawn: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "recursion") {
+				t.Fatalf("runCredentialCmd error = %v, want loud recursion refusal", err)
+			}
+			if _, err := os.Stat(spawnFile); !os.IsNotExist(err) {
+				t.Fatalf("credential command spawned despite depth refusal: %v", err)
 			}
 		})
 	}
 }
 
-func TestExecMinterChildFailureCarriesStderr(t *testing.T) {
-	stubs := t.TempDir()
-	writeStub(t, stubs, "secrets", `echo "REQUEST denied by policy" >&2; exit 3`)
-	execMinterEnv(t, stubs)
-
-	var sink bytes.Buffer
-	minter := &ExecMinter{Stderr: &sink}
-	_, err := minter.Mint(context.Background(), AccountWork)
-	if err == nil || !strings.Contains(err.Error(), "REQUEST denied by policy") {
-		t.Fatalf("Mint error = %v, want embedded child stderr", err)
-	}
-	if !strings.Contains(sink.String(), "REQUEST denied by policy") {
-		t.Fatalf("stderr sink = %q, want live child stderr (F12)", sink.String())
+func TestCredentialCommandErrorFoldsDiagnosticToOneLine(t *testing.T) {
+	src := &CredentialSource{ConfigKey: "accounts.work.read_credential_cmd", Argv0: "/tmp/helper"}
+	err := credentialCommandError(src, diagnosticFrom("first helper line\nsecond helper line"), errors.New("helper failed"))
+	if strings.Contains(err.Error(), "\n") || !strings.Contains(err.Error(), "first helper line second helper line") {
+		t.Fatalf("credential command error = %q", err)
 	}
 }
 
-func TestRunMintChildContract(t *testing.T) {
-	t.Run("refreshes and prints one object", func(t *testing.T) {
-		clearCredentialEnv(t)
-		t.Setenv("GWS_WORK_MODIFY_OAUTH", oauthJSON())
-		t.Setenv("MAILBOX_TOKEN_URL", tokenServer(t, http.StatusOK, `{"access_token":"child-tok","expires_in":3600}`))
-		var stdout bytes.Buffer
-		if err := RunMintChild(context.Background(), AccountWork, &stdout); err != nil {
-			t.Fatal(err)
+func TestParseCredentialOutputRejectsTwoTrailingNewlines(t *testing.T) {
+	if _, err := parseCredentialOutput([]byte("bare.command.token-value-1234567890\n\n")); err == nil {
+		t.Fatal("credential output with two trailing newlines was accepted")
+	}
+}
+
+func TestTailBufferKeepsFinalSanitizedDiagnosticWithinCaps(t *testing.T) {
+	var tail tailBuffer
+	tail.limit = mintStderrLimit
+	final := "approval final note \x1b]52;c;clipboard\a"
+	if _, err := tail.Write(append(bytes.Repeat([]byte("x"), mintStderrLimit+1024), []byte(final)...)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(tail.String()); got != mintStderrLimit {
+		t.Fatalf("tail length = %d, want %d", got, mintStderrLimit)
+	}
+	if !strings.Contains(tail.String(), final) {
+		t.Fatalf("tail lost final diagnostic: %q", tail.String())
+	}
+	diagnostic := diagnosticFrom(tail.String())
+	if len(diagnostic) > diagnosticLimit || strings.Contains(diagnostic, "\x1b") || !strings.Contains(diagnostic, "approval final note") {
+		t.Fatalf("diagnostic = %q", diagnostic)
+	}
+}
+
+func TestParseMintOutputRejectsUnknownOrTrailingContent(t *testing.T) {
+	cases := [][]byte{
+		[]byte(`{"access_token":"token","expiry":"2099-01-01T00:00:00Z","extra":true}`),
+		[]byte(`{"access_token":"token","expiry":"2099-01-01T00:00:00Z"}{}`),
+	}
+	for _, output := range cases {
+		if _, err := parseMintOutput(output); err == nil {
+			t.Fatalf("parseMintOutput accepted %q", output)
 		}
-		token, err := parseMintOutput(stdout.Bytes())
-		if err != nil {
-			t.Fatalf("child stdout violates the strict contract: %v (stdout=%q)", err, stdout.String())
+	}
+}
+
+func TestParseMintOutputRejectsMissingOrInvalidTokenFields(t *testing.T) {
+	cases := [][]byte{
+		[]byte(`{"access_token":"","expiry":"2099-01-01T00:00:00Z"}`),
+		[]byte(`{"access_token":"token","expiry":"2000-01-01T00:00:00Z"}`),
+		[]byte(`{"access_token":"token","expiry":"not-a-time"}`),
+		bytes.Repeat([]byte("x"), mintStdoutLimit+1),
+	}
+	for _, output := range cases {
+		if _, err := parseMintOutput(output); err == nil {
+			t.Fatalf("parseMintOutput accepted %q", output)
 		}
-		if token.AccessToken != "child-tok" {
-			t.Fatalf("access_token = %q", token.AccessToken)
-		}
-	})
-	t.Run("absent env is loud with empty stdout", func(t *testing.T) {
-		clearCredentialEnv(t)
-		var stdout bytes.Buffer
-		err := RunMintChild(context.Background(), AccountPersonal, &stdout)
-		var needs *NeedsSecretsError
-		if !errors.As(err, &needs) || needs.Key != "GWS_PERSONAL_MODIFY_OAUTH" {
-			t.Fatalf("error = %v, want NeedsSecretsError for the modify key", err)
-		}
-		if stdout.Len() != 0 {
-			t.Fatalf("stdout = %q, want empty", stdout.String())
-		}
-	})
-	t.Run("malformed env is loud with empty stdout", func(t *testing.T) {
-		clearCredentialEnv(t)
-		t.Setenv("GWS_WORK_MODIFY_OAUTH", `{"client_id":""}`)
-		var stdout bytes.Buffer
-		err := RunMintChild(context.Background(), AccountWork, &stdout)
-		if err == nil || !strings.Contains(err.Error(), "GWS_WORK_MODIFY_OAUTH") {
-			t.Fatalf("error = %v, want malformed-credential diagnostic naming the key", err)
-		}
-		if stdout.Len() != 0 {
-			t.Fatalf("stdout = %q, want empty", stdout.String())
-		}
-	})
-	t.Run("MAILBOX_TOKEN present is an error not an override (F11)", func(t *testing.T) {
-		clearCredentialEnv(t)
-		t.Setenv("GWS_WORK_MODIFY_OAUTH", oauthJSON())
-		t.Setenv("MAILBOX_TOKEN", "pinned")
-		var stdout bytes.Buffer
-		err := RunMintChild(context.Background(), AccountWork, &stdout)
-		if err == nil || !strings.Contains(err.Error(), "MAILBOX_TOKEN") {
-			t.Fatalf("error = %v, want MAILBOX_TOKEN rejection", err)
-		}
-		if stdout.Len() != 0 {
-			t.Fatalf("stdout = %q, want empty", stdout.String())
-		}
-	})
+	}
 }

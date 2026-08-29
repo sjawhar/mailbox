@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/refs"
 )
@@ -86,13 +87,12 @@ func runListing(cc *cmdCtx, options gmail.ListOptions) int {
 		}{Account: string(account), Threads: rows}); err != nil {
 			return cc.runtimeError(account, source, wrapError("write JSON", err))
 		}
-		return 0
-	}
-	if len(rows) == 0 {
+	} else if len(rows) == 0 {
 		fmt.Fprintln(cc.stdout, "no threads")
-		return 0
+	} else {
+		printThreads(cc.stdout, rows, isTerminal(cc.stdout))
 	}
-	printThreads(cc.stdout, rows, isTerminal(cc.stdout))
+	cc.emitCredentialDiagnostic(source, auth.ClassRead)
 	return 0
 }
 

@@ -6,73 +6,44 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 )
 
-func mintEnv(t *testing.T) {
-	t.Helper()
-	for _, name := range []string{"MAILBOX_TOKEN", "GWS_WORK_MODIFY_OAUTH", "GWS_PERSONAL_MODIFY_OAUTH", "GWS_ACCOUNT"} {
-		t.Setenv(name, "")
-		os.Unsetenv(name)
-	}
-}
-
-func TestMintSubcommandPrintsStrictContract(t *testing.T) {
-	mintEnv(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestMintSubcommandUsesEnvWithoutLoadingConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"access_token":"minted","expires_in":3600}`)
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("MAILBOX_TOKEN_URL", server.URL)
-	t.Setenv("GWS_WORK_MODIFY_OAUTH", `{"client_id":"c","client_secret":"s","refresh_token":"r"}`)
-
+	t.Setenv("CLI_MINT_OAUTH", `{"client_id":"c","client_secret":"s","refresh_token":"r"}`)
+	t.Setenv("MAILBOX_CONFIG", t.TempDir()+"/missing.toml")
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"__mint", "--account", "work"}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"__mint", "--env", "CLI_MINT_OAUTH"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
 	}
-	decoder := json.NewDecoder(strings.NewReader(stdout.String()))
-	decoder.DisallowUnknownFields()
 	var output struct {
 		AccessToken string `json:"access_token"`
 		Expiry      string `json:"expiry"`
 	}
-	if err := decoder.Decode(&output); err != nil {
-		t.Fatalf("stdout %q: %v", stdout.String(), err)
-	}
-	if err := assertOneJSON(decoder); err != nil {
-		t.Fatal(err)
-	}
-	if output.AccessToken != "minted" || output.Expiry == "" {
-		t.Fatalf("output = %+v", output)
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil || output.AccessToken != "minted" || output.Expiry == "" {
+		t.Fatalf("stdout = %q, output = %+v, error = %v", stdout.String(), output, err)
 	}
 }
 
-func TestMintSubcommandAbsentKeyIsLoudAndSilentOnStdout(t *testing.T) {
-	mintEnv(t)
+func TestMintSubcommandRejectsMissingEnv(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"__mint", "--account", "personal"}, &stdout, &stderr); code == 0 {
-		t.Fatal("exit = 0, want non-zero")
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "GWS_PERSONAL_MODIFY_OAUTH") {
-		t.Fatalf("stderr = %q, want the key named", stderr.String())
+	code := Run([]string{"__mint"}, &stdout, &stderr)
+	if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "requires --env VAR") {
+		t.Fatalf("result = %d, %q, %q", code, stdout.String(), stderr.String())
 	}
 }
 
-func TestMintSubcommandRejectsMailboxToken(t *testing.T) {
-	mintEnv(t)
-	t.Setenv("GWS_WORK_MODIFY_OAUTH", `{"client_id":"c","client_secret":"s","refresh_token":"r"}`)
-	t.Setenv("MAILBOX_TOKEN", "pinned")
+func TestMintEnvFlagValidation(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"__mint"}, &stdout, &stderr); code == 0 {
-		t.Fatal("exit = 0, want non-zero (F11)")
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout = %q, want empty", stdout.String())
+	code := Run([]string{"__mint", "--env", "1BAD"}, &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "invalid __mint --env value") {
+		t.Fatalf("invalid env result = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
 	}
 }

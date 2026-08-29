@@ -2,23 +2,20 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/sjawhar/mailbox/internal/render"
 )
 
 type Route string
 
 const (
-	RouteEnvToken     Route = "env-token"
-	RouteCache        Route = "cache"
-	RouteBroker       Route = "broker"
-	RouteOAuthRefresh Route = "oauth-refresh"
+	RouteEnvToken Route = "env-token"
+	RouteCache    Route = "cache"
 )
 
 type Token struct {
@@ -34,107 +31,175 @@ type CacheState struct {
 	Expiry time.Time
 }
 
-// Source resolves credentials for one account and is safe for concurrent use.
+type readFlight struct {
+	done  chan struct{}
+	token Token
+	err   error
+}
+
+const maxPendingDiagnostics = 32
+
+// Source resolves one configured account's read and write credentials. It is
+// safe for concurrent use and keeps each credential class independent.
 type Source struct {
-	account   Account
-	mu        sync.Mutex
-	mem       *Token
-	lastRoute Route
+	cfg  *Config
+	acct *AccountConfig
 
-	mutMu     sync.Mutex
-	mutToken  *Token
-	mutFlight *mutationFlight
-	mutRoute  Route
+	mu              sync.Mutex
+	mem             *Token
+	lastRoute       Route
+	readFlight      *readFlight
+	readDiagnostics []string
+
+	wrMu          sync.Mutex
+	wrToken       *Token
+	wrFlight      *writeFlight
+	wrRoute       Route
+	wrDiagnostics []string
 }
 
-func NewSource(account Account) *Source {
-	return &Source{account: account}
+func NewSource(cfg *Config, acct *AccountConfig) *Source {
+	return &Source{cfg: cfg, acct: acct}
 }
 
-func (s *Source) Account() Account {
-	return s.account
+func (s *Source) Account() *AccountConfig {
+	return s.acct
 }
 
-func (s *Source) Resolve(ctx context.Context) (Token, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+// Resolve resolves the read credential in priority order: the process override,
+// memory, a fingerprint-bound cache entry, then the caller-authorized acquirer.
+func (s *Source) Resolve(ctx context.Context, acq Acquirer) (Token, error) {
 	if accessToken := os.Getenv("MAILBOX_TOKEN"); accessToken != "" {
 		token := Token{AccessToken: accessToken, Route: RouteEnvToken}
+		s.mu.Lock()
 		s.lastRoute = token.Route
+		s.mu.Unlock()
 		return token, nil
 	}
 
-	now := time.Now()
-	if s.mem != nil && s.mem.Expiry.Add(-2*time.Minute).After(now) {
-		s.lastRoute = s.mem.Route
-		return *s.mem, nil
-	}
-
-	cached, err := readCache(s.account)
-	if err != nil {
-		return Token{}, err
-	}
-	if cached.valid(now) {
-		token := Token{AccessToken: cached.AccessToken, Route: RouteCache, Expiry: cached.Expiry}
-		s.mem = &token
+	s.mu.Lock()
+	if token, ok := validToken(s.mem, time.Now()); ok {
 		s.lastRoute = token.Route
+		s.mu.Unlock()
 		return token, nil
 	}
+	if s.readFlight != nil {
+		flight := s.readFlight
+		s.mu.Unlock()
+		return waitReadFlight(ctx, flight)
+	}
 
-	if s.account == AccountWork && onEC2() {
-		accessToken, err := runBroker(ctx)
+	fingerprint := sourceFingerprint(s.acct.Name, ClassRead, s.acct.Read)
+	if fingerprint != "" {
+		cached, err := readCache(s.acct.Name, fingerprint)
 		if err != nil {
+			s.mu.Unlock()
 			return Token{}, err
 		}
-		token := Token{AccessToken: accessToken, Route: RouteBroker, Expiry: time.Now().Add(time.Hour)}
-		if err := writeCache(s.account, cachedToken{AccessToken: token.AccessToken, Route: token.Route, Expiry: token.Expiry}); err != nil {
-			return Token{}, err
+		if cached.valid(time.Now()) {
+			token := Token{AccessToken: cached.AccessToken, Route: RouteCache, Expiry: cached.Expiry}
+			s.mem = &token
+			s.lastRoute = token.Route
+			s.mu.Unlock()
+			return token, nil
 		}
-		s.mem = &token
-		s.lastRoute = token.Route
-		return token, nil
 	}
 
-	key := readEnvKey(s.account)
-	rawJSON := os.Getenv(key)
-	if rawJSON == "" {
-		return Token{}, &NeedsSecretsError{Key: key}
+	flight := &readFlight{done: make(chan struct{})}
+	s.readFlight = flight
+	s.mu.Unlock()
+
+	acquired, err := acq.Acquire(ctx, s.acct, ClassRead)
+	if err == nil {
+		token := acquired.Token
+		if token.Expiry.IsZero() {
+			token.Expiry = time.Now().Add(time.Hour)
+		}
+		if !acquired.Token.Expiry.IsZero() && fingerprint != "" {
+			err = writeCache(s.acct.Name, fingerprint, cachedToken{AccessToken: token.AccessToken, Route: token.Route, Expiry: token.Expiry})
+		}
+		if err == nil {
+			acquired.Token = token
+		}
 	}
-	accessToken, expiry, err := refreshAccessToken(ctx, key, rawJSON)
+
+	s.mu.Lock()
+	flight.err = err
+	if err == nil {
+		flight.token = acquired.Token
+		s.mem = &acquired.Token
+		s.lastRoute = acquired.Token.Route
+		s.readDiagnostics = appendDiagnostic(s.readDiagnostics, acquired.Diagnostic)
+	}
+	s.readFlight = nil
+	close(flight.done)
+	s.mu.Unlock()
 	if err != nil {
 		return Token{}, err
 	}
-	token := Token{AccessToken: accessToken, Route: RouteOAuthRefresh, Expiry: expiry}
-	if err := writeCache(s.account, cachedToken{AccessToken: token.AccessToken, Route: token.Route, Expiry: token.Expiry}); err != nil {
-		return Token{}, err
-	}
-	s.mem = &token
-	s.lastRoute = token.Route
-	return token, nil
+	return acquired.Token, nil
 }
 
-func (s *Source) AccessToken(ctx context.Context) (string, error) {
-	token, err := s.Resolve(ctx)
+func validToken(token *Token, now time.Time) (Token, bool) {
+	if token == nil || !token.Expiry.Add(-2*time.Minute).After(now) {
+		return Token{}, false
+	}
+	return *token, true
+}
+
+func waitReadFlight(ctx context.Context, flight *readFlight) (Token, error) {
+	select {
+	case <-ctx.Done():
+		return Token{}, ctx.Err()
+	case <-flight.done:
+		if flight.err != nil {
+			return Token{}, flight.err
+		}
+		return flight.token, nil
+	}
+}
+
+func (s *Source) ReadCredentials(acq Acquirer) *ReadCredentials {
+	return &ReadCredentials{source: s, acq: acq}
+}
+
+// ReadCredentials adapts a source and the caller-authorized acquirer to the
+// Gmail credential seam.
+type ReadCredentials struct {
+	source *Source
+	acq    Acquirer
+}
+
+func (r *ReadCredentials) AccessToken(ctx context.Context) (string, error) {
+	token, err := r.source.Resolve(ctx, r.acq)
 	if err != nil {
 		return "", err
 	}
 	return token.AccessToken, nil
 }
 
+func (r *ReadCredentials) Invalidate(ctx context.Context) error {
+	return r.source.Invalidate(ctx)
+}
+
+// Invalidate clears the read memory slot and its fingerprint-bound disk cache.
+// It never acquires a replacement token.
 func (s *Source) Invalidate(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.lastRoute == RouteEnvToken || os.Getenv("MAILBOX_TOKEN") != "" {
+	if os.Getenv("MAILBOX_TOKEN") != "" {
 		return nil
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.mem = nil
-	path, err := cachePath(s.account)
+	fingerprint := sourceFingerprint(s.acct.Name, ClassRead, s.acct.Read)
+	if fingerprint == "" {
+		return nil
+	}
+	path, err := cachePath(s.acct.Name, fingerprint)
 	if err != nil {
 		return err
 	}
@@ -147,8 +212,11 @@ func (s *Source) Invalidate(ctx context.Context) error {
 func (s *Source) CacheState() CacheState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	path, err := cachePath(s.account)
+	fingerprint := sourceFingerprint(s.acct.Name, ClassRead, s.acct.Read)
+	if fingerprint == "" {
+		return CacheState{}
+	}
+	path, err := cachePath(s.acct.Name, fingerprint)
 	if err != nil {
 		return CacheState{}
 	}
@@ -157,7 +225,7 @@ func (s *Source) CacheState() CacheState {
 		return state
 	}
 	state.Exists = true
-	cached, err := readCache(s.account)
+	cached, err := readCache(s.acct.Name, fingerprint)
 	if err != nil || cached == nil {
 		return state
 	}
@@ -172,129 +240,93 @@ func (s *Source) LastRoute() Route {
 	return s.lastRoute
 }
 
-type NeedsSecretsError struct {
-	Key string
-}
-
-func (e *NeedsSecretsError) Error() string {
-	return fmt.Sprintf("%s is unset", e.Key)
-}
-
-func (s *Source) EnsureEnv(argv []string) error {
-	_, err := s.Resolve(context.Background())
-	var needs *NeedsSecretsError
-	if !errors.As(err, &needs) {
-		return err
-	}
-	if os.Getenv("MAILBOX_SECRETS_REEXEC") != "" {
-		return fmt.Errorf("%s still unset after re-exec under secrets", needs.Key)
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	secretsBin, err := findSecrets()
-	if err != nil {
-		return err
-	}
-	args := append([]string{"secrets", needs.Key, "--", executable}, argv...)
-	env := append(ScrubbedEnviron(), "MAILBOX_SECRETS_REEXEC=1")
-	return syscall.Exec(secretsBin, args, env)
-}
-
-func ProvisioningHint(account Account, route Route, scope string) string {
-	if scope == "gmail.readonly" {
-		switch route {
-		case RouteBroker:
-			return "the broker token is read-only and lacks the gmail.readonly scope; see README"
-		case RouteEnvToken:
-			return "MAILBOX_TOKEN lacks the gmail.readonly scope; see README"
-		default:
-			return fmt.Sprintf("%s lacks the gmail.readonly scope; see README", readEnvKey(account))
-		}
-	}
-	switch route {
-	case RouteBroker:
-		return fmt.Sprintf("the broker token is read-only; mutations need %s (human tier); see README", ModifyEnvKey(account))
-	case RouteEnvToken:
-		return "MAILBOX_TOKEN lacks the gmail.modify scope; see README"
-	case RouteMint, RouteMutationEnv:
-		return fmt.Sprintf("%s lacks the gmail.modify scope; re-run the provisioning ceremony (README)", ModifyEnvKey(account))
+// TakeDiagnostic drains queued credential-command completion notes for one
+// class in acquisition order. The queue is bounded; when full, oldest notes
+// are dropped before newer completed acquisitions are appended.
+func (s *Source) TakeDiagnostic(class Class) string {
+	switch class {
+	case ClassRead:
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		diagnostics := strings.Join(s.readDiagnostics, "\n")
+		s.readDiagnostics = nil
+		return diagnostics
+	case ClassWrite:
+		s.wrMu.Lock()
+		defer s.wrMu.Unlock()
+		diagnostics := strings.Join(s.wrDiagnostics, "\n")
+		s.wrDiagnostics = nil
+		return diagnostics
 	default:
-		return fmt.Sprintf("%s lacks the gmail.modify scope; see README", ModifyEnvKey(account))
+		return ""
 	}
 }
 
-func readEnvKey(account Account) string {
-	if account == AccountPersonal {
-		return "GWS_PERSONAL_READ_OAUTH"
+func appendDiagnostic(diagnostics []string, diagnostic string) []string {
+	if diagnostic == "" {
+		return diagnostics
 	}
-	return "GWS_WORK_READ_OAUTH"
+	diagnostics = append(diagnostics, diagnostic)
+	if len(diagnostics) <= maxPendingDiagnostics {
+		return diagnostics
+	}
+	return append([]string(nil), diagnostics[len(diagnostics)-maxPendingDiagnostics:]...)
 }
 
-func onEC2() bool {
-	vendorFile := os.Getenv("MAILBOX_DMI_SYS_VENDOR")
-	if vendorFile == "" {
-		vendorFile = "/sys/class/dmi/id/sys_vendor"
+// ScopeHint identifies the configured source without exposing credential
+// environment variable names or command arguments.
+func ScopeHint(acct *AccountConfig, class Class, route Route, scope string) string {
+	if route == RouteEnvToken {
+		return fmt.Sprintf("MAILBOX_TOKEN lacks the %s scope; see README", scope)
 	}
-	vendor, err := os.ReadFile(vendorFile)
-	return err == nil && strings.HasPrefix(string(vendor), "Amazon EC2")
+	src := sourceFor(acct, class)
+	if src == nil {
+		return fmt.Sprintf("no configured %s credential lacks the %s scope; see README", class, scope)
+	}
+	if src.Kind == SourceCmd {
+		return fmt.Sprintf("%s (via %s) lacks the %s scope; see README", safeForTerminal(src.ConfigKey), safeForTerminal(src.Argv0), scope)
+	}
+	return fmt.Sprintf("%s lacks the %s scope; see README", safeForTerminal(src.ConfigKey), scope)
 }
 
-func runBroker(ctx context.Context) (string, error) {
-	broker, err := findBroker()
-	if err != nil {
-		return "", err
+func sourceFor(acct *AccountConfig, class Class) *CredentialSource {
+	if acct == nil {
+		return nil
 	}
-	cmd := exec.CommandContext(ctx, broker, "--scopes", "gmail.readonly")
-	cmd.Env = ScrubbedEnviron()
-	cmd.Stderr = os.Stderr
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("google-user-token: %w", err)
+	switch class {
+	case ClassRead:
+		return acct.Read
+	case ClassWrite:
+		return acct.Write
+	default:
+		return nil
 	}
-	accessToken := strings.TrimSpace(string(output))
-	if accessToken == "" {
-		return "", fmt.Errorf("google-user-token returned an empty token")
-	}
-	return accessToken, nil
 }
 
-func findBroker() (string, error) {
-	if broker := os.Getenv("MAILBOX_BROKER"); broker != "" {
-		return broker, nil
+func credentialError(cfg *Config, acct *AccountConfig, class Class, src *CredentialSource, reason CredentialReason) *NeedsCredentialError {
+	account := "default"
+	if acct != nil {
+		account = acct.Name
 	}
-	if broker, err := exec.LookPath("google-user-token"); err == nil {
-		return broker, nil
-	}
-	return "", fmt.Errorf("google-user-token not found on PATH")
-}
-
-func findSecrets() (string, error) {
-	if secrets, err := exec.LookPath("secrets"); err == nil {
-		return secrets, nil
-	}
-	return "", fmt.Errorf("secrets executable not found on PATH")
-}
-
-// ScrubbedEnviron returns the process environment without credentials or
-// one-shot mailbox execution state. It is the required environment for every
-// child process mailbox starts.
-func ScrubbedEnviron() []string {
-	env := os.Environ()
-	kept := make([]string, 0, len(env))
-	for _, kv := range env {
-		name, _, _ := strings.Cut(kv, "=")
-		if !isCredentialEnvironment(name) {
-			kept = append(kept, kv)
+	configPath := ""
+	if cfg != nil {
+		configPath = cfg.Path
+		if cfg.NoConfig() {
+			configPath = cfg.DefaultPath
 		}
 	}
-	return kept
+	configKey := ""
+	if src != nil {
+		configKey = src.ConfigKey
+	} else if cfg != nil && !cfg.NoConfig() {
+		configKey = fmt.Sprintf("accounts.%s.%s_credential_cmd", account, class)
+	}
+	if cfg == nil || cfg.NoConfig() {
+		reason = ReasonNoConfig
+	}
+	return &NeedsCredentialError{Account: account, Class: class, ConfigKey: configKey, ConfigPath: configPath, Reason: reason}
 }
 
-func isCredentialEnvironment(name string) bool {
-	if name == "MAILBOX_TOKEN" || name == "MAILBOX_TOKEN_URL" || name == "MAILBOX_SECRETS_REEXEC" || name == "SECRETSD_SESSION_TOKEN_FILE" {
-		return true
-	}
-	return strings.HasPrefix(name, "GWS_") && strings.HasSuffix(name, "_OAUTH")
+func safeForTerminal(value string) string {
+	return render.SanitizeTerminal(value)
 }

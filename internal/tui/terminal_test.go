@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/render"
 )
@@ -84,7 +83,7 @@ func TestInboxViewSanitizesMailText(t *testing.T) {
 	inbox := newInboxModel()
 	inbox.setRows([]*gmail.Thread{thread})
 
-	view := inbox.View(auth.AccountWork, 80, 10, labelNames([]gmail.Label{{ID: "label", Name: "label" + payload, Type: "user"}}), false)
+	view := inbox.View("work", 80, 10, labelNames([]gmail.Label{{ID: "label", Name: "label" + payload, Type: "user"}}), false)
 	if strings.Contains(view, "clipboard") || strings.Contains(view, "\x1b]52") {
 		t.Fatalf("inbox.View() leaked terminal control payload: %q", view)
 	}

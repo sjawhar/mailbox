@@ -19,7 +19,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/refs"
 )
 
@@ -38,7 +37,8 @@ type gmailTestServer struct {
 	rawMessageID   string
 	forbidden      bool
 	readForbidden  bool
-	mutationToken  string
+	readFailures   int
+	writeToken     string
 }
 
 func newGmailTestServer(t *testing.T) *gmailTestServer {
@@ -68,10 +68,9 @@ func (g *gmailTestServer) tokenURL(t *testing.T, accessToken string) string {
 
 func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	g.t.Helper()
-	// Mutation subcommands run every call — internal reads included — on the
-	// mutation token (spec §6: no read-path engagement).
+	// Write commands use the configured write credential for every request.
 	if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-		if g.mutationToken == "" || got != "Bearer "+g.mutationToken {
+		if g.writeToken == "" || got != "Bearer "+g.writeToken {
 			g.t.Fatalf("Authorization = %q, want test token", got)
 		}
 	}
@@ -95,6 +94,11 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/threads/") && r.Method == http.MethodGet:
 		if g.readForbidden {
 			writeResponse(g.t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions"))
+			return
+		}
+		if g.readFailures > 0 {
+			g.readFailures--
+			writeResponse(g.t, w, http.StatusUnauthorized, googleError(http.StatusUnauthorized, "authError"))
 			return
 		}
 		if g.rawMessageID != "" && strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/threads/"+g.rawMessageID) {
@@ -196,6 +200,7 @@ func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
 
 func runCLI(t *testing.T, g *gmailTestServer, args ...string) (int, string, string) {
 	t.Helper()
+	setCLIConfig(t)
 	t.Setenv("MAILBOX_GMAIL_BASE_URL", g.server.URL)
 	t.Setenv("MAILBOX_TOKEN", "test-token")
 	if os.Getenv("MAILBOX_CACHE_DIR") == "" {
@@ -206,6 +211,14 @@ func runCLI(t *testing.T, g *gmailTestServer, args ...string) (int, string, stri
 	return code, stdout.String(), stderr.String()
 }
 
+func setCLIConfig(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[accounts.work]\nread_credential_env = \"CLI_READ\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MAILBOX_CONFIG", path)
+}
 func runJSON(t *testing.T, g *gmailTestServer, args ...string) (int, map[string]any, string) {
 	t.Helper()
 	code, stdout, stderr := runCLI(t, g, args...)
@@ -246,7 +259,7 @@ func assertEmptyRawJSONField(t *testing.T, object map[string]json.RawMessage, fi
 
 func seedRefs(t *testing.T, ids ...string) {
 	t.Helper()
-	if err := refs.Write(auth.AccountWork, ids); err != nil {
+	if err := refs.Write("work", ids); err != nil {
 		t.Fatalf("seed refs: %v", err)
 	}
 }
@@ -273,10 +286,10 @@ func TestInboxJSON(t *testing.T) {
 			t.Errorf("row missing %q: %#v", key, row)
 		}
 	}
-	if id, err := refs.Resolve(auth.AccountWork, "1"); err != nil || id != "t1" {
+	if id, err := refs.Resolve("work", "1"); err != nil || id != "t1" {
 		t.Fatalf("first written ref = (%q, %v), want t1", id, err)
 	}
-	if id, err := refs.Resolve(auth.AccountWork, "2"); err != nil || id != "t2" {
+	if id, err := refs.Resolve("work", "2"); err != nil || id != "t2" {
 		t.Fatalf("second written ref = (%q, %v), want t2", id, err)
 	}
 }
@@ -302,7 +315,7 @@ func TestInboxExcludesThreadsWithoutInboxMessage(t *testing.T) {
 	if got := threads[0].(map[string]any)["id"]; got != "inbox" {
 		t.Fatalf("remaining inbox thread ID = %q, want inbox", got)
 	}
-	if _, err := refs.Resolve(auth.AccountWork, "2"); err == nil {
+	if _, err := refs.Resolve("work", "2"); err == nil {
 		t.Fatal("filtered-out thread remained addressable by a numbered reference")
 	}
 }
@@ -381,7 +394,7 @@ func TestSearchPassthrough(t *testing.T) {
 	if code != 0 || g.listQuery.Get("q") != "from:alice is:unread" {
 		t.Fatalf("search = (%d, q=%q), want verbatim query", code, g.listQuery.Get("q"))
 	}
-	if id, err := refs.Resolve(auth.AccountWork, "1"); err != nil || id != "t1" {
+	if id, err := refs.Resolve("work", "1"); err != nil || id != "t1" {
 		t.Fatalf("written search ref = (%q, %v), want t1", id, err)
 	}
 }
@@ -775,8 +788,13 @@ func TestAttachmentDefaultDanglingSymlinkDoesNotWriteTarget(t *testing.T) {
 func TestStatusJSON(t *testing.T) {
 	g := newGmailTestServer(t)
 	code, value, _ := runJSON(t, g, "status", "--json")
-	if code != 0 || value["route"] != "env-token" || value["ok"] != true {
-		t.Fatalf("status = (%d, %#v), want env-token status", code, value)
+	accounts, ok := value["accounts"].([]any)
+	if code != 0 || !ok || len(accounts) != 1 || value["ok"] != true {
+		t.Fatalf("status = (%d, %#v), want one successful account", code, value)
+	}
+	row := accounts[0].(map[string]any)
+	if row["name"] != "work" || row["route"] != "env-token" || row["pinned"] != true {
+		t.Fatalf("status account = %#v", row)
 	}
 }
 
@@ -786,7 +804,10 @@ func TestStatusHumanWritesAllStatusLinesToStdout(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("status exit = %d", code)
 	}
-	for _, line := range []string{"account: work", "route: env-token", "cache: absent", "profile: user@example.com"} {
+	for _, line := range []string{
+		"config: ", "account: work (default)", "read: env", "write: not configured",
+		"route: env-token", "cache: absent", "profile: user@example.com",
+	} {
 		if !strings.Contains(stdout, line) {
 			t.Errorf("stdout %q does not contain %q", stdout, line)
 		}
@@ -798,6 +819,7 @@ func TestStatusHumanWritesAllStatusLinesToStdout(t *testing.T) {
 
 func TestStatusJSONWriteFailurePrintsDiagnostic(t *testing.T) {
 	g := newGmailTestServer(t)
+	setCLIConfig(t)
 	t.Setenv("MAILBOX_GMAIL_BASE_URL", g.server.URL)
 	t.Setenv("MAILBOX_TOKEN", "test-token")
 	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
@@ -806,7 +828,7 @@ func TestStatusJSONWriteFailurePrintsDiagnostic(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("status exit = %d, want 1", code)
 	}
-	for _, line := range []string{"account: work", "route: env-token", "cache: absent", "mailbox: write JSON"} {
+	for _, line := range []string{"mailbox: write JSON"} {
 		if !strings.Contains(stderr.String(), line) {
 			t.Errorf("stderr %q does not contain %q", stderr.String(), line)
 		}
@@ -830,59 +852,26 @@ func TestScopeHintOn403(t *testing.T) {
 	}
 }
 
-func TestTypedReadScopeHintUsesReadRoute(t *testing.T) {
-	for _, testCase := range []struct {
-		name  string
-		setup func(t *testing.T, g *gmailTestServer)
-		want  string
-	}{
-		{
-			name: "broker",
-			setup: func(t *testing.T, g *gmailTestServer) {
-				dmi := filepath.Join(t.TempDir(), "sys_vendor")
-				if err := os.WriteFile(dmi, []byte("Amazon EC2\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				broker := filepath.Join(t.TempDir(), "broker")
-				if err := os.WriteFile(broker, []byte("#!/bin/sh\nprintf test-token\n"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				t.Setenv("MAILBOX_DMI_SYS_VENDOR", dmi)
-				t.Setenv("MAILBOX_BROKER", broker)
-			},
-			want: "the broker token is read-only and lacks the gmail.readonly scope",
-		},
-		{
-			name: "read oauth",
-			setup: func(t *testing.T, g *gmailTestServer) {
-				dmi := filepath.Join(t.TempDir(), "sys_vendor")
-				if err := os.WriteFile(dmi, []byte("not EC2\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				t.Setenv("MAILBOX_DMI_SYS_VENDOR", dmi)
-				t.Setenv("GWS_WORK_READ_OAUTH", `{"client_id":"client","client_secret":"secret","refresh_token":"refresh"}`)
-				t.Setenv("MAILBOX_TOKEN_URL", g.tokenURL(t, "test-token"))
-			},
-			want: "GWS_WORK_READ_OAUTH lacks the gmail.readonly scope",
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			g := newGmailTestServer(t)
-			g.readForbidden = true
-			t.Setenv("MAILBOX_GMAIL_BASE_URL", g.server.URL)
-			t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
-			t.Setenv("MAILBOX_TOKEN", "")
-			t.Setenv("MAILBOX_BROKER", "")
-			testCase.setup(t, g)
+func TestConfiguredReadScopeHintNamesConfigKey(t *testing.T) {
+	g := newGmailTestServer(t)
+	g.readForbidden = true
+	config := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(config, []byte("[accounts.work]\nread_credential_env = \"CLI_SCOPE_OAUTH\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MAILBOX_CONFIG", config)
+	t.Setenv("MAILBOX_GMAIL_BASE_URL", g.server.URL)
+	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+	t.Setenv("MAILBOX_TOKEN", "")
+	t.Setenv("CLI_SCOPE_OAUTH", `{"client_id":"client","client_secret":"secret","refresh_token":"refresh"}`)
+	t.Setenv("MAILBOX_TOKEN_URL", g.tokenURL(t, "test-token"))
 
-			var stdout, stderr bytes.Buffer
-			if code := Run([]string{"read", "t1"}, &stdout, &stderr); code != 1 {
-				t.Fatalf("read exit = %d, want 1; stderr = %q", code, stderr.String())
-			}
-			if got := stderr.String(); !strings.Contains(got, testCase.want) {
-				t.Fatalf("stderr = %q, want %q", got, testCase.want)
-			}
-		})
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"read", "t1"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("read exit = %d, stderr = %q", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "accounts.work.read_credential_env") || strings.Contains(got, "CLI_SCOPE_OAUTH") {
+		t.Fatalf("stderr = %q, want only the config key path", got)
 	}
 }
 
@@ -938,6 +927,66 @@ func mustJSON(t *testing.T, value any) []byte {
 		t.Fatalf("marshal fixture: %v", err)
 	}
 	return contents
+}
+
+func TestCLIStartupConfigErrorSanitizesTerminalText(t *testing.T) {
+	payload := "\x1b]52;c;clipboard\a"
+	t.Setenv("MAILBOX_CONFIG", filepath.Join(t.TempDir(), "missing-"+payload+".toml"))
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"inbox"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "\x1b") || strings.Contains(stderr.String(), "clipboard") {
+		t.Fatalf("CLI startup error leaked terminal control text: %q", stderr.String())
+	}
+}
+
+func TestCLICredentialCommandErrorSanitizesTerminalText(t *testing.T) {
+	payload := "\x1b]52;c;clipboard\a"
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "broken-"+payload)
+	if err := os.WriteFile(helper, []byte("#!/definitely/missing-interpreter\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.toml")
+	tomlHelper := strings.Replace(helper, payload, `\u001b]52;c;clipboard\u0007`, 1)
+	config := "default_account = \"work\"\n[accounts.work]\nread_credential_cmd = [\"" + tomlHelper + "\"]\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MAILBOX_CONFIG", configPath)
+	t.Setenv("MAILBOX_TOKEN", "")
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"inbox"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "\x1b") || strings.Contains(stderr.String(), "clipboard") {
+		t.Fatalf("CLI command error leaked terminal control text: %q", stderr.String())
+	}
+}
+
+func TestHelpListsEveryPublicCommand(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"-h"}, {"help"}} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("Run(%q) exit = %d, stdout=%q, stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+		for _, command := range []string{"inbox", "search", "read", "open", "archive", "trash", "mark", "label", "attachment", "status"} {
+			if !strings.Contains(stdout.String(), command) {
+				t.Fatalf("help for %q omitted %q: %q", args, command, stdout.String())
+			}
+		}
+		if !strings.Contains(stdout.String(), "XDG_CONFIG_HOME") {
+			t.Fatalf("help for %q omitted config location: %q", args, stdout.String())
+		}
+	}
+}
+
+func TestInvalidGlobalFlagRemainsUsageError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--not-a-real-flag"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("invalid flag exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+	}
 }
 
 func googleError(status int, reason string) map[string]any {

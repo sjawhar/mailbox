@@ -27,21 +27,21 @@ type Credentials interface {
 }
 
 // ClientConfig supplies credentials for a Gmail client. Read and Account are
-// required. Omit Mutation for a read-only client; supply it for a read-write
+// required. Omit Write for a read-only client; supply it for a read-write
 // client.
 type ClientConfig struct {
-	Read     Credentials
-	Mutation Credentials
-	Account  string
+	Read    Credentials
+	Write   Credentials
+	Account string
 }
 
 // Client calls the Gmail REST API.
 type Client struct {
-	read     Credentials
-	mutation Credentials
-	account  string
-	BaseURL  string
-	HTTP     *http.Client
+	read    Credentials
+	write   Credentials
+	account string
+	BaseURL string
+	HTTP    *http.Client
 
 	sleep  func(context.Context, time.Duration) error
 	jitter func(time.Duration) time.Duration
@@ -60,13 +60,13 @@ func NewClient(config ClientConfig) *Client {
 		baseURL = override
 	}
 	return &Client{
-		read:     config.Read,
-		mutation: config.Mutation,
-		account:  config.Account,
-		BaseURL:  baseURL,
-		HTTP:     &http.Client{Timeout: 30 * time.Second},
-		sleep:    sleepWithContext,
-		jitter:   rateLimitJitter,
+		read:    config.Read,
+		write:   config.Write,
+		account: config.Account,
+		BaseURL: baseURL,
+		HTTP:    &http.Client{Timeout: 30 * time.Second},
+		sleep:   sleepWithContext,
+		jitter:  rateLimitJitter,
 	}
 }
 
@@ -144,7 +144,7 @@ func (c *Client) ModifyThreads(ctx context.Context, ids, addLabelIDs, removeLabe
 	if len(ids) == 0 {
 		return nil
 	}
-	creds := c.mutation
+	creds := c.write
 	body := modifyThreadRequest{
 		AddLabelIDs:    nonNilStrings(addLabelIDs),
 		RemoveLabelIDs: nonNilStrings(removeLabelIDs),
@@ -160,7 +160,7 @@ func (c *Client) TrashThreads(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	creds := c.mutation
+	creds := c.write
 	if len(ids) == 1 {
 		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil), "gmail.modify")
 	}

@@ -15,7 +15,7 @@ import (
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "__mint" && os.Getenv("PROBE_MINT_ENV_FILE") != "" {
-		mintProbeMain() // defined in mint_test.go; records inherited env, then runs the real child logic
+		mintProbeMain()
 		return
 	}
 	if os.Getenv("MAILBOX_AUTH_PROBE") == "1" {
@@ -26,45 +26,115 @@ func TestMain(m *testing.M) {
 }
 
 func probeMain() {
-	account, err := ResolveAccount(os.Getenv("PROBE_ACCOUNT"))
+	cfg, err := LoadConfig()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	s := NewSource(account)
-	if os.Getenv("PROBE_ENSURE_ENV") == "1" {
-		if err := s.EnsureEnv(os.Args[1:]); err != nil {
+	acct, err := cfg.ResolveAccount(os.Getenv("PROBE_ACCOUNT"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	class := ClassRead
+	if os.Getenv("PROBE_CLASS") == string(ClassWrite) {
+		class = ClassWrite
+	}
+	var acq Acquirer
+	if os.Getenv("PROBE_SURFACE") == "tui" {
+		acq = InteractiveExecAcquirer{Cfg: cfg}
+	} else {
+		acq = BatchAcquirer(cfg, acct, class)
+	}
+	source := NewSource(cfg, acct)
+	if class == ClassWrite {
+		token, err := source.WriteToken(context.Background(), acq)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		fmt.Printf("ROUTE=%s\nTOKEN=%s\nDIAG=%s\n", source.WriteRoute(), token, source.TakeDiagnostic(class))
+		return
 	}
-	tok, err := s.Resolve(context.Background())
+	token, err := source.Resolve(context.Background(), acq)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("ROUTE=%s\nTOKEN=%s\nREEXEC=%s\n", tok.Route, tok.AccessToken, os.Getenv("MAILBOX_SECRETS_REEXEC"))
-	os.Exit(0)
+	fmt.Printf("ROUTE=%s\nTOKEN=%s\nDIAG=%s\n", token.Route, token.AccessToken, source.TakeDiagnostic(class))
+}
+
+type probeEnv struct {
+	stubs    string
+	cache    string
+	config   string
+	leakFile string
+	extra    map[string]string
+}
+
+type probeResult struct {
+	stdout string
+	stderr string
+	exit   int
 }
 
 func writeStub(t *testing.T, dir, name, body string) {
 	t.Helper()
-	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
 
-type probeEnv struct {
-	stubs, cache string
-	dmi          string
-	leakFile     string
-	extra        map[string]string
+func newProbeEnv(t *testing.T) probeEnv {
+	t.Helper()
+	stubs, cache := t.TempDir(), t.TempDir()
+	leak := filepath.Join(stubs, "leaks")
+	writeStub(t, stubs, "token-helper", `
+printf 'spawn\n' >> "${PROBE_SPAWN_FILE:-/dev/null}"
+printf '%s\n' "$*" > "${PROBE_ARGV_FILE:-/dev/null}"
+case "${STUB_MODE:-json}" in
+json) printf '%s\n' '{"access_token":"command-json-token","expiry":"2099-01-01T00:00:00Z"}' ;;
+bare) printf '%s\n' 'bare.command.token-value-1234567890' ;;
+bad) printf '%s\n' 'short' ;;
+chatter) printf 'chatter\nnoise\n' ;;
+malformed) printf '%s\n' '{"access_token": broken' ;;
+diag) printf '%s\n' 'diagnostic.command.token-1234567890'; printf 'grant expires in 7d\033]52;c;steal\a\n' >&2 ;;
+oversize) i=0; while [ "$i" -lt 17000 ]; do printf x; i=$((i + 1)); done; printf completed > "${PROBE_COMPLETED_FILE:-/dev/null}" ;;
+sleep) sleep 30 ;;
+descendant) (sleep 30 >&1 &) ;;
+*) echo "unknown stub mode" >&2; exit 64 ;;
+esac`)
+	writeStub(t, stubs, "approve-write", `
+printf 'spawn\n' >> "${PROBE_SPAWN_FILE:-/dev/null}"
+printf '%s\n' 'write.command.token-value-1234567890'`)
+	return probeEnv{
+		stubs:    stubs,
+		cache:    cache,
+		config:   filepath.Join(stubs, "config.toml"),
+		leakFile: leak,
+		extra: map[string]string{
+			"PROBE_SPAWN_FILE":     filepath.Join(stubs, "spawns"),
+			"PROBE_ARGV_FILE":      filepath.Join(stubs, "argv"),
+			"PROBE_COMPLETED_FILE": filepath.Join(stubs, "completed"),
+		},
+	}
 }
 
-type probeResult struct {
-	stdout, stderr string
-	exit           int
+func writeProbeConfig(t *testing.T, pe probeEnv, body string) {
+	t.Helper()
+	if err := os.WriteFile(pe.config, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pe.extra["MAILBOX_CONFIG"] = pe.config
+}
+
+func readCommandConfig(readSource, writeSource string, timeout int) string {
+	var timeoutLine string
+	if timeout != 0 {
+		timeoutLine = fmt.Sprintf("credential_timeout_secs = %d\n", timeout)
+	}
+	return "default_account = \"work\"\n" + timeoutLine + "[accounts.work]\n" + readSource + writeSource
 }
 
 func execProbe(t *testing.T, pe probeEnv) probeResult {
@@ -75,52 +145,30 @@ func execProbe(t *testing.T, pe probeEnv) probeResult {
 		"PATH=" + pe.stubs + ":/usr/bin:/bin",
 		"HOME=" + t.TempDir(),
 		"MAILBOX_CACHE_DIR=" + pe.cache,
-		"MAILBOX_DMI_SYS_VENDOR=" + pe.dmi,
 		"PROBE_LEAK_FILE=" + pe.leakFile,
 	}
-	for k, v := range pe.extra {
-		cmd.Env = append(cmd.Env, k+"="+v)
+	for key, value := range pe.extra {
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
-	var out, errb strings.Builder
-	cmd.Stdout, cmd.Stderr = &out, &errb
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	exit := 0
-	if ee, ok := err.(*exec.ExitError); ok {
-		exit = ee.ExitCode()
+	if status, ok := err.(*exec.ExitError); ok {
+		exit = status.ExitCode()
 	} else if err != nil {
 		t.Fatal(err)
 	}
-	return probeResult{stdout: out.String(), stderr: errb.String(), exit: exit}
-}
-
-func newProbeEnv(t *testing.T) probeEnv {
-	t.Helper()
-	stubs, cache := t.TempDir(), t.TempDir()
-	leak := filepath.Join(stubs, "leaks")
-	dmi := filepath.Join(stubs, "sys_vendor")
-	if err := os.WriteFile(dmi, []byte("Amazon EC2\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	writeStub(t, stubs, "google-user-token",
-		`printf 'LEAK=%s%s%s%s%s%s%s%s%s%s%s\n' "${MAILBOX_TOKEN:-}" "${MAILBOX_SECRETS_REEXEC:-}" "${GWS_WORK_MAIL_OAUTH:-}" "${GWS_PERSONAL_MAIL_OAUTH:-}" "${GWS_WORK_READ_OAUTH:-}" "${GWS_PERSONAL_READ_OAUTH:-}" "${GWS_WORK_MODIFY_OAUTH:-}" "${GWS_PERSONAL_MODIFY_OAUTH:-}" "${GWS_WORK_SEND_OAUTH:-}" "${GWS_PERSONAL_SEND_OAUTH:-}" "${SECRETSD_SESSION_TOKEN_FILE:-}" >> "${PROBE_LEAK_FILE:-/dev/null}"
-echo "SHOULD-NOT-RUN" >&2; exit 99`)
-	writeStub(t, stubs, "secrets",
-		`printf 'LEAK=%s%s%s%s%s%s%s%s%s%s\n' "${MAILBOX_TOKEN:-}" "${GWS_WORK_MAIL_OAUTH:-}" "${GWS_PERSONAL_MAIL_OAUTH:-}" "${GWS_WORK_READ_OAUTH:-}" "${GWS_PERSONAL_READ_OAUTH:-}" "${GWS_WORK_MODIFY_OAUTH:-}" "${GWS_PERSONAL_MODIFY_OAUTH:-}" "${GWS_WORK_SEND_OAUTH:-}" "${GWS_PERSONAL_SEND_OAUTH:-}" "${SECRETSD_SESSION_TOKEN_FILE:-}" >> "${PROBE_LEAK_FILE:-/dev/null}"
-key="$1"; shift; [ "$1" = "--" ] && shift
-if [ -z "$STUB_SECRET_VALUE" ]; then echo "stub secrets: no value for $key" >&2; exit 1; fi
-export "$key=$STUB_SECRET_VALUE"
-if [ -n "$STUB_TOKEN_URL" ]; then export "MAILBOX_TOKEN_URL=$STUB_TOKEN_URL"; fi
-exec "$@"`)
-	return probeEnv{stubs: stubs, cache: cache, dmi: dmi, leakFile: leak, extra: map[string]string{}}
+	return probeResult{stdout: stdout.String(), stderr: stderr.String(), exit: exit}
 }
 
 func tokenServer(t *testing.T, status int, body string) string {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if err := request.ParseForm(); err != nil {
 			t.Errorf("ParseForm: %v", err)
 		}
-		if got := r.Form.Get("grant_type"); got != "refresh_token" {
+		if got := request.Form.Get("grant_type"); got != "refresh_token" {
 			t.Errorf("grant_type = %q, want refresh_token", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -129,52 +177,6 @@ func tokenServer(t *testing.T, status int, body string) string {
 	}))
 	t.Cleanup(server.Close)
 	return server.URL
-}
-
-func successfulBroker(t *testing.T, pe probeEnv, token string) {
-	t.Helper()
-	writeStub(t, pe.stubs, "google-user-token", `printf 'LEAK=%s%s%s%s%s%s%s%s%s%s%s\n' "${MAILBOX_TOKEN:-}" "${MAILBOX_SECRETS_REEXEC:-}" "${GWS_WORK_MAIL_OAUTH:-}" "${GWS_PERSONAL_MAIL_OAUTH:-}" "${GWS_WORK_READ_OAUTH:-}" "${GWS_PERSONAL_READ_OAUTH:-}" "${GWS_WORK_MODIFY_OAUTH:-}" "${GWS_PERSONAL_MODIFY_OAUTH:-}" "${GWS_WORK_SEND_OAUTH:-}" "${GWS_PERSONAL_SEND_OAUTH:-}" "${SECRETSD_SESSION_TOKEN_FILE:-}" >> "${PROBE_LEAK_FILE:-/dev/null}"
-printf '%s ' "$@" > "${PROBE_LEAK_FILE:-/dev/null}.argv"
-printf '%s\n' "`+token+`"`)
-}
-
-func oauthJSON() string {
-	return `{"client_id":"client","client_secret":"secret","refresh_token":"refresh"}`
-}
-
-func cacheFile(pe probeEnv, account Account) string {
-	return filepath.Join(pe.cache, string(account)+".token.json")
-}
-
-func writeCachedToken(t *testing.T, pe probeEnv, account Account, token string, expiry time.Time) {
-	t.Helper()
-	content := fmt.Sprintf(`{"access_token":%q,"route":"broker","expiry":%q}`, token, expiry.Format(time.RFC3339))
-	if err := os.WriteFile(cacheFile(pe, account), []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func readLeaks(t *testing.T, path string) []string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.Fields(strings.TrimSpace(string(data)))
-}
-
-var oauthEnvironmentNames = []string{
-	"GWS_WORK_MAIL_OAUTH",
-	"GWS_PERSONAL_MAIL_OAUTH",
-	"GWS_WORK_READ_OAUTH",
-	"GWS_PERSONAL_READ_OAUTH",
-	"GWS_WORK_MODIFY_OAUTH",
-	"GWS_PERSONAL_MODIFY_OAUTH",
-	"GWS_WORK_SEND_OAUTH",
-	"GWS_PERSONAL_SEND_OAUTH",
 }
 
 func assertProbeSuccess(t *testing.T, got probeResult, route Route, token string) {
@@ -190,250 +192,296 @@ func assertProbeSuccess(t *testing.T, got probeResult, route Route, token string
 	}
 }
 
+func readSpawns(t *testing.T, pe probeEnv) []string {
+	t.Helper()
+	data, err := os.ReadFile(pe.extra["PROBE_SPAWN_FILE"])
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(data))
+}
+
+func oauthJSON() string {
+	return `{"client_id":"client","client_secret":"secret","refresh_token":"refresh"}`
+}
+
 func TestRouting(t *testing.T) {
-	t.Run("env token wins", func(t *testing.T) {
+	readCmd := "read_credential_cmd = [\"token-helper\", \"--read\"]\n"
+	writeCmd := "write_credential_cmd = [\"approve-write\", \"--write\"]\n"
+
+	t.Run("env token wins on both surfaces without a cache write or command spawn", func(t *testing.T) {
+		for _, surface := range []string{"batch", "tui"} {
+			t.Run(surface, func(t *testing.T) {
+				pe := newProbeEnv(t)
+				writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
+				pe.extra["MAILBOX_TOKEN"] = "caller-token"
+				pe.extra["PROBE_SURFACE"] = surface
+				assertProbeSuccess(t, execProbe(t, pe), RouteEnvToken, "caller-token")
+				if spawns := readSpawns(t, pe); len(spawns) != 0 {
+					t.Fatalf("credential command spawns = %v, want none", spawns)
+				}
+				entries, err := os.ReadDir(pe.cache)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(entries) != 0 {
+					t.Fatalf("cache entries = %v, want none", entries)
+				}
+			})
+		}
+	})
+
+	t.Run("command JSON stdout caches a fingerprinted read token", func(t *testing.T) {
 		pe := newProbeEnv(t)
-		pe.extra["MAILBOX_TOKEN"] = "tok-abc"
-		got := execProbe(t, pe)
-		assertProbeSuccess(t, got, RouteEnvToken, "tok-abc")
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
+		assertProbeSuccess(t, execProbe(t, pe), RouteCmd, "command-json-token")
+		entries, err := os.ReadDir(pe.cache)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "work.") || !strings.HasSuffix(entries[0].Name(), ".token.json") {
+			t.Fatalf("cache entries = %v, want one fingerprinted token", entries)
+		}
+		info, err := entries[0].Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("cache file mode = %o, want 600", info.Mode().Perm())
+		}
+		cacheInfo, err := os.Stat(pe.cache)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cacheInfo.Mode().Perm() != 0o700 {
+			t.Fatalf("cache directory mode = %o, want 700", cacheInfo.Mode().Perm())
+		}
+	})
+
+	t.Run("expired fingerprinted cache reacquires and rewrites", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
+		source := &CredentialSource{
+			Class: ClassRead,
+			Kind:  SourceCmd,
+			Argv:  []string{"token-helper", "--read"},
+			Argv0: filepath.Join(pe.stubs, "token-helper"),
+		}
+		fingerprint := sourceFingerprint("work", ClassRead, source)
+		path := filepath.Join(pe.cache, "work."+fingerprint+".token.json")
+		stale := fmt.Sprintf(`{"access_token":"expired-token","route":"cmd","expiry":%q,"fingerprint":%q}`, time.Now().Add(-time.Minute).Format(time.RFC3339), fingerprint)
+		if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertProbeSuccess(t, execProbe(t, pe), RouteCmd, "command-json-token")
+		if spawns := readSpawns(t, pe); len(spawns) != 1 {
+			t.Fatalf("credential command spawns = %v, want one reacquisition", spawns)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "expired-token") || !strings.Contains(string(data), "command-json-token") {
+			t.Fatalf("cache after reacquisition = %q", data)
+		}
+	})
+
+	t.Run("command bare token is accepted but never cached", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
+		pe.extra["STUB_MODE"] = "bare"
+		assertProbeSuccess(t, execProbe(t, pe), RouteCmd, "bare.command.token-value-1234567890")
 		entries, err := os.ReadDir(pe.cache)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(entries) != 0 {
-			t.Fatalf("cache entries = %v, want none", entries)
-		}
-		if strings.Contains(got.stderr, "SHOULD-NOT-RUN") {
-			t.Fatalf("broker ran: stderr = %q", got.stderr)
+			t.Fatalf("cache entries = %v, want none for bare token", entries)
 		}
 	})
 
-	t.Run("valid cache", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		writeCachedToken(t, pe, AccountWork, "cached-tok", time.Now().Add(30*time.Minute))
-		got := execProbe(t, pe)
-		assertProbeSuccess(t, got, RouteCache, "cached-tok")
-		if strings.Contains(got.stderr, "SHOULD-NOT-RUN") {
-			t.Fatalf("broker ran: stderr = %q", got.stderr)
-		}
-	})
-
-	t.Run("expired cache re-mints", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		writeCachedToken(t, pe, AccountWork, "old-tok", time.Now().Add(-time.Minute))
-		successfulBroker(t, pe, "broker-tok")
-		got := execProbe(t, pe)
-		assertProbeSuccess(t, got, RouteBroker, "broker-tok")
-		info, err := os.Stat(cacheFile(pe, AccountWork))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Fatalf("cache file mode = %o, want 600", info.Mode().Perm())
-		}
-		dir, err := os.Stat(pe.cache)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if dir.Mode().Perm() != 0o700 {
-			t.Fatalf("cache directory mode = %o, want 700", dir.Mode().Perm())
-		}
-		data, err := os.ReadFile(cacheFile(pe, AccountWork))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(string(data), "old-tok") || !strings.Contains(string(data), "broker-tok") {
-			t.Fatalf("cache = %q, want rewritten broker token", data)
-		}
-	})
-
-	t.Run("broker argv requests gmail.readonly (F8)", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		successfulBroker(t, pe, "broker-tok")
-		got := execProbe(t, pe)
-		assertProbeSuccess(t, got, RouteBroker, "broker-tok")
-		argv, err := os.ReadFile(pe.leakFile + ".argv")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.TrimSpace(string(argv)) != "--scopes gmail.readonly" {
-			t.Fatalf("broker argv = %q, want --scopes gmail.readonly", argv)
-		}
-	})
-
-	t.Run("broker child env is scrubbed", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		successfulBroker(t, pe, "broker-tok")
-		for _, name := range oauthEnvironmentNames {
-			pe.extra[name] = "decoy-should-not-leak"
-		}
-		pe.extra["MAILBOX_SECRETS_REEXEC"] = "decoy-should-not-leak"
-		got := execProbe(t, pe)
-		assertProbeSuccess(t, got, RouteBroker, "broker-tok")
-		if leaks := readLeaks(t, pe.leakFile); len(leaks) != 1 || leaks[0] != "LEAK=" {
-			t.Fatalf("leaks = %q, want [LEAK=]", leaks)
-		}
-	})
-
-	t.Run("broker failure is loud with no fallback", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		writeStub(t, pe.stubs, "google-user-token", `echo boom >&2; exit 3`)
-		pe.extra["GWS_WORK_READ_OAUTH"] = oauthJSON()
-		got := execProbe(t, pe)
-		if got.exit == 0 {
-			t.Fatalf("unexpected success: stdout = %q, stderr = %q", got.stdout, got.stderr)
-		}
-		if !strings.Contains(got.stderr, "boom") {
-			t.Fatalf("stderr = %q, want broker error", got.stderr)
-		}
-		if strings.Contains(got.stdout, "ROUTE=") {
-			t.Fatalf("stdout = %q, want no resolved route", got.stdout)
-		}
-	})
-
-	t.Run("MAILBOX_BROKER overrides PATH", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		brokers := t.TempDir()
-		writeStub(t, brokers, "custom-mailbox-broker", `[ "$MAILBOX_BROKER" = "$0" ] || { echo "MAILBOX_BROKER not forwarded" >&2; exit 88; }
-printf 'override-tok\n'`)
-		pe.extra["MAILBOX_BROKER"] = filepath.Join(brokers, "custom-mailbox-broker")
-		got := execProbe(t, pe)
-		assertProbeSuccess(t, got, RouteBroker, "override-tok")
-		if strings.Contains(got.stderr, "SHOULD-NOT-RUN") {
-			t.Fatalf("PATH broker ran: stderr = %q", got.stderr)
-		}
-	})
-
-	t.Run("work off EC2 uses oauth env", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		if err := os.WriteFile(pe.dmi, []byte("LENOVO\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		pe.extra["GWS_WORK_READ_OAUTH"] = oauthJSON()
-		pe.extra["MAILBOX_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"ref-tok","expires_in":3600}`)
-		got := execProbe(t, pe)
-		assertProbeSuccess(t, got, RouteOAuthRefresh, "ref-tok")
-		info, err := os.Stat(cacheFile(pe, AccountWork))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Fatalf("cache file mode = %o, want 600", info.Mode().Perm())
-		}
-	})
-
-	t.Run("personal ignores broker even on EC2", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		pe.extra["PROBE_ACCOUNT"] = string(AccountPersonal)
-		pe.extra["GWS_PERSONAL_READ_OAUTH"] = oauthJSON()
-		pe.extra["MAILBOX_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"personal-tok","expires_in":3600}`)
-		got := execProbe(t, pe)
-		assertProbeSuccess(t, got, RouteOAuthRefresh, "personal-tok")
-		if strings.Contains(got.stderr, "SHOULD-NOT-RUN") {
-			t.Fatalf("broker ran: stderr = %q", got.stderr)
-		}
-	})
-
-	t.Run("re-exec under secrets", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		pe.extra["PROBE_ACCOUNT"] = string(AccountPersonal)
-		pe.extra["PROBE_ENSURE_ENV"] = "1"
-		pe.extra["STUB_SECRET_VALUE"] = oauthJSON()
-		pe.extra["STUB_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"reexec-tok","expires_in":3600}`)
-		got := execProbe(t, pe)
-		assertProbeSuccess(t, got, RouteOAuthRefresh, "reexec-tok")
-		if !strings.Contains(got.stdout, "REEXEC=1\n") {
-			t.Fatalf("stdout = %q, want re-exec guard", got.stdout)
-		}
-	})
-
-	t.Run("re-exec scrubs credentials", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		pe.extra["PROBE_ACCOUNT"] = string(AccountPersonal)
-		pe.extra["PROBE_ENSURE_ENV"] = "1"
-		pe.extra["STUB_SECRET_VALUE"] = oauthJSON()
-		for _, name := range oauthEnvironmentNames {
-			if name != "GWS_PERSONAL_READ_OAUTH" {
-				pe.extra[name] = "decoy-should-not-leak"
+	for name, fixture := range map[string]string{
+		"command bare token bad charset is rejected":            "bad|bare token",
+		"command JSON-leading malformed output is a hard error": "malformed|decode __mint stdout",
+		"command chatter is rejected rather than laundered":     "chatter|bare token",
+		"command oversized stdout is rejected":                  "oversize|output exceeded",
+	} {
+		name, fixture := name, fixture
+		t.Run(name, func(t *testing.T) {
+			mode, want, _ := strings.Cut(fixture, "|")
+			pe := newProbeEnv(t)
+			writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
+			pe.extra["STUB_MODE"] = mode
+			got := execProbe(t, pe)
+			if got.exit == 0 || !strings.Contains(got.stderr, want) {
+				t.Fatalf("exit, stderr = %d, %q; want failure containing %q", got.exit, got.stderr, want)
 			}
-		}
-		pe.extra["STUB_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"reexec-tok","expires_in":3600}`)
+		})
+	}
+
+	t.Run("command capture cap stops helper before it completes", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
+		pe.extra["STUB_MODE"] = "oversize"
 		got := execProbe(t, pe)
-		assertProbeSuccess(t, got, RouteOAuthRefresh, "reexec-tok")
-		if leaks := readLeaks(t, pe.leakFile); len(leaks) != 1 || leaks[0] != "LEAK=" {
-			t.Fatalf("leaks = %q, want [LEAK=]", leaks)
+		if got.exit == 0 || !strings.Contains(got.stderr, "output exceeded") {
+			t.Fatalf("exit, stderr = %d, %q; want capture-cap failure", got.exit, got.stderr)
+		}
+		if _, err := os.Stat(pe.extra["PROBE_COMPLETED_FILE"]); !os.IsNotExist(err) {
+			t.Fatalf("helper ran after capture cap: %v", err)
 		}
 	})
 
-	t.Run("re-exec guard is loud", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		pe.extra["PROBE_ACCOUNT"] = string(AccountPersonal)
-		pe.extra["PROBE_ENSURE_ENV"] = "1"
-		pe.extra["STUB_SECRET_VALUE"] = ""
-		pe.extra["MAILBOX_SECRETS_REEXEC"] = "1"
-		got := execProbe(t, pe)
-		if got.exit == 0 {
-			t.Fatalf("unexpected success: stdout = %q, stderr = %q", got.stdout, got.stderr)
+	t.Run("interactive command is structurally refused in batch and allowed in TUI", func(t *testing.T) {
+		config := readCommandConfig(readCmd+"read_interactive = true\n", "", 0)
+		batch := newProbeEnv(t)
+		writeProbeConfig(t, batch, config)
+		got := execProbe(t, batch)
+		if got.exit == 0 || !strings.Contains(got.stderr, "accounts.work.read_credential_cmd") || !strings.Contains(got.stderr, batch.config) {
+			t.Fatalf("batch result = %+v, want interactive credential refusal naming config key and path", got)
 		}
-		want := "GWS_PERSONAL_READ_OAUTH still unset after re-exec under secrets"
-		if !strings.Contains(got.stderr, want) {
-			t.Fatalf("stderr = %q, want %q", got.stderr, want)
+		if spawns := readSpawns(t, batch); len(spawns) != 0 {
+			t.Fatalf("batch command spawns = %v, want none", spawns)
+		}
+
+		tui := newProbeEnv(t)
+		writeProbeConfig(t, tui, config)
+		tui.extra["PROBE_SURFACE"] = "tui"
+		assertProbeSuccess(t, execProbe(t, tui), RouteCmd, "command-json-token")
+		if spawns := readSpawns(t, tui); len(spawns) != 1 {
+			t.Fatalf("TUI command spawns = %v, want one", spawns)
 		}
 	})
 
-	t.Run("refresh rejection is loud", func(t *testing.T) {
+	t.Run("environment authorized user refresh rejects non-loopback token URL at use", func(t *testing.T) {
 		pe := newProbeEnv(t)
-		if err := os.WriteFile(pe.dmi, []byte("LENOVO\n"), 0o644); err != nil {
+		writeProbeConfig(t, pe, readCommandConfig("read_credential_env = \"PROBE_OAUTH\"\n", "", 0))
+		pe.extra["PROBE_OAUTH"] = oauthJSON()
+		pe.extra["MAILBOX_TOKEN_URL"] = "http://169.254.169.254/token"
+		got := execProbe(t, pe)
+		if got.exit == 0 || !strings.Contains(got.stderr, "loopback") {
+			t.Fatalf("exit, stderr = %d, %q; want loopback rejection", got.exit, got.stderr)
+		}
+	})
+
+	t.Run("environment authorized user refresh accepts loopback token URL", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig("read_credential_env = \"PROBE_OAUTH\"\n", "", 0))
+		pe.extra["PROBE_OAUTH"] = oauthJSON()
+		pe.extra["MAILBOX_TOKEN_URL"] = tokenServer(t, http.StatusOK, `{"access_token":"refreshed-token","expires_in":3600}`)
+		assertProbeSuccess(t, execProbe(t, pe), RouteEnv, "refreshed-token")
+	})
+
+	t.Run("environment refresh failures name the config key rather than its secret variable", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig("read_credential_env = \"SUPER_SECRET_VAR_NAME\"\n", "", 0))
+		pe.extra["SUPER_SECRET_VAR_NAME"] = `{"client_id":""}`
+		got := execProbe(t, pe)
+		if got.exit == 0 || !strings.Contains(got.stderr, "accounts.work.read_credential_env") || strings.Contains(got.stderr, "SUPER_SECRET_VAR_NAME") {
+			t.Fatalf("exit, stderr = %d, %q; want config key and no environment variable", got.exit, got.stderr)
+		}
+	})
+
+	t.Run("depth sentinel rejects recursive credential command without spawning", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
+		pe.extra["MAILBOX_CREDENTIAL_DEPTH"] = "1"
+		got := execProbe(t, pe)
+		if got.exit == 0 || !strings.Contains(got.stderr, "recursion") {
+			t.Fatalf("exit, stderr = %d, %q; want recursion refusal", got.exit, got.stderr)
+		}
+		if spawns := readSpawns(t, pe); len(spawns) != 0 {
+			t.Fatalf("credential command spawns = %v, want none", spawns)
+		}
+	})
+
+	t.Run("command timeout kills its process group", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 1))
+		pe.extra["STUB_MODE"] = "sleep"
+		started := time.Now()
+		got := execProbe(t, pe)
+		if got.exit == 0 || !strings.Contains(got.stderr, "timed out") || time.Since(started) > 8*time.Second {
+			t.Fatalf("exit, stderr, duration = %d, %q, %s; want bounded timeout", got.exit, got.stderr, time.Since(started))
+		}
+	})
+
+	t.Run("descendant holding stdout cannot block command completion", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 1))
+		pe.extra["STUB_MODE"] = "descendant"
+		started := time.Now()
+		got := execProbe(t, pe)
+		if got.exit == 0 || time.Since(started) > 8*time.Second {
+			t.Fatalf("exit, stderr, duration = %d, %q, %s; want bounded empty-output failure", got.exit, got.stderr, time.Since(started))
+		}
+	})
+
+	t.Run("write source acquires on batch without touching populated read cache", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, writeCmd+"write_interactive = false\n", 0))
+		readSource := &CredentialSource{
+			Class: ClassRead,
+			Kind:  SourceCmd,
+			Argv:  []string{"token-helper", "--read"},
+			Argv0: filepath.Join(pe.stubs, "token-helper"),
+		}
+		fingerprint := sourceFingerprint("work", ClassRead, readSource)
+		path := filepath.Join(pe.cache, "work."+fingerprint+".token.json")
+		before := []byte(fmt.Sprintf(`{"access_token":"read-cache-token","route":"cmd","expiry":%q,"fingerprint":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339), fingerprint))
+		if err := os.WriteFile(path, before, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		pe.extra["GWS_WORK_READ_OAUTH"] = oauthJSON()
-		pe.extra["MAILBOX_TOKEN_URL"] = tokenServer(t, http.StatusBadRequest, `{"error":"invalid_grant"}`)
-		got := execProbe(t, pe)
-		if got.exit == 0 {
-			t.Fatalf("unexpected success: stdout = %q, stderr = %q", got.stdout, got.stderr)
-		}
-		if !strings.Contains(got.stderr, "invalid_grant") || !strings.Contains(got.stderr, "GWS_WORK_READ_OAUTH") {
-			t.Fatalf("stderr = %q, want invalid_grant and key", got.stderr)
-		}
-	})
-
-	t.Run("malformed oauth JSON is loud", func(t *testing.T) {
-		pe := newProbeEnv(t)
-		if err := os.WriteFile(pe.dmi, []byte("LENOVO\n"), 0o644); err != nil {
+		pe.extra["PROBE_CLASS"] = "write"
+		assertProbeSuccess(t, execProbe(t, pe), RouteCmd, "write.command.token-value-1234567890")
+		after, err := os.ReadFile(path)
+		if err != nil {
 			t.Fatal(err)
 		}
-		pe.extra["GWS_WORK_READ_OAUTH"] = `{"client_id":""}`
-		got := execProbe(t, pe)
-		if got.exit == 0 {
-			t.Fatalf("unexpected success: stdout = %q, stderr = %q", got.stdout, got.stderr)
-		}
-		if !strings.Contains(got.stderr, "client_id") || !strings.Contains(got.stderr, "GWS_WORK_READ_OAUTH") {
-			t.Fatalf("stderr = %q, want client_id and key", got.stderr)
+		if string(after) != string(before) {
+			t.Fatalf("write acquisition changed read cache: before=%q after=%q", before, after)
 		}
 	})
-}
 
-func TestScrubbedEnvironDropsCredentials(t *testing.T) {
-	credentialNames := append([]string{
-		"MAILBOX_TOKEN",
-		"MAILBOX_TOKEN_URL",
-		"MAILBOX_SECRETS_REEXEC",
-		"SECRETSD_SESSION_TOKEN_FILE",
-		"GWS_WORK_MODIFY_OAUTH",
-		"GWS_FUTURE_SCOPE_OAUTH",
-	}, oauthEnvironmentNames...)
-	for _, name := range credentialNames {
-		t.Setenv(name, "credential-decoy")
-	}
-	t.Setenv("MAILBOX_UNRELATED", "kept")
-
-	environment := strings.Join(ScrubbedEnviron(), "\n")
-	for _, name := range credentialNames {
-		if strings.Contains(environment, name+"=") {
-			t.Errorf("ScrubbedEnviron() leaked %s: %q", name, environment)
+	t.Run("write interactive command is refused in batch and produces a completion diagnostic in TUI", func(t *testing.T) {
+		batch := newProbeEnv(t)
+		writeProbeConfig(t, batch, readCommandConfig(readCmd, writeCmd, 0))
+		batch.extra["PROBE_CLASS"] = "write"
+		got := execProbe(t, batch)
+		if got.exit == 0 || !strings.Contains(got.stderr, "accounts.work.write_credential_cmd") {
+			t.Fatalf("batch result = %+v, want write config-key refusal", got)
 		}
-	}
-	if !strings.Contains(environment, "MAILBOX_UNRELATED=kept") {
-		t.Fatalf("ScrubbedEnviron() = %q, want unrelated environment retained", environment)
-	}
+
+		tui := newProbeEnv(t)
+		writeProbeConfig(t, tui, readCommandConfig(readCmd, writeCmd, 0))
+		tui.extra["PROBE_CLASS"] = "write"
+		tui.extra["PROBE_SURFACE"] = "tui"
+		assertProbeSuccess(t, execProbe(t, tui), RouteCmd, "write.command.token-value-1234567890")
+	})
+
+	t.Run("successful command diagnostic is sanitized before a surface drains it", func(t *testing.T) {
+		pe := newProbeEnv(t)
+		writeProbeConfig(t, pe, readCommandConfig(readCmd, "", 0))
+		pe.extra["STUB_MODE"] = "diag"
+		got := execProbe(t, pe)
+		assertProbeSuccess(t, got, RouteCmd, "diagnostic.command.token-1234567890")
+		if !strings.Contains(got.stdout, "DIAG=grant expires in 7d") || strings.Contains(got.stdout, "\x1b") {
+			t.Fatalf("stdout = %q, want sanitized diagnostic", got.stdout)
+		}
+	})
+
+	t.Run("no-config mode works only with MAILBOX_TOKEN", func(t *testing.T) {
+		withToken := newProbeEnv(t)
+		withToken.extra["MAILBOX_TOKEN"] = "caller-token"
+		assertProbeSuccess(t, execProbe(t, withToken), RouteEnvToken, "caller-token")
+
+		withoutToken := newProbeEnv(t)
+		got := execProbe(t, withoutToken)
+		if got.exit == 0 || !strings.Contains(got.stderr, "Configuration") {
+			t.Fatalf("exit, stderr = %d, %q; want no-config guidance", got.exit, got.stderr)
+		}
+	})
 }

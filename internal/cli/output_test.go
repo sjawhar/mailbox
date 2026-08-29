@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/render"
 )
 
@@ -61,7 +60,7 @@ func TestPrintThreadsSanitizesMailText(t *testing.T) {
 func TestAttachmentListSanitizesMailFilename(t *testing.T) {
 	var output bytes.Buffer
 	ctx := &cmdCtx{stdout: &output}
-	if code := ctx.attachmentList(auth.AccountWork, nil, "thread", []render.Attachment{{
+	if code := ctx.attachmentList("work", nil, "thread", []render.Attachment{{
 		N:        1,
 		Filename: "report\x1b]52;c;clipboard\a.pdf",
 		MimeType: "application/pdf",

@@ -6,7 +6,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
 )
 
@@ -49,17 +48,17 @@ func TestWideHelpIncludesSelectionBinding(t *testing.T) {
 	}
 }
 
-func TestPreviewScopeErrorIncludesProvisioningHint(t *testing.T) {
+func TestPreviewScopeErrorNamesConfiguredReadSource(t *testing.T) {
 	api := &fakeAPI{threads: testThreads(1), getErr: &gmail.APIError{Status: 403, Reason: "insufficientPermissions", Message: "scope missing"}}
-	model := newTestModel(api, auth.AccountWork)
+	model := newTestModel(api, "work")
 	model.setSize(120, model.layout.height)
 	model.preview.requestedID = api.threads[0].ID
 	model.preview.loading = true
 	model, fetch := update(t, model, previewRequestMsg{request: model.currentRequest(previewOperation), threadID: api.threads[0].ID})
 	model, _ = update(t, model, runCmd(t, fetch))
-	for _, want := range []string{"provision:", "read-only", "gmail.readonly"} {
+	for _, want := range []string{"provision:", "accounts.work.read_credential_env", "gmail.readonly"} {
 		if !strings.Contains(model.status, want) {
-			t.Fatalf("preview scope error status = %q, want broker provisioning hint to contain %q", model.status, want)
+			t.Fatalf("preview scope error status = %q, want provisioning hint to contain %q", model.status, want)
 		}
 	}
 }

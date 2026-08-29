@@ -2,118 +2,144 @@ package auth
 
 import (
 	"context"
-	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestProvisioningHint(t *testing.T) {
-	cases := []struct {
-		name    string
-		account Account
-		route   Route
-		want    []string
-	}{
-		{name: "broker", account: AccountWork, route: RouteBroker, want: []string{"read-only", "GWS_WORK_MODIFY_OAUTH", "human tier", "README"}},
-		{name: "env token", account: AccountWork, route: RouteEnvToken, want: []string{"gmail.modify", "MAILBOX_TOKEN", "README"}},
-		{name: "personal oauth", account: AccountPersonal, route: RouteOAuthRefresh, want: []string{"gmail.modify", "GWS_PERSONAL_MODIFY_OAUTH", "README"}},
-		{name: "mint", account: AccountWork, route: RouteMint, want: []string{"GWS_WORK_MODIFY_OAUTH", "gmail.modify", "ceremony"}},
-		{name: "mutation env", account: AccountPersonal, route: RouteMutationEnv, want: []string{"GWS_PERSONAL_MODIFY_OAUTH", "gmail.modify", "ceremony"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := ProvisioningHint(tc.account, tc.route, "gmail.modify")
-			for _, want := range tc.want {
-				if !strings.Contains(got, want) {
-					t.Fatalf("ProvisioningHint(%q, %q) = %q, want it to contain %q", tc.account, tc.route, got, want)
-				}
-			}
-		})
-	}
+type staticAcquirer struct {
+	token Token
+	err   error
+	calls int
 }
 
-func TestFindSecretsRequiresPathExecutable(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
+func (a *staticAcquirer) Acquire(context.Context, *AccountConfig, Class) (Acquired, error) {
+	a.calls++
+	if a.err != nil {
+		return Acquired{}, a.err
+	}
+	return Acquired{Token: a.token}, nil
+}
 
-	_, err := findSecrets()
+func readTestConfig() (*Config, *AccountConfig) {
+	acct := &AccountConfig{Name: "work", Read: &CredentialSource{Class: ClassRead, Kind: SourceEnv, EnvVar: "TEST_READ", ConfigKey: "accounts.work.read_credential_env"}}
+	return &Config{Path: "/tmp/mailbox.toml", Accounts: []*AccountConfig{acct}, CredentialTimeout: defaultCredentialTimeout}, acct
+}
+
+func TestRefreshRefusesRedirectsFromLoopbackTokenEndpoint(t *testing.T) {
+	redirectHits := 0
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		redirectHits++
+		if err := request.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"exfiltrated","expires_in":3600}`))
+	}))
+	t.Cleanup(redirectTarget.Close)
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		http.Redirect(w, request, redirectTarget.URL, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirector.Close)
+	t.Setenv("MAILBOX_TOKEN_URL", redirector.URL)
+
+	_, _, err := refreshAccessToken(context.Background(), "accounts.work.read_credential_env", oauthJSON())
 	if err == nil {
-		t.Fatal("findSecrets() succeeded without a PATH executable")
+		t.Fatal("refresh followed a redirect from the loopback endpoint")
 	}
-	if got, want := err.Error(), "secrets executable not found on PATH"; got != want {
-		t.Fatalf("findSecrets() error = %q, want %q", got, want)
+	if redirectHits != 0 {
+		t.Fatalf("redirect target received %d credential POSTs", redirectHits)
 	}
 }
 
-func TestSourceCacheLifecycle(t *testing.T) {
-	t.Setenv("MAILBOX_TOKEN", "")
-	t.Setenv("GWS_WORK_READ_OAUTH", "")
-	t.Setenv("GWS_PERSONAL_READ_OAUTH", "")
-	t.Setenv("MAILBOX_DMI_SYS_VENDOR", t.TempDir()+"/not-ec2")
-	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
-
-	if err := writeCache(AccountWork, cachedToken{
-		AccessToken: "cached-token",
-		Route:       RouteBroker,
-		Expiry:      time.Now().Add(30 * time.Minute),
-	}); err != nil {
+func TestSourceUsesFingerprintBoundReadCacheAndInvalidatesWithoutAcquiring(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("MAILBOX_CACHE_DIR", cache)
+	cfg, acct := readTestConfig()
+	fingerprint := sourceFingerprint(acct.Name, ClassRead, acct.Read)
+	if err := writeCache(acct.Name, fingerprint, cachedToken{AccessToken: "cached-token", Route: RouteEnv, Expiry: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-
-	source := NewSource(AccountWork)
-	token, err := source.Resolve(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	source := NewSource(cfg, acct)
+	acquirer := &staticAcquirer{token: Token{AccessToken: "fresh-token", Route: RouteEnv, Expiry: time.Now().Add(time.Hour)}}
+	token, err := source.Resolve(context.Background(), acquirer)
+	if err != nil || token.AccessToken != "cached-token" || token.Route != RouteCache || acquirer.calls != 0 {
+		t.Fatalf("Resolve = %+v, %v; calls = %d", token, err, acquirer.calls)
 	}
-	if token.Route != RouteCache || token.AccessToken != "cached-token" {
-		t.Fatalf("Resolve() = %#v, want cached token", token)
-	}
-	if source.Account() != AccountWork {
-		t.Fatalf("Account() = %q, want %q", source.Account(), AccountWork)
-	}
-	if source.LastRoute() != RouteCache {
-		t.Fatalf("LastRoute() = %q, want %q", source.LastRoute(), RouteCache)
-	}
-	state := source.CacheState()
-	if !state.Exists || !state.Valid || state.Expiry != token.Expiry {
-		t.Fatalf("CacheState() = %#v, want an existing valid cache", state)
-	}
-
 	if err := source.Invalidate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if state := source.CacheState(); state.Exists || state.Valid {
-		t.Fatalf("CacheState() after Invalidate = %#v, want no cache", state)
+		t.Fatalf("CacheState after Invalidate = %+v", state)
 	}
-	if _, err := source.AccessToken(context.Background()); !errors.As(err, new(*NeedsSecretsError)) {
-		t.Fatalf("AccessToken() after Invalidate error = %v, want NeedsSecretsError", err)
+	if _, err := source.ReadCredentials(acquirer).AccessToken(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if acquirer.calls != 1 {
+		t.Fatalf("acquisitions after explicit second read = %d, want 1", acquirer.calls)
 	}
 }
 
-func TestInvalidateLeavesEnvTokenCacheUntouched(t *testing.T) {
-	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+func TestSourceCallerOverridePinsReadCacheAndAcquisition(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("MAILBOX_CACHE_DIR", cache)
 	t.Setenv("MAILBOX_TOKEN", "caller-token")
-	if err := writeCache(AccountWork, cachedToken{
-		AccessToken: "cached-token",
-		Route:       RouteBroker,
-		Expiry:      time.Now().Add(30 * time.Minute),
-	}); err != nil {
+	cfg, acct := readTestConfig()
+	fingerprint := sourceFingerprint(acct.Name, ClassRead, acct.Read)
+	if err := writeCache(acct.Name, fingerprint, cachedToken{AccessToken: "cached-token", Route: RouteEnv, Expiry: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	path, err := cachePath(AccountWork)
+	path, err := cachePath(acct.Name, fingerprint)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	source := NewSource(AccountWork)
-	if got, err := source.AccessToken(context.Background()); err != nil || got != "caller-token" {
-		t.Fatalf("AccessToken() = %q, %v, want caller token", got, err)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := NewSource(cfg, acct)
+	acquirer := &staticAcquirer{token: Token{AccessToken: "fresh-token", Route: RouteEnv, Expiry: time.Now().Add(time.Hour)}}
+	if got, err := source.ReadCredentials(acquirer).AccessToken(context.Background()); err != nil || got != "caller-token" {
+		t.Fatalf("AccessToken = %q, %v", got, err)
 	}
 	if err := source.Invalidate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("env-token Invalidate removed cache %s: %v", path, err)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) || acquirer.calls != 0 {
+		t.Fatalf("cache, acquisitions changed under caller override: %q, %d", after, acquirer.calls)
+	}
+}
+
+func TestDiagnosticQueueBoundsOldestEntries(t *testing.T) {
+	var diagnostics []string
+	for index := range maxPendingDiagnostics + 1 {
+		diagnostics = appendDiagnostic(diagnostics, fmt.Sprintf("diagnostic-%d", index))
+	}
+	if len(diagnostics) != maxPendingDiagnostics || diagnostics[0] != "diagnostic-1" || diagnostics[len(diagnostics)-1] != fmt.Sprintf("diagnostic-%d", maxPendingDiagnostics) {
+		t.Fatalf("bounded diagnostics = %v", diagnostics)
+	}
+}
+
+func TestScopeHintNamesOnlyConfigMetadata(t *testing.T) {
+	acct := &AccountConfig{Name: "work", Write: &CredentialSource{Class: ClassWrite, Kind: SourceCmd, Argv0: "/opt/helper", Argv: []string{"helper", "--secret", "value"}, ConfigKey: "accounts.work.write_credential_cmd"}}
+	hint := ScopeHint(acct, ClassWrite, RouteCmd, "gmail.modify")
+	for _, want := range []string{"accounts.work.write_credential_cmd", "/opt/helper", "gmail.modify"} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("ScopeHint = %q, want %q", hint, want)
+		}
+	}
+	for _, forbidden := range []string{"--secret", "value"} {
+		if strings.Contains(hint, forbidden) {
+			t.Fatalf("ScopeHint leaked command argument %q in %q", forbidden, hint)
+		}
 	}
 }

@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/render"
 )
@@ -61,17 +61,29 @@ func (message actionDoneMsg) requestRef() asyncRequest { return message.request 
 type errMsg struct {
 	request asyncRequest
 	err     error
+	retry   func(asyncRequest) tea.Cmd
 }
 
 func (message errMsg) requestRef() asyncRequest { return message.request }
 
-type mintDoneMsg struct {
+// unlockArmedMsg creates a status-to-spawn fence for credential commands.
+// Bubble Tea renders the attribution set by startUnlock before this message
+// dispatches the acquirer.
+type unlockArmedMsg struct {
 	request asyncRequest
+	class   auth.Class
+}
+
+func (message unlockArmedMsg) requestRef() asyncRequest { return message.request }
+
+type unlockDoneMsg struct {
+	request asyncRequest
+	class   auth.Class
 	note    string
 	err     error
 }
 
-func (message mintDoneMsg) requestRef() asyncRequest { return message.request }
+func (message unlockDoneMsg) requestRef() asyncRequest { return message.request }
 
 type labelsMsg struct {
 	request asyncRequest
@@ -132,33 +144,6 @@ func getThreadCmd(request asyncRequest, id string) tea.Cmd {
 	}
 }
 
-const mintStderrTailLimit = 8 << 10
-
-// mintStderrTail retains only the last mint stderr bytes so a noisy child
-// cannot grow the TUI process before its status note is rendered.
-type mintStderrTail struct {
-	data []byte
-}
-
-func (b *mintStderrTail) Write(p []byte) (int, error) {
-	if b.data == nil {
-		b.data = make([]byte, 0, mintStderrTailLimit)
-	}
-	if len(p) >= mintStderrTailLimit {
-		b.data = b.data[:mintStderrTailLimit]
-		copy(b.data, p[len(p)-mintStderrTailLimit:])
-		return len(p), nil
-	}
-	if overflow := len(b.data) + len(p) - mintStderrTailLimit; overflow > 0 {
-		copy(b.data, b.data[overflow:])
-		b.data = b.data[:len(b.data)-overflow]
-	}
-	b.data = append(b.data, p...)
-	return len(p), nil
-}
-
-func (b *mintStderrTail) String() string { return string(b.data) }
-
 const previewDebounce = 125 * time.Millisecond
 
 func previewDebounceCmd(request asyncRequest, threadID string) tea.Cmd {
@@ -195,31 +180,11 @@ func trashThreadsCmd(request asyncRequest, ids []string) tea.Cmd {
 	}
 }
 
-// mintCmd runs the account's minter and reports the child's sanitized stderr
-// tail alongside the outcome.
-func mintCmd(request asyncRequest) tea.Cmd {
+func unlockCmd(request asyncRequest, class auth.Class, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
-		var stderr mintStderrTail
-		err := request.ctx.mint(context.Background(), &stderr)
-		return mintDoneMsg{request: request, note: mintNote(stderr.String()), err: err}
+		note, err := request.ctx.unlock(ctx, class)
+		return unlockDoneMsg{request: request, class: class, note: note, err: err}
 	}
-}
-
-// mintNote reduces child stderr to a status-line-safe fragment: the last
-// non-empty sanitized line, capped at 200 characters.
-func mintNote(stderr string) string {
-	lines := strings.Split(render.SanitizeTerminal(strings.TrimSpace(stderr)), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
-		}
-		if len(line) > 200 {
-			line = line[:200]
-		}
-		return line
-	}
-	return ""
 }
 
 func listLabelsCmd(request asyncRequest) tea.Cmd {
@@ -244,7 +209,13 @@ func saveAttachmentCmd(request asyncRequest, attachment render.Attachment) tea.C
 		}
 		contents, err := request.ctx.api.GetAttachment(context.Background(), attachment.MessageID, attachment.AttachmentID)
 		if err != nil {
-			return errMsg{request: request, err: err}
+			return errMsg{
+				request: request,
+				err:     err,
+				retry: func(retry asyncRequest) tea.Cmd {
+					return saveAttachmentCmd(retry, attachment)
+				},
+			}
 		}
 		if err := render.WriteAttachment(path, contents, overwrite); err != nil {
 			if errors.Is(err, os.ErrExist) {
@@ -258,7 +229,7 @@ func saveAttachmentCmd(request asyncRequest, attachment render.Attachment) tea.C
 
 func openLinkCmd(request asyncRequest, target string) tea.Cmd {
 	return func() tea.Msg {
-		if err := openURL(target); err != nil {
+		if err := openURL(target, auth.ScrubbedEnviron(request.ctx.cfg)); err != nil {
 			return errMsg{request: request, err: err}
 		}
 		return openedMsg{request: request, target: target}
@@ -269,9 +240,15 @@ func openHTMLCmd(request asyncRequest, thread *gmail.Thread) tea.Cmd {
 	return func() tea.Msg {
 		_, path, err := render.WriteHTMLBackstop(context.Background(), thread, request.ctx.api.GetAttachment)
 		if err != nil {
-			return errMsg{request: request, err: err}
+			return errMsg{
+				request: request,
+				err:     err,
+				retry: func(retry asyncRequest) tea.Cmd {
+					return openHTMLCmd(retry, thread)
+				},
+			}
 		}
-		if err := openURL(path); err != nil {
+		if err := openURL(path, auth.ScrubbedEnviron(request.ctx.cfg)); err != nil {
 			return errMsg{request: request, err: err}
 		}
 		return openedMsg{request: request, target: path, clearLoading: true}

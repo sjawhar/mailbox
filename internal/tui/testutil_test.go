@@ -5,8 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -34,7 +34,7 @@ type fakeAPI struct {
 	modifyErrs  []error
 	trashErrs   []error
 	labelsErr   error
-
+	labelsErrs  []error
 	attachments map[string][]byte
 }
 
@@ -123,6 +123,11 @@ func (f *fakeAPI) TrashThreads(_ context.Context, ids []string) error {
 }
 
 func (f *fakeAPI) ListLabels(_ context.Context) ([]gmail.Label, error) {
+	if len(f.labelsErrs) > 0 {
+		err := f.labelsErrs[0]
+		f.labelsErrs = f.labelsErrs[1:]
+		return nil, err
+	}
 	if f.labelsErr != nil {
 		return nil, f.labelsErr
 	}
@@ -132,22 +137,70 @@ func (f *fakeAPI) ListLabels(_ context.Context) ([]gmail.Label, error) {
 func (f *fakeAPI) GetAttachment(_ context.Context, messageID, attachmentID string) ([]byte, error) {
 	return f.attachments[messageID+":"+attachmentID], nil
 }
-func newTestApp(rows []*gmail.Thread) (app, *fakeAPI) {
-	api := &fakeAPI{threads: rows, attachments: make(map[string][]byte)}
-	return newTestModel(api, auth.AccountWork), api
+func testConfig() *auth.Config {
+	work := &auth.AccountConfig{Name: "work", Read: &auth.CredentialSource{Class: auth.ClassRead, Kind: auth.SourceEnv, EnvVar: "TEST_WORK", ConfigKey: "accounts.work.read_credential_env"}}
+	personal := &auth.AccountConfig{Name: "personal", Read: &auth.CredentialSource{Class: auth.ClassRead, Kind: auth.SourceEnv, EnvVar: "TEST_PERSONAL", ConfigKey: "accounts.personal.read_credential_env"}}
+	return &auth.Config{Accounts: []*auth.AccountConfig{work, personal}, DefaultAccount: "work"}
 }
 
-func newTestModel(api gmailAPI, account auth.Account) app {
-	ctx := &accountCtx{
-		account:            account,
-		api:                api,
-		lastRoute:          func() auth.Route { return auth.RouteBroker },
-		mutationRoute:      func() auth.Route { return auth.RouteMint },
-		mutationReady:      func() bool { return true },
-		invalidateMutation: func() {},
-		mint:               func(context.Context, io.Writer) error { return nil },
+func testAccount(name string) *auth.AccountConfig {
+	return &auth.AccountConfig{
+		Name: name,
+		Read: &auth.CredentialSource{
+			Class:     auth.ClassRead,
+			Kind:      auth.SourceEnv,
+			EnvVar:    "TEST_" + strings.ToUpper(name),
+			ConfigKey: "accounts." + name + ".read_credential_env",
+		},
 	}
-	model := newApp(ctx)
+}
+
+func testConfigWithAccounts(accounts ...*auth.AccountConfig) *auth.Config {
+	return &auth.Config{
+		Path:           "/tmp/mailbox/config.toml",
+		Accounts:       accounts,
+		DefaultAccount: accounts[0].Name,
+	}
+}
+
+func testAccountCtx(cfg *auth.Config, acct *auth.AccountConfig, api gmailAPI) *accountCtx {
+	return &accountCtx{
+		cfg:             cfg,
+		acct:            acct,
+		account:         acct.Name,
+		api:             api,
+		lastRoute:       func() auth.Route { return auth.RouteEnv },
+		writeRoute:      func() auth.Route { return auth.RouteCmd },
+		writeReady:      func() bool { return true },
+		invalidateWrite: func() {},
+		unlock: func(context.Context, auth.Class) (string, error) {
+			return "", nil
+		},
+		takeDiagnostic: func(auth.Class) string {
+			return ""
+		},
+	}
+}
+
+func newTestApp(rows []*gmail.Thread) (app, *fakeAPI) {
+	api := &fakeAPI{threads: rows, attachments: make(map[string][]byte)}
+	return newTestModel(api, "work"), api
+}
+
+func newTestModel(api gmailAPI, account string) app {
+	cfg := testConfig()
+	acct, _ := cfg.Account(account)
+	model := newApp(testAccountCtx(cfg, acct, api))
+	model.list.rows = append([]*gmail.Thread(nil), testAPIThreads(api)...)
+	return model
+}
+
+func newTestModelWithConfig(cfg *auth.Config, account string, api gmailAPI) app {
+	acct, ok := cfg.Account(account)
+	if !ok {
+		panic("test account missing: " + account)
+	}
+	model := newApp(testAccountCtx(cfg, acct, api))
 	model.list.rows = append([]*gmail.Thread(nil), testAPIThreads(api)...)
 	return model
 }
@@ -156,19 +209,11 @@ func switchToPersonal(t *testing.T, model app, api gmailAPI) app {
 	t.Helper()
 	originalFactory := newAccountCtx
 	t.Cleanup(func() { newAccountCtx = originalFactory })
-	newAccountCtx = func(account auth.Account) (*accountCtx, error) {
-		if account != auth.AccountPersonal {
-			t.Fatalf("factory account = %q, want personal", account)
+	newAccountCtx = func(cfg *auth.Config, acct *auth.AccountConfig) (*accountCtx, error) {
+		if acct.Name != "personal" {
+			t.Fatalf("factory account = %q, want personal", acct.Name)
 		}
-		return &accountCtx{
-			account:            account,
-			api:                api,
-			lastRoute:          func() auth.Route { return auth.RouteOAuthRefresh },
-			mutationRoute:      func() auth.Route { return auth.RouteMint },
-			mutationReady:      func() bool { return true },
-			invalidateMutation: func() {},
-			mint:               func(context.Context, io.Writer) error { return nil },
-		}, nil
+		return testAccountCtx(cfg, acct, api), nil
 	}
 	model, command := update(t, model, key("tab"))
 	if command == nil {
@@ -218,6 +263,31 @@ func runMessage(t *testing.T, message tea.Msg) tea.Msg {
 	}
 	t.Fatal("command batch contained no result message")
 	return nil
+}
+
+func drainCommands(t *testing.T, model app, command tea.Cmd) app {
+	t.Helper()
+	queue := []tea.Cmd{command}
+	for len(queue) > 0 {
+		command := queue[0]
+		queue = queue[1:]
+		if command == nil {
+			continue
+		}
+		switch message := command().(type) {
+		case spinner.TickMsg:
+			continue
+		case tea.BatchMsg:
+			queue = append(queue, message...)
+		default:
+			var next tea.Cmd
+			model, next = update(t, model, message)
+			if next != nil {
+				queue = append(queue, next)
+			}
+		}
+	}
+	return model
 }
 
 func key(value string) tea.KeyMsg {

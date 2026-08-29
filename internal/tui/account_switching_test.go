@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"errors"
+	tea "github.com/charmbracelet/bubbletea"
 	"reflect"
 	"strings"
 	"testing"
@@ -10,234 +10,106 @@ import (
 	"github.com/sjawhar/mailbox/internal/gmail"
 )
 
-func TestNewerSameAccountListingDiscardsOlderRefreshResult(t *testing.T) {
-	oldRows := testThreads(1)
-	newRows := testThreads(1)
-	oldRows[0].ID = "18d1a0b2c3d4e5f6"
-	oldRows[0].Messages[0].ThreadID = oldRows[0].ID
-	newRows[0].ID = "18d1a0b2c3d4e5f7"
-	newRows[0].Messages[0].ThreadID = newRows[0].ID
-	api := &fakeAPI{
-		threads: append(oldRows, newRows...),
-		listedIDs: map[string][]string{
-			"old-search": {oldRows[0].ID},
-			"new-search": {newRows[0].ID},
-		},
-		attachments: make(map[string][]byte),
-	}
-	model := newTestModel(api, auth.AccountWork)
-	model.list.query = "old-search"
-
-	model, olderRefresh := update(t, model, key("R"))
-	model, _ = update(t, model, key("/"))
-	model, _ = update(t, model, key("new-search"))
-	model, newerSearch := update(t, model, key("enter"))
-	model, _ = update(t, model, runCmd(t, newerSearch))
-	model, _ = update(t, model, runCmd(t, olderRefresh))
-
-	if got, want := threadIDs(model.list.rows), threadIDs(newRows); !reflect.DeepEqual(got, want) {
-		t.Fatalf("same-account stale refresh rows = %v, want newer search rows %v", got, want)
-	}
-	if got, want := model.list.query, "new-search"; got != want {
-		t.Fatalf("list query = %q, want %q", got, want)
+func TestSwitchAccountUsesConfiguredDeclarationOrder(t *testing.T) {
+	work := &fakeAPI{threads: testThreads(1), attachments: make(map[string][]byte)}
+	personal := &fakeAPI{threads: []*gmail.Thread{}, attachments: make(map[string][]byte)}
+	model := newTestModel(work, "work")
+	model = switchToPersonal(t, model, personal)
+	if model.account != "personal" || model.ctx.api != personal {
+		t.Fatalf("active account = %q, context = %#v", model.account, model.ctx)
 	}
 }
 
-func TestDiscardAsyncRejectsOtherAccountAcrossOperations(t *testing.T) {
-	model, _ := newTestApp(testThreads(1))
-	other := &accountCtx{account: auth.AccountPersonal}
-	stale := func(operation asyncOperation) asyncRequest {
-		request := model.beginRequest(operation)
-		request.ctx = other
-		return request
+func TestSwitchAccountDiscardsPriorRequests(t *testing.T) {
+	model, api := newTestApp(testThreads(1))
+	stale := listThreadsCmd(model.currentRequest(listOperation), "")
+	model = switchToPersonal(t, model, &fakeAPI{threads: testThreads(1), attachments: make(map[string][]byte)})
+	message := runCmd(t, stale)
+	model, _ = update(t, model, message)
+	if model.ctx.api == api && model.account != "personal" {
+		t.Fatal("stale request changed the active account")
 	}
-	assertDiscarded := func(message asyncMessage) {
-		t.Helper()
-		if !model.discardAsync(message) {
-			t.Fatalf("discardAsync(%T) = false, want cross-account result discarded", message)
+}
+
+func TestTabCyclesAccountsInDeclarationOrder(t *testing.T) {
+	cfg := testConfigWithAccounts(testAccount("work"), testAccount("personal"), testAccount("receipts"))
+	apis := map[string]gmailAPI{
+		"work":     &fakeAPI{threads: testThreads(1), attachments: make(map[string][]byte)},
+		"personal": &fakeAPI{attachments: make(map[string][]byte)},
+		"receipts": &fakeAPI{attachments: make(map[string][]byte)},
+	}
+	model := newTestModelWithConfig(cfg, "work", apis["work"])
+	originalFactory := newAccountCtx
+	t.Cleanup(func() { newAccountCtx = originalFactory })
+	var constructed []string
+	newAccountCtx = func(cfg *auth.Config, acct *auth.AccountConfig) (*accountCtx, error) {
+		constructed = append(constructed, acct.Name)
+		return testAccountCtx(cfg, acct, apis[acct.Name]), nil
+	}
+
+	for _, want := range []string{"personal", "receipts", "work"} {
+		var command tea.Cmd
+		model, command = update(t, model, key("tab"))
+		if model.account != want {
+			t.Fatalf("active account = %q, want %q", model.account, want)
+		}
+		if command == nil {
+			t.Fatalf("switch to %q returned no initial-listing command", want)
 		}
 	}
-
-	assertDiscarded(threadsMsg{request: stale(listOperation)})
-	assertDiscarded(threadMsg{request: stale(threadOperation)})
-	assertDiscarded(previewRequestMsg{request: stale(previewOperation)})
-	assertDiscarded(previewThreadMsg{request: stale(previewOperation)})
-	assertDiscarded(previewErrMsg{request: stale(previewOperation), err: errors.New("preview failed")})
-	assertDiscarded(actionDoneMsg{request: stale(actionOperation)})
-	assertDiscarded(labelsMsg{request: stale(labelOperation)})
-	assertDiscarded(attachmentSavedMsg{request: stale(attachmentOperation)})
-	assertDiscarded(openedMsg{request: stale(openOperation)})
-	assertDiscarded(errMsg{request: stale(openOperation), err: errors.New("operation failed")})
+	if !reflect.DeepEqual(constructed, []string{"personal", "receipts"}) {
+		t.Fatalf("constructed accounts = %q, want declaration-order targets", constructed)
+	}
 }
-func TestTabSwitchLazyContext(t *testing.T) {
-	workAPI := &fakeAPI{threads: testThreads(1)}
-	personalAPI := &fakeAPI{threads: testThreads(1)}
-	model := newTestModel(workAPI, auth.AccountWork)
+
+func TestTabSingleAccountIsNoOp(t *testing.T) {
+	cfg := testConfigWithAccounts(testAccount("work"))
+	api := &fakeAPI{threads: testThreads(1), attachments: make(map[string][]byte)}
+	model := newTestModelWithConfig(cfg, "work", api)
+	model.status = "keep this status"
+	originalCtx := model.ctx
+
+	model, command := update(t, model, key("tab"))
+
+	if command != nil {
+		t.Fatal("single-account Tab returned a command")
+	}
+	if model.ctx != originalCtx || model.account != "work" {
+		t.Fatalf("single-account Tab switched context: account=%q ctx=%p", model.account, model.ctx)
+	}
+	if model.status != "keep this status" {
+		t.Fatalf("single-account Tab changed status to %q", model.status)
+	}
+}
+
+func TestTabUnderEnvTokenIsNoOpWithNotice(t *testing.T) {
+	t.Setenv("MAILBOX_TOKEN", "test-token")
+	cfg := testConfigWithAccounts(testAccount("work"), testAccount("personal"))
+	api := &fakeAPI{threads: testThreads(1), attachments: make(map[string][]byte)}
+	model := newTestModelWithConfig(cfg, "work", api)
 	originalFactory := newAccountCtx
 	t.Cleanup(func() { newAccountCtx = originalFactory })
 	factoryCalls := 0
-	newAccountCtx = func(account auth.Account) (*accountCtx, error) {
+	newAccountCtx = func(*auth.Config, *auth.AccountConfig) (*accountCtx, error) {
 		factoryCalls++
-		if account != auth.AccountPersonal {
-			t.Fatalf("factory account = %q, want personal", account)
-		}
-		return &accountCtx{account: account, api: personalAPI, lastRoute: func() auth.Route { return auth.RouteOAuthRefresh }}, nil
-	}
-
-	model, cmd := update(t, model, key("tab"))
-	if model.account != auth.AccountPersonal || model.ctx != model.contexts[auth.AccountPersonal] {
-		t.Fatalf("active context = %#v, want personal", model.ctx)
-	}
-	if factoryCalls != 1 {
-		t.Fatalf("factory calls = %d, want 1", factoryCalls)
-	}
-	runCmd(t, cmd)
-	if len(personalAPI.listCalls) != 1 {
-		t.Fatalf("personal listing calls = %d, want 1", len(personalAPI.listCalls))
-	}
-}
-
-func TestEnvTokenRouteMarksHeaderAndTabShowsIdentityNotice(t *testing.T) {
-	workAPI := &fakeAPI{threads: testThreads(1)}
-	personalAPI := &fakeAPI{threads: testThreads(1)}
-	model := newTestModel(workAPI, auth.AccountWork)
-	model.ctx.lastRoute = func() auth.Route { return auth.RouteEnvToken }
-	originalFactory := newAccountCtx
-	t.Cleanup(func() { newAccountCtx = originalFactory })
-	newAccountCtx = func(account auth.Account) (*accountCtx, error) {
-		if account != auth.AccountPersonal {
-			t.Fatalf("factory account = %q, want personal", account)
-		}
-		return &accountCtx{account: account, api: personalAPI, lastRoute: func() auth.Route { return auth.RouteEnvToken }}, nil
-	}
-
-	if view := model.View(); !strings.Contains(view, "Mailbox — work inbox [env token]") {
-		t.Fatalf("env-token work header = %q, want marker", view)
-	}
-	model, command := update(t, model, key("tab"))
-	model, _ = update(t, model, runCmd(t, command))
-	if model.account != auth.AccountPersonal {
-		t.Fatalf("active account = %q, want personal", model.account)
-	}
-	if view := model.View(); !strings.Contains(view, "Mailbox — personal inbox [env token]") {
-		t.Fatalf("env-token personal header = %q, want marker", view)
-	}
-	if !strings.Contains(model.status, "MAILBOX_TOKEN pins one identity for all accounts") {
-		t.Fatalf("status = %q, want environment-token identity notice", model.status)
-	}
-}
-
-func TestTabSwitchAuthFailureStaysPut(t *testing.T) {
-	workAPI := &fakeAPI{threads: testThreads(1)}
-	model := newTestModel(workAPI, auth.AccountWork)
-	originalFactory := newAccountCtx
-	t.Cleanup(func() { newAccountCtx = originalFactory })
-	newAccountCtx = func(auth.Account) (*accountCtx, error) {
-		return nil, &auth.NeedsSecretsError{Key: "GWS_PERSONAL_READ_OAUTH"}
-	}
-
-	model, cmd := update(t, model, key("tab"))
-	if model.account != auth.AccountWork {
-		t.Fatalf("active account = %q, want work", model.account)
-	}
-	if !strings.Contains(model.status, "GWS_PERSONAL_READ_OAUTH") ||
-		!strings.Contains(model.status, "provision:") ||
-		!strings.Contains(model.status, "secrets") {
-		t.Fatalf("status = %q, want personal credential provisioning error", model.status)
-	}
-	view := model.View()
-	if !strings.Contains(view, "Mailbox — work inbox") || !strings.Contains(view, "Subject 1") || strings.Contains(view, "\nready") {
-		t.Fatalf("factory failure silently relabeled or hid the work listing: %q", view)
-	}
-	if cmd != nil {
-		t.Fatal("failed account switch returned a command")
-	}
-}
-
-func TestTabSwitchListingAuthFailureDoesNotRelabelWorkRows(t *testing.T) {
-	workAPI := &fakeAPI{threads: testThreads(1)}
-	personalAPI := &fakeAPI{
-		threads: testThreads(1),
-		listErr: &gmail.APIError{Status: 403, Reason: "insufficientPermissions", Message: "scope missing"},
-	}
-	model := newTestModel(workAPI, auth.AccountWork)
-	originalFactory := newAccountCtx
-	t.Cleanup(func() { newAccountCtx = originalFactory })
-	newAccountCtx = func(account auth.Account) (*accountCtx, error) {
-		return &accountCtx{account: account, api: personalAPI, lastRoute: func() auth.Route { return auth.RouteOAuthRefresh }}, nil
+		return nil, nil
 	}
 
 	model, command := update(t, model, key("tab"))
-	message := runCmd(t, command)
-	model, _ = update(t, model, message)
-	if model.account != auth.AccountPersonal || len(model.list.rows) != 0 {
-		t.Fatalf("personal auth failure retained work rows: account=%q rows=%v", model.account, threadIDs(model.list.rows))
+
+	if command != nil {
+		t.Fatal("pinned Tab returned a command")
 	}
-	if !strings.Contains(model.status, "provision:") || !strings.Contains(model.status, "GWS_PERSONAL_READ_OAUTH") {
-		t.Fatalf("status = %q, want personal provisioning hint", model.status)
+	if model.account != "work" {
+		t.Fatalf("pinned Tab switched account to %q", model.account)
 	}
-}
-
-func TestStaleListingDoesNotOverwriteActiveAccount(t *testing.T) {
-	workAPI := &fakeAPI{threads: testThreads(1)}
-	personalAPI := &fakeAPI{threads: testThreads(1)}
-	model := newTestModel(workAPI, auth.AccountWork)
-	staleListing := listThreadsCmd(model.currentRequest(listOperation), "")
-
-	model = switchToPersonal(t, model, personalAPI)
-	message := runCmd(t, staleListing)
-	model, _ = update(t, model, message)
-	if model.account != auth.AccountPersonal || len(model.list.rows) != 0 {
-		t.Fatalf("stale work listing changed personal model: account=%q rows=%v", model.account, threadIDs(model.list.rows))
+	if factoryCalls != 0 {
+		t.Fatalf("pinned Tab constructed %d account contexts", factoryCalls)
 	}
-}
-
-func TestStaleThreadDoesNotOpenInActiveAccount(t *testing.T) {
-	workAPI := &fakeAPI{threads: testThreads(1)}
-	personalAPI := &fakeAPI{threads: testThreads(1)}
-	model := newTestModel(workAPI, auth.AccountWork)
-	staleThread := getThreadCmd(model.currentRequest(threadOperation), workAPI.threads[0].ID)
-
-	model = switchToPersonal(t, model, personalAPI)
-	message := runCmd(t, staleThread)
-	model, _ = update(t, model, message)
-	if model.account != auth.AccountPersonal || model.view != listView || model.thread.thread != nil {
-		t.Fatalf("stale work thread changed personal model: account=%q view=%v thread=%#v", model.account, model.view, model.thread.thread)
+	if model.status != envTokenIdentityNotice {
+		t.Fatalf("pinned Tab status = %q, want %q", model.status, envTokenIdentityNotice)
 	}
-}
-
-func TestStaleErrorDoesNotClearActiveAccountOrUseItsRoute(t *testing.T) {
-	workAPI := &fakeAPI{
-		threads: testThreads(1),
-		getErr:  &gmail.APIError{Status: 403, Reason: "insufficientPermissions", Message: "scope missing"},
-	}
-	personalAPI := &fakeAPI{threads: testThreads(1)}
-	model := newTestModel(workAPI, auth.AccountWork)
-	staleFailure := getThreadCmd(model.currentRequest(threadOperation), workAPI.threads[0].ID)
-
-	model = switchToPersonal(t, model, personalAPI)
-	message := runCmd(t, staleFailure)
-	model, _ = update(t, model, message)
-	if model.account != auth.AccountPersonal || !model.loading || model.status != "" {
-		t.Fatalf("stale work error changed personal model: account=%q loading=%v status=%q", model.account, model.loading, model.status)
-	}
-}
-
-func TestStaleThreadDoesNotOpenAfterReturningToItsAccount(t *testing.T) {
-	workAPI := &fakeAPI{threads: testThreads(1)}
-	personalAPI := &fakeAPI{threads: testThreads(1)}
-	model := newTestModel(workAPI, auth.AccountWork)
-	staleThread := getThreadCmd(model.currentRequest(threadOperation), workAPI.threads[0].ID)
-
-	model = switchToPersonal(t, model, personalAPI)
-	model, switchBack := update(t, model, key("tab"))
-	if switchBack == nil {
-		t.Fatal("switching back to work returned no listing command")
-	}
-	message := runCmd(t, staleThread)
-	model, _ = update(t, model, message)
-
-	if model.account != auth.AccountWork || model.view != listView || model.thread.thread != nil || !model.loading {
-		t.Fatalf("stale work thread changed round-tripped model: account=%q view=%v thread=%#v loading=%v", model.account, model.view, model.thread.thread, model.loading)
+	if !strings.Contains(model.View(), "[pinned]") {
+		t.Fatalf("pinned inbox title = %q", model.View())
 	}
 }

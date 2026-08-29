@@ -202,36 +202,26 @@ func TestWriteHTMLBackstopWritesSanitizedCIDDocument(t *testing.T) {
 	}
 }
 
-func TestOpenURLScrubsCredentials(t *testing.T) {
+func TestOpenURLUsesOnlyProvidedEnvironment(t *testing.T) {
 	directory, capture := t.TempDir(), filepath.Join(t.TempDir(), "environment")
 	opener := filepath.Join(directory, "xdg-open")
-	script := "#!/bin/sh\nprintf '%s,%s,%s,%s,%s,%s,%s,%s,%s' \"${MAILBOX_TOKEN:-}\" \"${MAILBOX_SECRETS_REEXEC:-}\" \"${GWS_WORK_MAIL_OAUTH:-}\" \"${GWS_PERSONAL_MAIL_OAUTH:-}\" \"${GWS_WORK_READ_OAUTH:-}\" \"${GWS_PERSONAL_SEND_OAUTH:-}\" \"${GWS_WORK_MODIFY_OAUTH:-}\" \"${GWS_PERSONAL_MODIFY_OAUTH:-}\" \"${SECRETSD_SESSION_TOKEN_FILE:-}\" > " + capture + "\n"
+	script := "#!/bin/sh\nprintf '%s,%s,%s,%s' \"${MAILBOX_TOKEN:-}\" \"${MAILBOX_TOKEN_URL:-}\" \"${MAILBOX_CONFIG:-}\" \"${SAFE:-}\" > " + capture + "\n"
 	if err := os.WriteFile(opener, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", directory+":"+os.Getenv("PATH"))
-	for _, name := range []string{
-		"MAILBOX_TOKEN",
-		"MAILBOX_SECRETS_REEXEC",
-		"GWS_WORK_MAIL_OAUTH",
-		"GWS_PERSONAL_MAIL_OAUTH",
-		"GWS_WORK_READ_OAUTH",
-		"GWS_PERSONAL_SEND_OAUTH",
-		"GWS_WORK_MODIFY_OAUTH",
-		"GWS_PERSONAL_MODIFY_OAUTH",
-		"SECRETSD_SESSION_TOKEN_FILE",
-	} {
+	for _, name := range []string{"MAILBOX_TOKEN", "MAILBOX_TOKEN_URL", "MAILBOX_CONFIG"} {
 		t.Setenv(name, "credential-decoy")
 	}
 
-	if err := OpenURL("https://example.test"); err != nil {
+	if err := OpenURL("https://example.test", []string{"SAFE=kept"}); err != nil {
 		t.Fatal(err)
 	}
 	environment, err := os.ReadFile(capture)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(environment), ",,,,,,,,"; got != want {
+	if got, want := string(environment), ",,,kept"; got != want {
 		t.Fatalf("OpenURL() child environment = %q, want %q", got, want)
 	}
 }

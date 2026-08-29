@@ -20,26 +20,26 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 	if err := requireArity(pos, 1, -1, action); err != nil {
 		return failUsage(cc.stderr, err)
 	}
-	account, source, client, code := next.startMutation()
+	account, source, client, code := next.startWrite()
 	if code != 0 {
 		return code
 	}
 	ctx := context.Background()
 	ids, err := resolveThreadRefs(ctx, client, account, pos)
 	if err != nil {
-		return next.mutationRuntimeError(account, source, err)
+		return next.writeRuntimeError(account, source, err)
 	}
 	if action == "archive" {
-		err = next.retryMutation(source, func() error {
+		err = next.retryWrite(source, func() error {
 			return client.ModifyThreads(ctx, ids, nil, []string{"INBOX"})
 		})
 	} else {
-		err = next.retryMutation(source, func() error {
+		err = next.retryWrite(source, func() error {
 			return client.TrashThreads(ctx, ids)
 		})
 	}
 	if err != nil {
-		return next.runtimeError(account, source, err)
+		return next.writeRuntimeError(account, source, err)
 	}
 	verb := "trashed"
 	if action == "archive" {
@@ -61,13 +61,13 @@ func runMark(cc *cmdCtx, args []string) int {
 	if mode != "read" && mode != "unread" {
 		return failUsage(cc.stderr, fmt.Errorf("mark mode must be read or unread"))
 	}
-	account, source, client, code := next.startMutation()
+	account, source, client, code := next.startWrite()
 	if code != 0 {
 		return code
 	}
 	ids, err := resolveThreadRefs(context.Background(), client, account, pos[1:])
 	if err != nil {
-		return next.mutationRuntimeError(account, source, err)
+		return next.writeRuntimeError(account, source, err)
 	}
 	var add, remove []string
 	if mode == "read" {
@@ -75,10 +75,10 @@ func runMark(cc *cmdCtx, args []string) int {
 	} else {
 		add = []string{"UNREAD"}
 	}
-	if err := next.retryMutation(source, func() error {
+	if err := next.retryWrite(source, func() error {
 		return client.ModifyThreads(context.Background(), ids, add, remove)
 	}); err != nil {
-		return next.runtimeError(account, source, err)
+		return next.writeRuntimeError(account, source, err)
 	}
 	return next.actionResult(account, source, "mark", "marked "+mode, ids)
 }
@@ -96,17 +96,17 @@ func runLabel(cc *cmdCtx, args []string) int {
 	if mode != "add" && mode != "rm" {
 		return failUsage(cc.stderr, fmt.Errorf("label mode must be add or rm"))
 	}
-	account, source, client, code := next.startMutation()
+	account, source, client, code := next.startWrite()
 	if code != 0 {
 		return code
 	}
 	label, err := resolveLabel(context.Background(), client, pos[1])
 	if err != nil {
-		return next.mutationRuntimeError(account, source, err)
+		return next.writeRuntimeError(account, source, err)
 	}
 	ids, err := resolveThreadRefs(context.Background(), client, account, pos[2:])
 	if err != nil {
-		return next.mutationRuntimeError(account, source, err)
+		return next.writeRuntimeError(account, source, err)
 	}
 	var add, remove []string
 	if mode == "add" {
@@ -114,10 +114,10 @@ func runLabel(cc *cmdCtx, args []string) int {
 	} else {
 		remove = []string{label.ID}
 	}
-	if err := next.retryMutation(source, func() error {
+	if err := next.retryWrite(source, func() error {
 		return client.ModifyThreads(context.Background(), ids, add, remove)
 	}); err != nil {
-		return next.runtimeError(account, source, err)
+		return next.writeRuntimeError(account, source, err)
 	}
 	verb := "labeled"
 	if mode == "rm" {
@@ -126,20 +126,21 @@ func runLabel(cc *cmdCtx, args []string) int {
 	return next.actionResult(account, source, "label", verb, ids)
 }
 
-func (cc *cmdCtx) actionResult(account auth.Account, source *auth.Source, action, verb string, ids []string) int {
+func (cc *cmdCtx) actionResult(account string, source *auth.Source, action, verb string, ids []string) int {
 	if cc.json {
 		output := struct {
 			Account   string   `json:"account"`
 			Action    string   `json:"action"`
 			ThreadIDs []string `json:"threadIds"`
 			OK        bool     `json:"ok"`
-		}{Account: string(account), Action: action, ThreadIDs: ids, OK: true}
+		}{Account: account, Action: action, ThreadIDs: ids, OK: true}
 		if err := writeJSON(cc.stdout, output); err != nil {
-			return cc.runtimeError(account, source, wrapError("write JSON", err))
+			return cc.writeRuntimeError(account, source, wrapError("write JSON", err))
 		}
-		return 0
+	} else {
+		fmt.Fprintf(cc.stdout, "%s %d thread(s)\n", verb, len(ids))
 	}
-	fmt.Fprintf(cc.stdout, "%s %d thread(s)\n", verb, len(ids))
+	cc.emitCredentialDiagnostic(source, auth.ClassWrite)
 	return 0
 }
 
