@@ -132,6 +132,28 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.view = listView
 		return m, nil
+	case keyNext:
+		if m.list.cursor+1 >= len(m.list.rows) {
+			m.status = "no newer threads"
+			m.statusError = false
+			return m, nil
+		}
+		m.list.cursor++
+		m.clearStatus()
+		m.loading = true
+		request := m.beginRequest(threadOperation)
+		return m, m.loadingCmd(getThreadCmd(request, m.list.rows[m.list.cursor].ID))
+	case keyPrevious:
+		if m.list.cursor-1 < 0 {
+			m.status = "no older threads"
+			m.statusError = false
+			return m, nil
+		}
+		m.list.cursor--
+		m.clearStatus()
+		m.loading = true
+		request := m.beginRequest(threadOperation)
+		return m, m.loadingCmd(getThreadCmd(request, m.list.rows[m.list.cursor].ID))
 	case keyQuotes:
 		m.thread.keepQuotes = !m.thread.keepQuotes
 		if err := m.renderCurrentThread(); err != nil {
@@ -180,7 +202,7 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m app) threadView() string {
-	return titleStyle.Render("Thread") + "\n" + m.viewport.View() + "\n" + m.statusView()
+	return titleStyle.Render("Thread") + "\n" + m.viewport.View() + "\n" + helpStyle.Render("n/p threads · j/k scroll · esc back") + "\n" + m.statusView()
 }
 
 func (m app) attachmentPickerView() string {
