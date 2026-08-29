@@ -49,6 +49,9 @@ func runCredentialCmd(ctx context.Context, cfg *Config, acct *AccountConfig, src
 	stderr := &tailBuffer{limit: mintStderrLimit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	if src.Interactive {
+		cmd.Stdin = os.Stdin
+	}
 
 	err = cmd.Run()
 	diagnostic := diagnosticFrom(stderr.String())

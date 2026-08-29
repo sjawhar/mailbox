@@ -159,6 +159,56 @@ read_credential_env = "PERSONAL_READ"
 	}
 }
 
+func TestNonInteractiveCredentialCommandDoesNotInheritParentStdin(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "stdin-record")
+	writeStub(t, dir, "stdin-helper", `
+if IFS= read -r value; then
+  printf 'read:%s\n' "$value" > "$STDIN_RECORD"
+else
+  printf 'eof\n' > "$STDIN_RECORD"
+fi
+printf '%s\n' 'stdin.command.token-value-1234567890'`)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalStdin := os.Stdin
+	os.Stdin = reader
+	t.Cleanup(func() {
+		os.Stdin = originalStdin
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+	if _, err := writer.Write([]byte("producer input\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STDIN_RECORD", record)
+
+	src := &CredentialSource{
+		Class:     ClassRead,
+		Kind:      SourceCmd,
+		Argv:      []string{"stdin-helper"},
+		Argv0:     filepath.Join(dir, "stdin-helper"),
+		ConfigKey: "accounts.work.read_credential_cmd",
+	}
+	acct := &AccountConfig{Name: "work", Read: src, Passthrough: []string{"STDIN_RECORD"}}
+	cfg := &Config{Path: filepath.Join(dir, "config.toml"), Accounts: []*AccountConfig{acct}, CredentialTimeout: defaultCredentialTimeout}
+	if _, err := runCredentialCmd(context.Background(), cfg, acct, src); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(data)), "eof"; got != want {
+		t.Fatalf("non-interactive credential command stdin result = %q, want %q", got, want)
+	}
+}
+
 func TestCredentialCommandDepthSpawnGate(t *testing.T) {
 	dir := t.TempDir()
 	spawnFile := filepath.Join(dir, "spawned")

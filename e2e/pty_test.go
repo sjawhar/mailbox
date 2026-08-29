@@ -419,16 +419,22 @@ func TestTUIUnlockFlowInRealPTY(t *testing.T) {
 	gmail := newFakeGmail(t)
 	stubs := t.TempDir()
 	argvFile := filepath.Join(stubs, "approve-argv")
+	stdinFile := filepath.Join(stubs, "approve-stdin")
 	approve := filepath.Join(stubs, "approve-write")
 	writeExecutable(t, approve, fmt.Sprintf(`#!/bin/sh
 printf '%%s\t' "$@" >> %q
 printf '\n' >> %q
+if [ -t 0 ]; then
+  printf 'tty\n' > %q
+else
+  printf 'not-tty\n' > %q
+fi
 sleep 2
 [ "$1" = "--" ] && shift
 export PTY_MODIFY_OAUTH=%q
 export MAILBOX_TOKEN_URL="$STUB_TOKEN_URL"
 exec "$@"
-`, argvFile, argvFile, testAuthorizedUser))
+`, argvFile, argvFile, stdinFile, stdinFile, testAuthorizedUser))
 
 	config := writeE2EConfig(t, stubs, fmt.Sprintf(`default_account = "work"
 [accounts.work]
@@ -467,6 +473,9 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 	lines := waitForFileLines(t, argvFile, time.Second)
 	if len(lines) != 1 {
 		t.Fatalf("credential command spawns = %q, want one", lines)
+	}
+	if got := fileLines(t, stdinFile); len(got) != 1 || got[0] != "tty" {
+		t.Fatalf("credential command stdin = %q, want [tty]", got)
 	}
 	gotArgv := strings.Fields(lines[0])
 	wantArgv := []string{"--", binary, "__mint", "--env", "PTY_MODIFY_OAUTH"}
