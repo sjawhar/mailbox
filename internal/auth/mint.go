@@ -4,43 +4,224 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/sjawhar/mailbox/internal/render"
 )
 
 const (
-	// mintStdoutLimit caps the __mint child's stdout (F11): the contract is
-	// one small JSON object; anything larger is shim chatter and fails loudly.
 	mintStdoutLimit = 16 << 10
-	// mintStderrLimit caps how much child stderr an error can embed (F12).
 	mintStderrLimit = 8 << 10
+	diagnosticLimit = 2048
 )
 
-// mintOutput is the __mint stdout contract: exactly one JSON object.
+var (
+	bareTokenPattern     = regexp.MustCompile(`^[A-Za-z0-9._~+/=-]{20,}$`)
+	ErrCredentialTimeout = errors.New("credential command timed out")
+)
+
+// EnvOnlyAcquirer can obtain only environment-declared credentials. It has no
+// command execution path.
+type EnvOnlyAcquirer struct {
+	Cfg *Config
+}
+
+func (a EnvOnlyAcquirer) Acquire(ctx context.Context, acct *AccountConfig, class Class) (Acquired, error) {
+	src := sourceFor(acct, class)
+	if src == nil {
+		return Acquired{}, credentialError(a.Cfg, acct, class, nil, ReasonNoSource)
+	}
+	if src.Kind != SourceEnv {
+		return Acquired{}, credentialError(a.Cfg, acct, class, src, ReasonInteractive)
+	}
+	return acquireEnv(ctx, a.Cfg, acct, src)
+}
+
+// ExecAcquirer can obtain environment credentials and non-interactive command
+// credentials. BatchAcquirer selects it only for the latter.
+type ExecAcquirer struct {
+	Cfg *Config
+}
+
+func (a ExecAcquirer) Acquire(ctx context.Context, acct *AccountConfig, class Class) (Acquired, error) {
+	src := sourceFor(acct, class)
+	if src == nil {
+		return Acquired{}, credentialError(a.Cfg, acct, class, nil, ReasonNoSource)
+	}
+	if src.Kind == SourceEnv {
+		return acquireEnv(ctx, a.Cfg, acct, src)
+	}
+	if src.Interactive {
+		return Acquired{}, credentialError(a.Cfg, acct, class, src, ReasonInteractive)
+	}
+	return runCredentialCmd(ctx, a.Cfg, acct, src)
+}
+
+// InteractiveExecAcquirer is the sole acquirer that can execute interactive
+// credential commands. Only the TUI constructs it.
+type InteractiveExecAcquirer struct {
+	Cfg *Config
+}
+
+func (a InteractiveExecAcquirer) Acquire(ctx context.Context, acct *AccountConfig, class Class) (Acquired, error) {
+	src := sourceFor(acct, class)
+	if src == nil {
+		return Acquired{}, credentialError(a.Cfg, acct, class, nil, ReasonNoSource)
+	}
+	if src.Kind == SourceEnv {
+		return acquireEnv(ctx, a.Cfg, acct, src)
+	}
+	return runCredentialCmd(ctx, a.Cfg, acct, src)
+}
+
+type refusalAcquirer struct {
+	err *NeedsCredentialError
+}
+
+func (a refusalAcquirer) Acquire(context.Context, *AccountConfig, Class) (Acquired, error) {
+	return Acquired{}, a.err
+}
+
+// BatchAcquirer is the choke point for every non-interactive surface. Its
+// selected type makes a forbidden command spawn impossible for env, absent,
+// and interactive sources.
+func BatchAcquirer(cfg *Config, acct *AccountConfig, class Class) Acquirer {
+	src := sourceFor(acct, class)
+	if src == nil {
+		return refusalAcquirer{err: credentialError(cfg, acct, class, nil, ReasonNoSource)}
+	}
+	if src.Kind == SourceEnv {
+		return EnvOnlyAcquirer{Cfg: cfg}
+	}
+	if src.Interactive {
+		return refusalAcquirer{err: credentialError(cfg, acct, class, src, ReasonInteractive)}
+	}
+	return ExecAcquirer{Cfg: cfg}
+}
+
+func acquireEnv(ctx context.Context, cfg *Config, acct *AccountConfig, src *CredentialSource) (Acquired, error) {
+	raw := os.Getenv(src.EnvVar)
+	if raw == "" {
+		return Acquired{}, credentialError(cfg, acct, src.Class, src, ReasonEnvUnset)
+	}
+	if raw[0] == '{' {
+		accessToken, expiry, err := refreshAccessToken(ctx, src.ConfigKey, raw)
+		if err != nil {
+			return Acquired{}, err
+		}
+		return Acquired{Token: Token{AccessToken: accessToken, Route: RouteEnv, Expiry: expiry}}, nil
+	}
+	token, err := parseBareCredential([]byte(raw), RouteEnv)
+	if err != nil {
+		return Acquired{}, fmt.Errorf("credential %s: %w", safeForTerminal(src.ConfigKey), err)
+	}
+	return Acquired{Token: token}, nil
+}
+
+func runCredentialCmd(ctx context.Context, cfg *Config, acct *AccountConfig, src *CredentialSource) (Acquired, error) {
+	if current, ok := os.LookupEnv(credentialDepthEnvironment); ok {
+		if depth, err := strconv.Atoi(current); err == nil && depth >= 1 {
+			return Acquired{}, credentialError(cfg, acct, src.Class, src, ReasonRecursion)
+		}
+	}
+
+	timeout := defaultCredentialTimeout
+	if cfg != nil && cfg.CredentialTimeout > 0 {
+		timeout = cfg.CredentialTimeout
+	}
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(deadline, src.Argv0, src.Argv[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
+	cmd.Env = CredentialChildEnviron(cfg, acct)
+	stdout := &cappedBuffer{limit: mintStdoutLimit}
+	stderr := &tailBuffer{limit: mintStderrLimit}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	err := cmd.Run()
+	diagnostic := diagnosticFrom(stderr.String())
+	if err != nil {
+		if errors.Is(deadline.Err(), context.DeadlineExceeded) {
+			return Acquired{}, credentialCommandError(src, diagnostic, ErrCredentialTimeout)
+		}
+		return Acquired{}, credentialCommandError(src, diagnostic, err)
+	}
+	token, err := parseCredentialOutput(stdout.Bytes())
+	if err != nil {
+		return Acquired{}, credentialCommandError(src, diagnostic, err)
+	}
+	return Acquired{Token: token, Diagnostic: diagnostic}, nil
+}
+
+func credentialCommandError(src *CredentialSource, diagnostic string, err error) error {
+	message := fmt.Sprintf("credential command %s (via %s)", safeForTerminal(src.ConfigKey), safeForTerminal(src.Argv0))
+	if diagnostic != "" {
+		return fmt.Errorf("%s: %w: %s", message, err, diagnostic)
+	}
+	return fmt.Errorf("%s: %w", message, err)
+}
+
+func parseCredentialOutput(output []byte) (Token, error) {
+	if len(output) > 0 && output[len(output)-1] == '\n' {
+		output = output[:len(output)-1]
+	}
+	if len(output) == 0 {
+		return Token{}, errors.New("credential command returned empty stdout")
+	}
+	if output[0] == '{' {
+		return parseMintOutput(output)
+	}
+	return parseBareCredential(output, RouteCmd)
+}
+
+func parseBareCredential(value []byte, route Route) (Token, error) {
+	if len(value) > 0 && value[len(value)-1] == '\n' {
+		value = value[:len(value)-1]
+	}
+	return parseBareToken(value, route)
+}
+
+func parseBareToken(value []byte, route Route) (Token, error) {
+	if len(value) > 4096 || !bareTokenPattern.Match(value) {
+		return Token{}, errors.New("credential output is not a valid bare token")
+	}
+	return Token{AccessToken: string(value), Route: route}, nil
+}
+
 type mintOutput struct {
 	AccessToken string `json:"access_token"`
 	Expiry      string `json:"expiry"`
 }
 
-// RunMintChild is the child side of `mailbox __mint --account <a>`. It reads
-// the authorized_user JSON from GWS_<ACCOUNT>_MODIFY_OAUTH in its own
-// environment (placed there by secrets), performs one OAuth refresh, prints
-// the token contract to stdout, and writes nothing to disk (spec §2).
-func RunMintChild(ctx context.Context, account Account, stdout io.Writer) error {
+// RunMintChild implements `mailbox __mint --env VAR`. It deliberately loads
+// no config and writes only the strict mint object to stdout.
+func RunMintChild(ctx context.Context, envVar string, stdout io.Writer) error {
+	if !envVarNamePattern.MatchString(envVar) {
+		return fmt.Errorf("invalid __mint --env value %q", envVar)
+	}
 	if os.Getenv("MAILBOX_TOKEN") != "" {
-		// F11: MAILBOX_TOKEN in a mint child is an error, not an override.
-		return fmt.Errorf("MAILBOX_TOKEN must not be set in a __mint child; the mint contract refreshes %s only", ModifyEnvKey(account))
+		return fmt.Errorf("MAILBOX_TOKEN must not be set in a __mint child; the mint contract refreshes %s only", envVar)
 	}
-	key := ModifyEnvKey(account)
-	rawJSON := os.Getenv(key)
-	if rawJSON == "" {
-		return &NeedsSecretsError{Key: key}
+	raw := os.Getenv(envVar)
+	if raw == "" {
+		return fmt.Errorf("%s is unset", envVar)
 	}
-	accessToken, expiry, err := refreshAccessToken(ctx, key, rawJSON)
+	accessToken, expiry, err := refreshAccessToken(ctx, envVar, raw)
 	if err != nil {
 		return err
 	}
@@ -50,74 +231,11 @@ func RunMintChild(ctx context.Context, account Account, stdout io.Writer) error 
 	})
 }
 
-// ExecMinter is the TUI's minter (spec §2 parent side): env fast-path, else
-// spawn `secrets GWS_<ACCOUNT>_MODIFY_OAUTH -- <self> __mint --account <a>`.
-type ExecMinter struct {
-	// Stderr receives the mint child's stderr stream live (secretsd's
-	// request/touch messaging, F12). Nil discards it. Mint errors embed a
-	// capped copy regardless.
-	Stderr io.Writer
-}
-
-func (m *ExecMinter) Mint(ctx context.Context, account Account) (Token, error) {
-	token, found, err := mintFromEnv(ctx, account)
-	if err != nil {
-		return Token{}, err
-	}
-	if found {
-		return token, nil
-	}
-	return m.mintViaSecrets(ctx, account)
-}
-
-func (m *ExecMinter) mintViaSecrets(ctx context.Context, account Account) (Token, error) {
-	key := ModifyEnvKey(account)
-	// os.Executable is a correctness measure (re-exec the same binary), not a
-	// tamper defense (spec accepted risk 2).
-	self, err := os.Executable()
-	if err != nil {
-		return Token{}, err
-	}
-	secretsBin, err := findSecrets()
-	if err != nil {
-		return Token{}, err
-	}
-	cmd := exec.CommandContext(ctx, secretsBin, key, "--", self, "__mint", "--account", string(account))
-	env := ScrubbedEnviron()
-	if tokenFile := os.Getenv("SECRETSD_SESSION_TOKEN_FILE"); tokenFile != "" {
-		// The one sanctioned re-injection (F3): the secretsd client proves
-		// session scope with it. Every other child mailbox spawns loses it.
-		env = append(env, "SECRETSD_SESSION_TOKEN_FILE="+tokenFile)
-	}
-	cmd.Env = env
-
-	stderr := &truncatingBuffer{limit: mintStderrLimit}
-	if m.Stderr != nil {
-		cmd.Stderr = io.MultiWriter(stderr, m.Stderr)
-	} else {
-		cmd.Stderr = stderr
-	}
-	stdout := &cappedBuffer{limit: mintStdoutLimit}
-	cmd.Stdout = stdout
-
-	if err := cmd.Run(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			return Token{}, fmt.Errorf("mint %s via secrets: %w", key, err)
-		}
-		return Token{}, fmt.Errorf("mint %s via secrets: %w: %s", key, err, detail)
-	}
-	token, err := parseMintOutput(stdout.Bytes())
-	if err != nil {
-		return Token{}, fmt.Errorf("mint %s: %w", key, err)
-	}
-	return token, nil
-}
-
-// parseMintOutput enforces the strict single-object contract (F11): unknown
-// fields, trailing bytes, and oversize output fail loudly. A scavenging scan
-// is prohibited; shim chatter must not yield a token.
+// parseMintOutput enforces one strict JSON object without trailing data.
 func parseMintOutput(data []byte) (Token, error) {
+	if len(data) > mintStdoutLimit {
+		return Token{}, fmt.Errorf("output exceeded %d bytes", mintStdoutLimit)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var output mintOutput
@@ -126,52 +244,65 @@ func parseMintOutput(data []byte) (Token, error) {
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return Token{}, fmt.Errorf("__mint stdout has trailing content after the token object")
+		return Token{}, errors.New("__mint stdout has trailing content after the token object")
 	}
 	if output.AccessToken == "" {
-		return Token{}, fmt.Errorf("__mint returned an empty access_token")
+		return Token{}, errors.New("__mint returned an empty access_token")
 	}
 	expiry, err := time.Parse(time.RFC3339, output.Expiry)
 	if err != nil {
 		return Token{}, fmt.Errorf("__mint returned invalid expiry: %w", err)
 	}
 	if !expiry.After(time.Now()) {
-		return Token{}, fmt.Errorf("__mint returned an already-expired token")
+		return Token{}, errors.New("__mint returned an already-expired token")
 	}
-	return Token{AccessToken: output.AccessToken, Route: RouteMint, Expiry: expiry}, nil
+	return Token{AccessToken: output.AccessToken, Route: RouteCmd, Expiry: expiry}, nil
 }
 
-// cappedBuffer fails loudly when the writer exceeds limit (stdout, F11).
+// cappedBuffer fails the command when stdout exceeds its strict contract cap.
 type cappedBuffer struct {
 	limit int
 	buf   bytes.Buffer
 }
 
-func (b *cappedBuffer) Write(p []byte) (int, error) {
-	if b.buf.Len()+len(p) > b.limit {
+func (b *cappedBuffer) Write(data []byte) (int, error) {
+	if b.buf.Len()+len(data) > b.limit {
 		return 0, fmt.Errorf("output exceeded %d bytes", b.limit)
 	}
-	return b.buf.Write(p)
+	return b.buf.Write(data)
 }
 
 func (b *cappedBuffer) Bytes() []byte { return b.buf.Bytes() }
 
-// truncatingBuffer keeps the first limit bytes and silently accepts the rest
-// (stderr: informational, must not kill the mint).
-type truncatingBuffer struct {
+// tailBuffer retains the final stderr bytes without allowing informational
+// output to keep the process alive or grow without bound.
+type tailBuffer struct {
 	limit int
 	buf   bytes.Buffer
 }
 
-func (b *truncatingBuffer) Write(p []byte) (int, error) {
-	if remaining := b.limit - b.buf.Len(); remaining > 0 {
-		if len(p) > remaining {
-			b.buf.Write(p[:remaining])
-		} else {
-			b.buf.Write(p)
-		}
+func (b *tailBuffer) Write(data []byte) (int, error) {
+	if len(data) >= b.limit {
+		b.buf.Reset()
+		_, _ = b.buf.Write(data[len(data)-b.limit:])
+		return len(data), nil
 	}
-	return len(p), nil
+	overflow := b.buf.Len() + len(data) - b.limit
+	if overflow > 0 {
+		existing := append([]byte(nil), b.buf.Bytes()[overflow:]...)
+		b.buf.Reset()
+		_, _ = b.buf.Write(existing)
+	}
+	_, _ = b.buf.Write(data)
+	return len(data), nil
 }
 
-func (b *truncatingBuffer) String() string { return b.buf.String() }
+func (b *tailBuffer) String() string { return b.buf.String() }
+
+func diagnosticFrom(value string) string {
+	value = render.SanitizeTerminal(strings.TrimSpace(value))
+	if len(value) > diagnosticLimit {
+		return value[:diagnosticLimit]
+	}
+	return value
+}

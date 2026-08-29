@@ -91,7 +91,7 @@ func renderPreview(thread *gmail.Thread, width int) (string, error) {
 
 func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	value := message.String()
-	if m.minting {
+	if m.unlocking {
 		switch value {
 		case keyArchive:
 			return m.startAction("archive", []string{m.thread.thread.ID}, nil, []string{"INBOX"}, true)

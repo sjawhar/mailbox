@@ -1,4 +1,4 @@
-// Command mailbox is a Gmail triage CLI + TUI for the work/personal accounts.
+// Command mailbox is a Gmail triage CLI and TUI.
 package main
 
 import (
@@ -26,7 +26,7 @@ func main() {
 	// Bare invocation (only global flags): the TUI path.
 	fs := flag.NewFlagSet("mailbox", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	accountFlag := fs.String("account", "", "work|personal")
+	accountFlag := fs.String("account", "", "account name from config")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -34,17 +34,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "mailbox: no subcommand and stdout is not a terminal — agents use subcommands (try 'mailbox inbox --json')")
 		os.Exit(2)
 	}
-	account, err := auth.ResolveAccount(*accountFlag)
+	cfg, err := auth.LoadConfig()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mailbox:", err)
 		os.Exit(1)
 	}
-	src := auth.NewSource(account)
-	if err := src.EnsureEnv(os.Args[1:]); err != nil {
+	account, err := cfg.ResolveAccount(*accountFlag)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "mailbox:", err)
 		os.Exit(1)
 	}
-	if err := tui.Run(account); err != nil {
+	if err := tui.Run(cfg, account); err != nil {
 		fmt.Fprintln(os.Stderr, "mailbox:", err)
 		os.Exit(1)
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 	"testing"
 
@@ -132,22 +131,38 @@ func (f *fakeAPI) ListLabels(_ context.Context) ([]gmail.Label, error) {
 func (f *fakeAPI) GetAttachment(_ context.Context, messageID, attachmentID string) ([]byte, error) {
 	return f.attachments[messageID+":"+attachmentID], nil
 }
-func newTestApp(rows []*gmail.Thread) (app, *fakeAPI) {
-	api := &fakeAPI{threads: rows, attachments: make(map[string][]byte)}
-	return newTestModel(api, auth.AccountWork), api
+func testConfig() *auth.Config {
+	work := &auth.AccountConfig{Name: "work", Read: &auth.CredentialSource{Class: auth.ClassRead, Kind: auth.SourceEnv, EnvVar: "TEST_WORK", ConfigKey: "accounts.work.read_credential_env"}}
+	personal := &auth.AccountConfig{Name: "personal", Read: &auth.CredentialSource{Class: auth.ClassRead, Kind: auth.SourceEnv, EnvVar: "TEST_PERSONAL", ConfigKey: "accounts.personal.read_credential_env"}}
+	return &auth.Config{Accounts: []*auth.AccountConfig{work, personal}, DefaultAccount: "work"}
 }
 
-func newTestModel(api gmailAPI, account auth.Account) app {
-	ctx := &accountCtx{
-		account:            account,
-		api:                api,
-		lastRoute:          func() auth.Route { return auth.RouteBroker },
-		mutationRoute:      func() auth.Route { return auth.RouteMint },
-		mutationReady:      func() bool { return true },
-		invalidateMutation: func() {},
-		mint:               func(context.Context, io.Writer) error { return nil },
+func testAccountCtx(cfg *auth.Config, acct *auth.AccountConfig, api gmailAPI) *accountCtx {
+	return &accountCtx{
+		cfg:             cfg,
+		acct:            acct,
+		account:         acct.Name,
+		api:             api,
+		lastRoute:       func() auth.Route { return auth.RouteEnv },
+		writeRoute:      func() auth.Route { return auth.RouteCmd },
+		writeReady:      func() bool { return true },
+		invalidateWrite: func() {},
+		unlock:          func(context.Context) error { return nil },
+		takeWriteDiagnostic: func() string {
+			return ""
+		},
 	}
-	model := newApp(ctx)
+}
+
+func newTestApp(rows []*gmail.Thread) (app, *fakeAPI) {
+	api := &fakeAPI{threads: rows, attachments: make(map[string][]byte)}
+	return newTestModel(api, "work"), api
+}
+
+func newTestModel(api gmailAPI, account string) app {
+	cfg := testConfig()
+	acct, _ := cfg.Account(account)
+	model := newApp(testAccountCtx(cfg, acct, api))
 	model.list.rows = append([]*gmail.Thread(nil), testAPIThreads(api)...)
 	return model
 }
@@ -156,19 +171,11 @@ func switchToPersonal(t *testing.T, model app, api gmailAPI) app {
 	t.Helper()
 	originalFactory := newAccountCtx
 	t.Cleanup(func() { newAccountCtx = originalFactory })
-	newAccountCtx = func(account auth.Account) (*accountCtx, error) {
-		if account != auth.AccountPersonal {
-			t.Fatalf("factory account = %q, want personal", account)
+	newAccountCtx = func(cfg *auth.Config, acct *auth.AccountConfig) (*accountCtx, error) {
+		if acct.Name != "personal" {
+			t.Fatalf("factory account = %q, want personal", acct.Name)
 		}
-		return &accountCtx{
-			account:            account,
-			api:                api,
-			lastRoute:          func() auth.Route { return auth.RouteOAuthRefresh },
-			mutationRoute:      func() auth.Route { return auth.RouteMint },
-			mutationReady:      func() bool { return true },
-			invalidateMutation: func() {},
-			mint:               func(context.Context, io.Writer) error { return nil },
-		}, nil
+		return testAccountCtx(cfg, acct, api), nil
 	}
 	model, command := update(t, model, key("tab"))
 	if command == nil {

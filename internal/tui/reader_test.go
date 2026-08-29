@@ -50,7 +50,7 @@ func TestSingleDigitLinkOpensImmediatelyWhenThreadHasAtMostNineLinks(t *testing.
 	originalOpenURL := openURL
 	t.Cleanup(func() { openURL = originalOpenURL })
 	var opened string
-	openURL = func(target string) error {
+	openURL = func(target string, _ []string) error {
 		opened = target
 		return nil
 	}
@@ -70,7 +70,7 @@ func TestMultiDigitLinkOpensOnEnter(t *testing.T) {
 	originalOpenURL := openURL
 	t.Cleanup(func() { openURL = originalOpenURL })
 	var opened string
-	openURL = func(target string) error {
+	openURL = func(target string, _ []string) error {
 		opened = target
 		return nil
 	}
@@ -120,7 +120,7 @@ func TestEscapeReturnsToInboxAfterOpeningMultiDigitLink(t *testing.T) {
 	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: thread})
 	originalOpenURL := openURL
 	t.Cleanup(func() { openURL = originalOpenURL })
-	openURL = func(string) error { return nil }
+	openURL = func(string, []string) error { return nil }
 
 	model, cmd := update(t, model, key("1"))
 	if cmd != nil {
@@ -218,7 +218,7 @@ func TestHTMLBackstopOpensSanitizedDocument(t *testing.T) {
 	originalOpenURL := openURL
 	t.Cleanup(func() { openURL = originalOpenURL })
 	var opened string
-	openURL = func(target string) error {
+	openURL = func(target string, _ []string) error {
 		opened = target
 		return nil
 	}
@@ -264,7 +264,7 @@ func TestLinkCompletionDoesNotClearLaterActionSpinner(t *testing.T) {
 	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: thread})
 	originalOpenURL := openURL
 	t.Cleanup(func() { openURL = originalOpenURL })
-	openURL = func(string) error { return nil }
+	openURL = func(string, []string) error { return nil }
 
 	model, linkCommand := update(t, model, key("1"))
 	model, _ = update(t, model, key("e"))

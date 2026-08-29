@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	xhtml "golang.org/x/net/html"
 )
@@ -227,15 +226,14 @@ func messageByID(messages []*gmail.Message, id string) *gmail.Message {
 	return nil
 }
 
-// OpenURL opens a browser target without passing mailbox credentials to the
-// opener process.
-func OpenURL(target string) error {
+// OpenURL opens a browser target with the caller-supplied scrubbed environment.
+func OpenURL(target string, env []string) error {
 	opener, err := exec.LookPath("xdg-open")
 	if err != nil {
 		return fmt.Errorf("find xdg-open: %w", err)
 	}
 	command := exec.Command(opener, target)
-	command.Env = auth.ScrubbedEnviron()
+	command.Env = env
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("open target: %w", err)
 	}

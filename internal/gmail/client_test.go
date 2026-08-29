@@ -55,9 +55,9 @@ func newTestClient(t *testing.T, handler http.HandlerFunc, tokens ...string) (*C
 
 	creds := &fakeCreds{tokens: tokens}
 	client := newTestClientWithConfig(t, handler, ClientConfig{
-		Read:     creds,
-		Mutation: creds,
-		Account:  "test",
+		Read:    creds,
+		Write:   creds,
+		Account: "test",
 	})
 	return client, creds
 }
@@ -75,28 +75,28 @@ func newTestClientWithConfig(t *testing.T, handler http.HandlerFunc, config Clie
 }
 func TestNewClientSupportsReadOnlyAndReadWriteModes(t *testing.T) {
 	read := &fakeCreds{tokens: []string{"read-token"}}
-	mutation := &fakeCreds{tokens: []string{"mutation-token"}}
+	write := &fakeCreds{tokens: []string{"write-token"}}
 
 	readOnly := NewClient(ClientConfig{Read: read, Account: "work"})
-	if readOnly.read != read || readOnly.mutation != nil || readOnly.account != "work" {
+	if readOnly.read != read || readOnly.write != nil || readOnly.account != "work" {
 		t.Fatalf("read-only client = %+v, want read credentials and account only", readOnly)
 	}
 
-	readWrite := NewClient(ClientConfig{Read: read, Mutation: mutation, Account: "work"})
-	if readWrite.read != read || readWrite.mutation != mutation || readWrite.account != "work" {
+	readWrite := NewClient(ClientConfig{Read: read, Write: write, Account: "work"})
+	if readWrite.read != read || readWrite.write != write || readWrite.account != "work" {
 		t.Fatalf("read-write client = %+v, want both credential classes and account", readWrite)
 	}
 }
 
 func TestNewClientRejectsInvalidConfiguration(t *testing.T) {
 	read := &fakeCreds{tokens: []string{"read-token"}}
-	mutation := &fakeCreds{tokens: []string{"mutation-token"}}
+	write := &fakeCreds{tokens: []string{"write-token"}}
 
 	for _, config := range []ClientConfig{
 		{Account: "work"},
-		{Mutation: mutation, Account: "work"},
+		{Write: write, Account: "work"},
 		{Read: read},
-		{Read: read, Mutation: mutation},
+		{Read: read, Write: write},
 	} {
 		func() {
 			defer func() {
@@ -392,51 +392,44 @@ func TestListThreadsUsesValuesVerbatim(t *testing.T) {
 	}
 }
 
-var errNeedsMint = errors.New("mutation token expired; a new mint is required")
+var errNeedsUnlock = errors.New("write token expired; a new unlock is required")
 
-// fakeMutCreds returns tokens[i] until Invalidate, after which AccessToken
-// returns errNeedsMint — the non-minting mutation provider contract.
-type fakeMutCreds struct {
+type fakeWriteCreds struct {
 	mu          sync.Mutex
 	token       string
 	invalidated int
 }
 
-func (f *fakeMutCreds) AccessToken(ctx context.Context) (string, error) {
+func (f *fakeWriteCreds) AccessToken(context.Context) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.invalidated > 0 {
-		return "", errNeedsMint
+		return "", errNeedsUnlock
 	}
 	return f.token, nil
 }
 
-func (f *fakeMutCreds) Invalidate(ctx context.Context) error {
+func (f *fakeWriteCreds) Invalidate(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.invalidated++
 	return nil
 }
 
-func TestMutationCallsUseMutationCredentials(t *testing.T) {
-	var reads, mutations []string
+func TestWriteCallsUseWriteCredentials(t *testing.T) {
+	var reads, writes []string
 	read := &fakeCreds{tokens: []string{"read-tok"}}
-	mutation := &fakeMutCreds{token: "mut-tok"}
-	client := newTestClientWithConfig(t, func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/modify") || strings.HasSuffix(r.URL.Path, "/trash"):
-			mutations = append(mutations, auth)
+	write := &fakeWriteCreds{token: "write-tok"}
+	client := newTestClientWithConfig(t, func(w http.ResponseWriter, request *http.Request) {
+		credential := request.Header.Get("Authorization")
+		if strings.HasSuffix(request.URL.Path, "/modify") || strings.HasSuffix(request.URL.Path, "/trash") {
+			writes = append(writes, credential)
 			writeJSON(t, w, http.StatusOK, map[string]any{})
-		default:
-			reads = append(reads, auth)
-			writeJSON(t, w, http.StatusOK, map[string]any{"id": "t1"})
+			return
 		}
-	}, ClientConfig{
-		Read:     read,
-		Mutation: mutation,
-		Account:  "work",
-	})
+		reads = append(reads, credential)
+		writeJSON(t, w, http.StatusOK, map[string]any{"id": "t1"})
+	}, ClientConfig{Read: read, Write: write, Account: "work"})
 
 	if _, err := client.GetThread(context.Background(), "t1", "minimal"); err != nil {
 		t.Fatal(err)
@@ -447,93 +440,60 @@ func TestMutationCallsUseMutationCredentials(t *testing.T) {
 	if err := client.TrashThreads(context.Background(), []string{"t1"}); err != nil {
 		t.Fatal(err)
 	}
-	for _, got := range reads {
-		if got != "Bearer read-tok" {
-			t.Fatalf("read Authorization = %q, want read token", got)
-		}
+	if len(reads) != 1 || reads[0] != "Bearer read-tok" || len(writes) != 2 {
+		t.Fatalf("read, write authorization = %v, %v", reads, writes)
 	}
-	if len(mutations) != 2 {
-		t.Fatalf("mutation requests = %d, want 2", len(mutations))
-	}
-	for _, got := range mutations {
-		if got != "Bearer mut-tok" {
-			t.Fatalf("mutation Authorization = %q, want mutation token", got)
+	for _, credential := range writes {
+		if credential != "Bearer write-tok" {
+			t.Fatalf("write Authorization = %q", credential)
 		}
 	}
 }
 
-// F2 client half: a mutation 401 invalidates once and then surfaces the
-// provider's error; the client never mints and never silently retries beyond
-// the single credential-swap attempt the provider refuses.
-func TestMutation401SurfacesProviderErrorSingleRequest(t *testing.T) {
-	t.Run("single modify", func(t *testing.T) {
-		requests := 0
-		mut := &fakeMutCreds{token: "stale-tok"}
-		client := newTestClientWithConfig(t, func(w http.ResponseWriter, r *http.Request) {
-			requests++
+func TestWrite401SurfacesProviderErrorSingleRequest(t *testing.T) {
+	write := &fakeWriteCreds{token: "stale-tok"}
+	requests := 0
+	client := newTestClientWithConfig(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusUnauthorized)
+	}, ClientConfig{Read: &fakeCreds{tokens: []string{"read-tok"}}, Write: write, Account: "work"})
+	err := client.ModifyThreads(context.Background(), []string{"t1"}, nil, []string{"INBOX"})
+	if !errors.Is(err, errNeedsUnlock) || write.invalidated != 1 || requests != 1 {
+		t.Fatalf("error, invalidations, requests = %v, %d, %d", err, write.invalidated, requests)
+	}
+}
+
+func TestWrite401AcrossMultiChunkBatchInvalidatesOnce(t *testing.T) {
+	batches := 0
+	write := &fakeWriteCreds{token: "stale-tok"}
+	client := newTestClientWithConfig(t, func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/batch/gmail/v1" {
+			t.Fatalf("unexpected path %q", request.URL.Path)
+		}
+		batches++
+		if batches == 2 {
 			w.WriteHeader(http.StatusUnauthorized)
-		}, ClientConfig{
-			Read:     &fakeCreds{tokens: []string{"read-tok"}},
-			Mutation: mut,
-			Account:  "work",
-		})
-
-		err := client.ModifyThreads(context.Background(), []string{"t1"}, nil, []string{"INBOX"})
-		if !errors.Is(err, errNeedsMint) {
-			t.Fatalf("error = %v, want the provider's sentinel surfaced", err)
+			return
 		}
-		if mut.invalidated != 1 {
-			t.Fatalf("Invalidate calls = %d, want 1", mut.invalidated)
-		}
-		if requests != 1 {
-			t.Fatalf("HTTP requests = %d, want 1 (no blind retry)", requests)
-		}
-	})
-	t.Run("multi-chunk batch", func(t *testing.T) {
-		batches := 0
-		mut := &fakeMutCreds{token: "stale-tok"}
-		client := newTestClientWithConfig(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/batch/gmail/v1" {
-				t.Fatalf("unexpected path %q", r.URL.Path)
-			}
-			batches++
-			if batches >= 2 { // chunk 1: 200 multipart; chunk 2: 401
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			respondBatchOK(t, w, r)
-		}, ClientConfig{
-			Read:     &fakeCreds{tokens: []string{"read-tok"}},
-			Mutation: mut,
-			Account:  "work",
-		})
-
-		ids := make([]string, 150) // two chunks of maxBatchParts=100
-		for i := range ids {
-			ids[i] = fmt.Sprintf("t%03d", i)
-		}
-		err := client.ModifyThreads(context.Background(), ids, nil, []string{"INBOX"})
-		if !errors.Is(err, errNeedsMint) {
-			t.Fatalf("error = %v, want provider sentinel", err)
-		}
-		if mut.invalidated != 1 {
-			t.Fatalf("Invalidate calls = %d, want exactly 1 across chunks", mut.invalidated)
-		}
-		if batches != 2 {
-			t.Fatalf("batch requests = %d, want 2 (chunk1 OK, chunk2 401, no re-auth retry)", batches)
-		}
-	})
+		respondBatchOK(t, w, request)
+	}, ClientConfig{Read: &fakeCreds{tokens: []string{"read-tok"}}, Write: write, Account: "work"})
+	ids := make([]string, 150)
+	for index := range ids {
+		ids[index] = fmt.Sprintf("t%03d", index)
+	}
+	err := client.ModifyThreads(context.Background(), ids, nil, []string{"INBOX"})
+	if !errors.Is(err, errNeedsUnlock) || write.invalidated != 1 || batches != 2 {
+		t.Fatalf("error, invalidations, batches = %v, %d, %d", err, write.invalidated, batches)
+	}
 }
 
-// respondBatchOK answers a Gmail batch request with HTTP 200 parts for every
-// embedded item, mirroring the wire format parseBatchResponse expects.
-func respondBatchOK(t *testing.T, w http.ResponseWriter, r *http.Request) {
+func respondBatchOK(t *testing.T, w http.ResponseWriter, request *http.Request) {
 	t.Helper()
-	_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	_, params, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil {
-		t.Fatalf("batch content type: %v", err)
+		t.Fatal(err)
 	}
-	reader := multipart.NewReader(r.Body, params["boundary"])
+	reader := multipart.NewReader(request.Body, params["boundary"])
 	count := 0
 	for {
 		if _, err := reader.NextPart(); err != nil {
@@ -543,10 +503,10 @@ func respondBatchOK(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	}
 	writer := multipart.NewWriter(w)
 	w.Header().Set("Content-Type", "multipart/mixed; boundary="+writer.Boundary())
-	for i := range count {
+	for index := range count {
 		header := textproto.MIMEHeader{}
 		header.Set("Content-Type", "application/http")
-		header.Set("Content-ID", fmt.Sprintf("<response-item%d>", i))
+		header.Set("Content-ID", fmt.Sprintf("<response-item%d>", index))
 		part, err := writer.CreatePart(header)
 		if err != nil {
 			t.Fatal(err)
@@ -558,25 +518,14 @@ func respondBatchOK(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func TestMutation403MapsToErrInsufficientScope(t *testing.T) {
-	client := newTestClientWithConfig(t, func(w http.ResponseWriter, r *http.Request) {
+func TestWrite403MapsToErrInsufficientScope(t *testing.T) {
+	client := newTestClientWithConfig(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions", "Request had insufficient authentication scopes."))
-	}, ClientConfig{
-		Read:     &fakeCreds{tokens: []string{"read-tok"}},
-		Mutation: &fakeMutCreds{token: "readonly-tok"},
-		Account:  "personal",
-	})
-
+	}, ClientConfig{Read: &fakeCreds{tokens: []string{"read-tok"}}, Write: &fakeWriteCreds{token: "readonly-tok"}, Account: "personal"})
 	err := client.TrashThreads(context.Background(), []string{"t1"})
 	var scope *ErrInsufficientScope
-	if !errors.As(err, &scope) {
-		t.Fatalf("error = %v, want ErrInsufficientScope", err)
-	}
-	if scope.Account != "personal" || scope.Scope != "gmail.modify" {
-		t.Fatalf("ErrInsufficientScope = %+v", scope)
-	}
-	if !IsInsufficientScope(err) {
-		t.Fatal("IsInsufficientScope lost through the typed wrapper")
+	if !errors.As(err, &scope) || scope.Account != "personal" || scope.Scope != "gmail.modify" || !IsInsufficientScope(err) {
+		t.Fatalf("ErrInsufficientScope = %+v, error = %v", scope, err)
 	}
 }
 

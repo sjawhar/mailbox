@@ -10,7 +10,7 @@ const (
 	labelOperation
 	attachmentOperation
 	openOperation
-	mintOperation
+	unlockOperation
 	asyncOperationCount
 )
 

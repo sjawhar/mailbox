@@ -192,7 +192,7 @@ func TestQuoteToggleRerenders(t *testing.T) {
 	}
 }
 
-func TestPendingActionBlocksSecondMutation(t *testing.T) {
+func TestPendingActionBlocksSecondWrite(t *testing.T) {
 	rows := testThreads(1)
 	model, api := newTestApp(rows)
 	model.view = threadView

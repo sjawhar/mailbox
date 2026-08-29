@@ -9,7 +9,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
 )
 
@@ -235,13 +234,12 @@ func TestSplitSenderColumnKeepsUsefulAddress(t *testing.T) {
 
 func TestErrorSurfacesInStatusBar(t *testing.T) {
 	model, _ := newTestApp(testThreads(1))
-	model.ctx.lastRoute = func() auth.Route { return auth.RouteBroker }
 	err := &gmail.APIError{Status: 403, Reason: "insufficientPermissions", Message: "scope missing"}
 
 	model, cmd := update(t, model, errMsg{request: model.currentRequest(listOperation), err: err})
-	for _, want := range []string{"provision:", "read-only", "gmail.readonly"} {
+	for _, want := range []string{"provision:", "accounts.work.read_credential_env", "gmail.readonly"} {
 		if !strings.Contains(model.status, want) {
-			t.Fatalf("status = %q, want broker provisioning hint to contain %q", model.status, want)
+			t.Fatalf("status = %q, want provisioning hint to contain %q", model.status, want)
 		}
 	}
 	if cmd != nil {

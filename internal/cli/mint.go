@@ -2,29 +2,31 @@ package cli
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"io"
 
 	"github.com/sjawhar/mailbox/internal/auth"
 )
 
-// runMint implements the hidden `mailbox __mint --account <work|personal>`
-// subcommand (spec §2): the short-lived child that secrets wraps so the
-// human-tier refresh JSON never enters the TUI parent's environment.
+// runMint implements the hidden `mailbox __mint --env VAR` child contract.
+// It deliberately receives no config or account selection.
 func runMint(cc *cmdCtx, args []string) int {
-	fs, accountFlag, jsonOutput := cc.flags("__mint")
-	pos, next, code := cc.parse(fs, accountFlag, jsonOutput, args)
-	if code != 0 {
-		return code
-	}
-	if err := requireArity(pos, 0, 0, "__mint"); err != nil {
+	fs := flag.NewFlagSet("__mint", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	envVar := fs.String("env", "", "")
+	pos, err := parseInterspersed(fs, args)
+	if err != nil {
 		return failUsage(cc.stderr, err)
 	}
-	account, err := auth.ResolveAccount(next.accountFlag)
-	if err != nil {
-		return next.runtimeError("", nil, err)
+	if err := requireArity(pos, 0, 0, "__mint"); err != nil || *envVar == "" {
+		if err == nil {
+			err = fmt.Errorf("__mint requires --env VAR")
+		}
+		return failUsage(cc.stderr, err)
 	}
-	if err := auth.RunMintChild(context.Background(), account, next.stdout); err != nil {
-		fmt.Fprintf(next.stderr, "mailbox __mint: %v\n", err)
+	if err := auth.RunMintChild(context.Background(), *envVar, cc.stdout); err != nil {
+		fmt.Fprintf(cc.stderr, "mailbox __mint: %v\n", err)
 		return 1
 	}
 	return 0

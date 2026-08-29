@@ -20,58 +20,6 @@ type cachedToken struct {
 	Fingerprint string    `json:"fingerprint"`
 }
 
-func cachePath(account Account) (string, error) {
-	dir, err := paths.CacheDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, string(account)+".token.json"), nil
-}
-
-func readCache(account Account) (*cachedToken, error) {
-	path, err := cachePath(account)
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read token cache %s: %w", path, err)
-	}
-	var token cachedToken
-	if err := json.Unmarshal(data, &token); err != nil {
-		return nil, fmt.Errorf("decode token cache %s: %w", path, err)
-	}
-	return &token, nil
-}
-
-func writeCache(account Account, token cachedToken) error {
-	path, err := cachePath(account)
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(token)
-	if err != nil {
-		return fmt.Errorf("encode token cache %s: %w", path, err)
-	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create token cache directory %s: %w", dir, err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("set token cache directory mode %s: %w", dir, err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write token cache %s: %w", path, err)
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("set token cache mode %s: %w", path, err)
-	}
-	return nil
-}
-
 func sourceFingerprint(account string, class Class, src *CredentialSource) string {
 	if src == nil {
 		return ""
@@ -98,7 +46,7 @@ func sourceFingerprint(account string, class Class, src *CredentialSource) strin
 	return hex.EncodeToString(sum[:])[:16]
 }
 
-func cachePathFP(account, fingerprint string) (string, error) {
+func cachePath(account, fingerprint string) (string, error) {
 	dir, err := paths.CacheDir()
 	if err != nil {
 		return "", err
@@ -106,8 +54,8 @@ func cachePathFP(account, fingerprint string) (string, error) {
 	return filepath.Join(dir, account+"."+fingerprint+".token.json"), nil
 }
 
-func readCacheFP(account, fingerprint string) (*cachedToken, error) {
-	path, err := cachePathFP(account, fingerprint)
+func readCache(account, fingerprint string) (*cachedToken, error) {
+	path, err := cachePath(account, fingerprint)
 	if err != nil {
 		return nil, err
 	}
@@ -135,8 +83,8 @@ func readCacheFP(account, fingerprint string) (*cachedToken, error) {
 	return &token, nil
 }
 
-func writeCacheFP(account, fingerprint string, token cachedToken) error {
-	path, err := cachePathFP(account, fingerprint)
+func writeCache(account, fingerprint string, token cachedToken) error {
+	path, err := cachePath(account, fingerprint)
 	if err != nil {
 		return err
 	}

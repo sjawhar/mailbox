@@ -8,7 +8,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/rivo/uniseg"
-	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/render"
 )
@@ -106,7 +105,7 @@ func (m *inboxModel) updateLabels(ids, add, remove []string) {
 	}
 }
 
-func (m inboxModel) View(account auth.Account, width, height int, labelNameByID map[string]string, envToken bool) string {
+func (m inboxModel) View(account string, width, height int, labelNameByID map[string]string, envToken bool) string {
 	lines := []string{
 		titleStyle.Render(m.title(account, envToken)),
 		helpStyle.Render("j/k move · space select · e archive · d trash · u unread · l label · / search · tab account · enter read · R refresh · q quit"),
@@ -127,7 +126,7 @@ func (m app) inboxView() string {
 		m.statusView()
 }
 
-func (m inboxModel) title(account auth.Account, envToken bool) string {
+func (m inboxModel) title(account string, envToken bool) string {
 	title := fmt.Sprintf("Mailbox — %s inbox", account)
 	if m.query != "" {
 		title = fmt.Sprintf("Mailbox — %s search: %s", account, m.query)
@@ -275,7 +274,7 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		request := m.beginRequest(listOperation)
 		return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
 	case keyQuit:
-		if m.deflectMint() {
+		if m.deflectUnlock() {
 			return m, nil
 		}
 		return m, tea.Quit
@@ -288,14 +287,14 @@ func (m app) startAction(action string, ids, add, remove []string, advance bool)
 		return m, nil
 	}
 	if m.pending != nil {
-		if m.deflectMint() {
+		if m.deflectUnlock() {
 			return m, nil
 		}
 		return m, nil
 	}
 	m.pending = &pendingAction{action: action, ids: ids, add: add, remove: remove, advance: advance}
-	if !m.ctx.mutationReady() {
-		return m.startMint()
+	if !m.ctx.writeReady() {
+		return m.startUnlock()
 	}
 	return m.dispatchPending()
 }

@@ -9,18 +9,17 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/paths"
 )
 
 type cache struct {
-	Account   auth.Account `json:"account"`
-	CreatedAt time.Time    `json:"createdAt"`
-	ThreadIDs []string     `json:"threadIds"`
+	Account   string    `json:"account"`
+	CreatedAt time.Time `json:"createdAt"`
+	ThreadIDs []string  `json:"threadIds"`
 }
 
 // Write stores the account's listing order: index i (1-based) maps to threadIDs[i-1].
-func Write(account auth.Account, threadIDs []string) error {
+func Write(account string, threadIDs []string) error {
 	dir, err := paths.CacheDir()
 	if err != nil {
 		return err
@@ -41,7 +40,7 @@ func Write(account auth.Account, threadIDs []string) error {
 		return fmt.Errorf("encode ref cache: %w", err)
 	}
 
-	path := filepath.Join(dir, string(account)+".refs.json")
+	path := filepath.Join(dir, account+".refs.json")
 	if err := os.WriteFile(path, contents, 0o600); err != nil {
 		return fmt.Errorf("write ref cache %q: %w", path, err)
 	}
@@ -52,7 +51,7 @@ func Write(account auth.Account, threadIDs []string) error {
 }
 
 // Resolve maps an all-digit listing reference to its thread ID; other IDs are returned verbatim.
-func Resolve(account auth.Account, arg string) (string, error) {
+func Resolve(account string, arg string) (string, error) {
 	if !isNumber(arg) {
 		return arg, nil
 	}
@@ -73,7 +72,7 @@ func Resolve(account auth.Account, arg string) (string, error) {
 }
 
 // ResolveAll resolves each reference in order, stopping at the first error.
-func ResolveAll(account auth.Account, args []string) ([]string, error) {
+func ResolveAll(account string, args []string) ([]string, error) {
 	resolved := make([]string, 0, len(args))
 	for _, arg := range args {
 		id, err := Resolve(account, arg)
@@ -85,12 +84,12 @@ func ResolveAll(account auth.Account, args []string) ([]string, error) {
 	return resolved, nil
 }
 
-func read(account auth.Account) (cache, string, error) {
+func read(account string) (cache, string, error) {
 	dir, err := paths.CacheDir()
 	if err != nil {
 		return cache{}, "", err
 	}
-	path := filepath.Join(dir, string(account)+".refs.json")
+	path := filepath.Join(dir, account+".refs.json")
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		return cache{}, path, err

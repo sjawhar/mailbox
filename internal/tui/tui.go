@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -17,9 +16,9 @@ import (
 	"github.com/sjawhar/mailbox/internal/render"
 )
 
-// Run starts the interactive TUI on the given account and blocks until quit.
-func Run(initial auth.Account) error {
-	account, err := newAccountCtx(initial)
+// Run starts the interactive TUI on the configured account and blocks until quit.
+func Run(cfg *auth.Config, initial *auth.AccountConfig) error {
+	account, err := newAccountCtx(cfg, initial)
 	if err != nil {
 		return err
 	}
@@ -40,40 +39,43 @@ type gmailAPI interface {
 }
 
 type accountCtx struct {
-	account            auth.Account
-	api                gmailAPI
-	lastRoute          func() auth.Route
-	mutationRoute      func() auth.Route
-	mutationReady      func() bool
-	invalidateMutation func()
-	mint               func(ctx context.Context, stderr io.Writer) error
-	labels             []gmail.Label
-	labelNameByID      map[string]string
+	cfg                 *auth.Config
+	acct                *auth.AccountConfig
+	account             string
+	api                 gmailAPI
+	lastRoute           func() auth.Route
+	writeRoute          func() auth.Route
+	writeReady          func() bool
+	invalidateWrite     func()
+	unlock              func(context.Context) error
+	takeWriteDiagnostic func() string
+	labels              []gmail.Label
+	labelNameByID       map[string]string
 }
 
-var newAccountCtx = func(account auth.Account) (*accountCtx, error) {
-	source := auth.NewSource(account)
-	if _, err := source.Resolve(context.Background()); err != nil {
-		return nil, err
-	}
-	mutation := source.MutationCredentials()
+var newAccountCtx = func(cfg *auth.Config, acct *auth.AccountConfig) (*accountCtx, error) {
+	source := auth.NewSource(cfg, acct)
+	writeCredentials := source.WriteCredentials()
 	client := gmail.NewClient(gmail.ClientConfig{
-		Read:     source,
-		Mutation: mutation,
-		Account:  string(account),
+		Read:    source.ReadCredentials(auth.ExecAcquirer{Cfg: cfg}),
+		Write:   writeCredentials,
+		Account: acct.Name,
 	})
 	return &accountCtx{
-		account:       account,
-		api:           client,
-		lastRoute:     source.LastRoute,
-		mutationRoute: source.MutationRoute,
-		mutationReady: func() bool {
-			_, err := mutation.AccessToken(context.Background())
+		cfg:        cfg,
+		acct:       acct,
+		account:    acct.Name,
+		api:        client,
+		lastRoute:  source.LastRoute,
+		writeRoute: source.WriteRoute,
+		writeReady: func() bool {
+			_, err := writeCredentials.AccessToken(context.Background())
 			return err == nil
 		},
-		invalidateMutation: source.InvalidateMutation,
-		mint: func(ctx context.Context, stderr io.Writer) error {
-			_, err := source.MutationToken(ctx, &auth.ExecMinter{Stderr: stderr})
+		invalidateWrite:     source.InvalidateWrite,
+		takeWriteDiagnostic: func() string { return source.TakeDiagnostic(auth.ClassWrite) },
+		unlock: func(ctx context.Context) error {
+			_, err := source.WriteToken(ctx, auth.InteractiveExecAcquirer{Cfg: cfg})
 			return err
 		},
 	}, nil
@@ -99,8 +101,9 @@ type pendingAction struct {
 }
 
 type app struct {
-	account  auth.Account
-	contexts map[auth.Account]*accountCtx
+	cfg      *auth.Config
+	account  string
+	contexts map[string]*accountCtx
 	ctx      *accountCtx
 
 	view        viewState
@@ -118,7 +121,7 @@ type app struct {
 	loading     bool
 	layout      layoutMetrics
 	pending     *pendingAction
-	minting     bool
+	unlocking   bool
 	generations [asyncOperationCount]uint64
 }
 
@@ -136,8 +139,9 @@ func newApp(account *accountCtx) app {
 	label.Width = layout.labelInputWidth
 
 	model := app{
+		cfg:      account.cfg,
 		account:  account.account,
-		contexts: map[auth.Account]*accountCtx{account.account: account},
+		contexts: map[string]*accountCtx{account.account: account},
 		ctx:      account,
 		view:     listView,
 		list:     newInboxModel(),
@@ -190,7 +194,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		if !m.minting {
+		if !m.unlocking {
 			m.loading = false
 		}
 		m.list.setRows(message.threads)
@@ -255,7 +259,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		if !m.minting {
+		if !m.unlocking {
 			m.loading = false
 		}
 		m.ctx.labels = message.labels
@@ -272,7 +276,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		return m.finishAction(message)
 	case attachmentSavedMsg:
-		if m.discardAsync(message) || m.minting {
+		if m.discardAsync(message) || m.unlocking {
 			return m, nil
 		}
 		m.loading = false
@@ -281,7 +285,7 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusError = false
 		return m, nil
 	case openedMsg:
-		if m.discardAsync(message) || m.minting {
+		if m.discardAsync(message) || m.unlocking {
 			return m, nil
 		}
 		if message.clearLoading {
@@ -290,16 +294,15 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("handed to opener: %s", render.SanitizeTerminal(message.target))
 		m.statusError = false
 		return m, nil
-	case mintDoneMsg:
+	case unlockDoneMsg:
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		m.minting = false
+		m.unlocking = false
 		if message.err != nil {
 			m.loading = false
 			m.pending = nil
-			m.status = render.SanitizeTerminal(message.err.Error()) +
-				" — provision " + auth.ModifyEnvKey(m.account) + " per README (human tier)"
+			m.status = render.SanitizeTerminal(message.err.Error())
 			m.statusError = true
 			return m, nil
 		}
@@ -307,9 +310,9 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = false
 			return m, nil
 		}
-		m.status = "unlocked " + string(m.account) + " mutations"
-		if message.note != "" {
-			m.status += " · " + message.note
+		m.status = "unlocked " + m.account + " write credentials"
+		if diagnostic := m.ctx.takeWriteDiagnostic(); diagnostic != "" {
+			m.status += " · " + diagnostic
 		}
 		m.statusError = false
 		return m.dispatchPending()
@@ -317,17 +320,17 @@ func (m app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		if m.minting && message.request.operation != actionOperation {
+		if m.unlocking && message.request.operation != actionOperation {
 			return m, nil
 		}
 		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pending.retried {
 			m.pending.retried = true
-			m.ctx.invalidateMutation()
-			return m.startMint()
+			m.ctx.invalidateWrite()
+			return m.startUnlock()
 		}
 		m.loading = false
 		m.pending = nil
-		m.minting = false
+		m.unlocking = false
 		m.surfaceError(message.err)
 		return m, nil
 	case tea.KeyMsg:
@@ -385,24 +388,23 @@ func (m *app) surfaceError(err error) {
 	m.status = render.SanitizeTerminal(err.Error())
 	m.statusError = true
 	if gmail.IsInsufficientScope(err) {
-		route, scope := m.ctx.lastRoute(), "gmail.readonly"
+		class, route, scope := auth.ClassRead, m.ctx.lastRoute(), "gmail.readonly"
 		var typed *gmail.ErrInsufficientScope
 		if errors.As(err, &typed) {
 			scope = typed.Scope
 			if scope == "gmail.modify" {
-				route = m.ctx.mutationRoute()
+				class, route = auth.ClassWrite, m.ctx.writeRoute()
 			}
 		}
-		m.status += " — provision: " + auth.ProvisioningHint(m.ctx.account, route, scope)
+		m.status += " — provision: " + auth.ScopeHint(m.ctx.acct, class, route, scope)
 	}
 }
 
-func (m app) canSurfaceStatus() bool { return !m.minting }
+func (m app) canSurfaceStatus() bool { return !m.unlocking }
 
-// deflectMint preserves the unlock attribution while telling the user why the
-// requested transition cannot run until the child minter returns.
-func (m *app) deflectMint() bool {
-	if !m.minting {
+// deflectUnlock preserves the unlock attribution while the child command runs.
+func (m *app) deflectUnlock() bool {
+	if !m.unlocking {
 		return false
 	}
 	const waiting = "waiting for unlock…"
@@ -412,6 +414,7 @@ func (m *app) deflectMint() bool {
 	m.statusError = false
 	return true
 }
+
 func (m app) statusView() string {
 	status := m.status
 	if m.loading {
@@ -428,7 +431,7 @@ func (m app) statusView() string {
 
 func (m app) updateKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if message.String() == "ctrl+c" {
-		if m.deflectMint() {
+		if m.deflectUnlock() {
 			return m, nil
 		}
 		return m, tea.Quit
@@ -450,28 +453,32 @@ func (m app) updateKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m app) switchAccount() (tea.Model, tea.Cmd) {
-	if m.deflectMint() {
+	if m.deflectUnlock() {
 		return m, nil
 	}
-	target := auth.AccountWork
-	if m.account == auth.AccountWork {
-		target = auth.AccountPersonal
+	if len(m.cfg.Accounts) == 0 {
+		m.surfaceError(errors.New("no configured accounts"))
+		return m, nil
 	}
-	account, exists := m.contexts[target]
+	index := 0
+	for candidate, configured := range m.cfg.Accounts {
+		if configured.Name == m.account {
+			index = candidate
+			break
+		}
+	}
+	target := m.cfg.Accounts[(index+1)%len(m.cfg.Accounts)]
+	account, exists := m.contexts[target.Name]
 	if !exists {
 		var err error
-		account, err = newAccountCtx(target)
+		account, err = newAccountCtx(m.cfg, target)
 		if err != nil {
 			m.surfaceError(err)
-			var needsSecrets *auth.NeedsSecretsError
-			if errors.As(err, &needsSecrets) {
-				m.status += fmt.Sprintf(" — provision: restart as: secrets %s -- mailbox", needsSecrets.Key)
-			}
 			return m, nil
 		}
-		m.contexts[target] = account
+		m.contexts[target.Name] = account
 	}
-	m.account = target
+	m.account = target.Name
 	m.ctx = account
 	m.invalidateRequests()
 	m.view = listView
@@ -479,7 +486,7 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	m.preview = newPreviewModel()
 	m.thread = threadModel{}
 	m.pending = nil
-	m.minting = false
+	m.unlocking = false
 	m.loading = true
 	if m.usesEnvToken() {
 		m.status = envTokenIdentityNotice
@@ -491,17 +498,20 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
 }
 
-func (m app) startMint() (tea.Model, tea.Cmd) {
-	m.minting = true
+func (m app) startUnlock() (tea.Model, tea.Cmd) {
+	m.unlocking = true
 	m.loading = true
-	m.status = fmt.Sprintf("unlocking %s mutations (%s) — touch your YubiKey if it blinks",
-		m.account, auth.ModifyEnvKey(m.account))
+	label := "write credentials"
+	if src := m.ctx.acct.Write; src != nil && src.Label != "" {
+		label = render.SanitizeTerminal(src.Label)
+	}
+	m.status = fmt.Sprintf("unlocking %s for %s", label, m.account)
 	m.statusError = false
-	request := m.beginRequest(mintOperation)
-	return m, m.loadingCmd(mintCmd(request))
+	request := m.beginRequest(unlockOperation)
+	return m, m.loadingCmd(unlockCmd(request))
 }
 
-// dispatchPending re-issues the buffered action exactly once after a mint.
+// dispatchPending re-issues the buffered action exactly once after an unlock.
 func (m app) dispatchPending() (tea.Model, tea.Cmd) {
 	pending := m.pending
 	m.loading = true

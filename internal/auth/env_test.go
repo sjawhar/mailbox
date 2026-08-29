@@ -68,7 +68,7 @@ func TestScrubbedEnviron(t *testing.T) {
 		t.Setenv(name, value)
 	}
 
-	got := envNames(configScrubbedEnviron(cfg))
+	got := envNames(ScrubbedEnviron(cfg))
 	for _, denied := range []string{
 		"MAILBOX_TOKEN",
 		"MAILBOX_TOKEN_URL",
@@ -81,7 +81,7 @@ func TestScrubbedEnviron(t *testing.T) {
 		"ACME_SESSION_FILE",
 	} {
 		if _, leaked := got[denied]; leaked {
-			t.Errorf("configScrubbedEnviron leaked %s", denied)
+			t.Errorf("ScrubbedEnviron leaked %s", denied)
 		}
 	}
 	if got["MAILBOX_UNRELATED"] != "kept" || got["MAILBOX_CREDENTIAL_DEPTH"] != "1" || got["ACME_REGION"] != "kept" {
@@ -102,7 +102,7 @@ func TestScrubbedEnvironNilConfig(t *testing.T) {
 		t.Setenv(name, value)
 	}
 
-	got := envNames(configScrubbedEnviron(nil))
+	got := envNames(ScrubbedEnviron(nil))
 	for _, denied := range []string{"MAILBOX_TOKEN", "MAILBOX_TOKEN_URL", "MAILBOX_CONFIG"} {
 		if _, leaked := got[denied]; leaked {
 			t.Errorf("nil config leaked %s", denied)
@@ -213,7 +213,7 @@ func TestScrubbedEnvironKeepsDepthDespiteScrubRule(t *testing.T) {
 	}
 	t.Setenv("MAILBOX_CREDENTIAL_DEPTH", "1")
 
-	got := envNames(configScrubbedEnviron(cfg))
+	got := envNames(ScrubbedEnviron(cfg))
 	if got["MAILBOX_CREDENTIAL_DEPTH"] != "1" {
 		t.Fatalf("depth = %q, want retained depth sentinel", got["MAILBOX_CREDENTIAL_DEPTH"])
 	}

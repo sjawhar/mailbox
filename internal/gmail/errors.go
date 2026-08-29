@@ -27,7 +27,7 @@ func (e *APIError) Error() string {
 }
 
 // ErrInsufficientScope reports a Gmail 403 whose cause is a missing OAuth
-// scope on a mutation call, carrying account + required scope (spec §4).
+// scope on a write call, carrying account + required scope (spec §4).
 type ErrInsufficientScope struct {
 	Account string
 	Scope   string

@@ -12,14 +12,11 @@ const (
 	maximumCredentialChildDepth = 2
 )
 
-// configScrubbedEnviron returns the parent environment minus the unconditional
-// deny set, configured credential environment variables, and configured scrub
-// rules. MAILBOX_CREDENTIAL_DEPTH is deliberately retained for credential
-// command recursion detection.
-//
-// This bridge name avoids colliding with the legacy zero-argument
-// ScrubbedEnviron until the config cutover removes it.
-func configScrubbedEnviron(cfg *Config) []string {
+// ScrubbedEnviron returns the parent environment minus the unconditional deny
+// set, configured credential environment variables, and configured scrub rules.
+// MAILBOX_CREDENTIAL_DEPTH is deliberately retained for credential command
+// recursion detection.
+func ScrubbedEnviron(cfg *Config) []string {
 	return scrubbedEnviron(cfg, os.Environ())
 }
 

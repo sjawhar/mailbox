@@ -478,9 +478,9 @@ type NeedsCredentialError struct {
 
 func (e *NeedsCredentialError) Error() string {
 	if e.Reason == ReasonNoConfig {
-		return fmt.Sprintf("account %q has no usable %s credential: %s — create ~/.config/mailbox/config.toml (see README, Configuration) or set MAILBOX_TOKEN", e.Account, e.Class, e.Reason)
+		return fmt.Sprintf("account %q has no usable %s credential: %s — create ~/.config/mailbox/config.toml (see README, Configuration) or set MAILBOX_TOKEN", safeForTerminal(e.Account), e.Class, e.Reason)
 	}
-	return fmt.Sprintf("account %q has no usable %s credential: %s — %s (config: %s)", e.Account, e.Class, e.Reason, e.ConfigKey, e.ConfigPath)
+	return fmt.Sprintf("account %q has no usable %s credential: %s — %s (config: %s)", safeForTerminal(e.Account), e.Class, e.Reason, safeForTerminal(e.ConfigKey), safeForTerminal(e.ConfigPath))
 }
 
 // Acquired is one acquisition outcome.

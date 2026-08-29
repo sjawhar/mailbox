@@ -1,5 +1,5 @@
 // Package auth_test wires internal/auth and internal/gmail together: the
-// one-mint-per-batch contract must hold across the real seam, not just fakes.
+// one-unlock-per-batch contract must hold across the real seam.
 package auth_test
 
 import (
@@ -20,118 +20,102 @@ import (
 	"github.com/sjawhar/mailbox/internal/gmail"
 )
 
-type integCountingMinter struct {
+type integCountingAcquirer struct {
 	mu    sync.Mutex
-	mints int
+	calls int
 }
 
-func (m *integCountingMinter) Mint(ctx context.Context, account auth.Account) (auth.Token, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.mints++
-	return auth.Token{
-		AccessToken: fmt.Sprintf("mint-%d", m.mints),
-		Route:       auth.RouteMint,
-		Expiry:      time.Now().Add(time.Hour),
-	}, nil
+func (a *integCountingAcquirer) Acquire(context.Context, *auth.AccountConfig, auth.Class) (auth.Acquired, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls++
+	return auth.Acquired{Token: auth.Token{AccessToken: fmt.Sprintf("unlock-%d", a.calls), Route: auth.RouteCmd, Expiry: time.Now().Add(time.Hour)}}, nil
 }
 
-func (m *integCountingMinter) count() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.mints
+func (a *integCountingAcquirer) count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls
 }
 
-// Spec §4/§8 end-to-end: a mutation 401 across a multi-chunk batch produces
-// exactly one re-mint and one retry. Real Source, real MutationCredentials,
-// real client batch path; only the Minter and the Gmail server are doubles.
-func TestMutation401AcrossMultiChunkBatchMintsExactlyOnce(t *testing.T) {
-	for _, name := range []string{"MAILBOX_TOKEN", "GWS_WORK_MODIFY_OAUTH"} {
-		t.Setenv(name, "")
-		os.Unsetenv(name)
-	}
+func TestWrite401AcrossMultiChunkBatchUnlocksExactlyOnce(t *testing.T) {
+	os.Unsetenv("MAILBOX_TOKEN")
+	acct := &auth.AccountConfig{Name: "work", Read: &auth.CredentialSource{Class: auth.ClassRead, Kind: auth.SourceEnv, EnvVar: "TEST_READ"}, Write: &auth.CredentialSource{Class: auth.ClassWrite, Kind: auth.SourceEnv, EnvVar: "TEST_WRITE"}}
+	cfg := &auth.Config{Accounts: []*auth.AccountConfig{acct}, CredentialTimeout: 120 * time.Second}
 
 	var mu sync.Mutex
 	batches := 0
 	var seenAuth []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/batch/gmail/v1" {
-			t.Errorf("unexpected path %q", r.URL.Path)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/batch/gmail/v1" {
+			t.Errorf("unexpected path %q", request.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 		mu.Lock()
 		batches++
 		n := batches
-		seenAuth = append(seenAuth, r.Header.Get("Authorization"))
+		seenAuth = append(seenAuth, request.Header.Get("Authorization"))
 		mu.Unlock()
-		if n == 2 { // second chunk of the first attempt: token has "expired"
+		if n == 2 {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		integRespondBatchParts(t, w, r)
+		integRespondBatchParts(t, w, request)
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("MAILBOX_GMAIL_BASE_URL", server.URL)
 
-	source := auth.NewSource(auth.AccountWork)
-	minter := &integCountingMinter{}
-	if _, err := source.MutationToken(context.Background(), minter); err != nil {
-		t.Fatal(err) // the initial mint (the TUI's first-keypress mint)
+	source := auth.NewSource(cfg, acct)
+	acquirer := &integCountingAcquirer{}
+	if _, err := source.WriteToken(context.Background(), acquirer); err != nil {
+		t.Fatal(err)
 	}
-	creds := source.MutationCredentials()
-	client := gmail.NewClient(gmail.ClientConfig{
-		Read:     creds,
-		Mutation: creds,
-		Account:  string(auth.AccountWork),
-	})
+	credentials := source.WriteCredentials()
+	client := gmail.NewClient(gmail.ClientConfig{Read: credentials, Write: credentials, Account: acct.Name})
 
-	ids := make([]string, 150) // two chunks of 100-part batches
-	for i := range ids {
-		ids[i] = fmt.Sprintf("%016x", i+1)
+	ids := make([]string, 150)
+	for index := range ids {
+		ids[index] = fmt.Sprintf("%016x", index+1)
 	}
 
 	err := client.ModifyThreads(context.Background(), ids, nil, []string{"INBOX"})
 	if !errors.Is(err, auth.ErrExpiredToken) {
 		t.Fatalf("first attempt error = %v, want ErrExpiredToken", err)
 	}
-	if got := minter.count(); got != 1 {
-		t.Fatalf("mints during the failed attempt = %d, want 1 (the client never mints)", got)
+	if got := acquirer.count(); got != 1 {
+		t.Fatalf("unlocks during failed attempt = %d, want 1", got)
 	}
 
-	// The surface's policy (§5): exactly one re-mint, exactly one retry.
-	source.InvalidateMutation()
-	if _, err := source.MutationToken(context.Background(), minter); err != nil {
+	source.InvalidateWrite()
+	if _, err := source.WriteToken(context.Background(), acquirer); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.ModifyThreads(context.Background(), ids, nil, []string{"INBOX"}); err != nil {
 		t.Fatalf("retry = %v, want success", err)
 	}
 
-	if got := minter.count(); got != 2 {
-		t.Fatalf("total mints = %d, want 2 (initial + exactly one re-mint)", got)
+	if got := acquirer.count(); got != 2 {
+		t.Fatalf("total unlocks = %d, want 2", got)
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if batches != 4 {
-		t.Fatalf("batch requests = %d, want 4 (2 per attempt, exactly one retry)", batches)
+		t.Fatalf("batch requests = %d, want 4", batches)
 	}
-	if seenAuth[0] != "Bearer mint-1" || seenAuth[1] != "Bearer mint-1" ||
-		seenAuth[2] != "Bearer mint-2" || seenAuth[3] != "Bearer mint-2" {
-		t.Fatalf("Authorization sequence = %v, want mint-1 ×2 then mint-2 ×2", seenAuth)
+	if seenAuth[0] != "Bearer unlock-1" || seenAuth[1] != "Bearer unlock-1" || seenAuth[2] != "Bearer unlock-2" || seenAuth[3] != "Bearer unlock-2" {
+		t.Fatalf("Authorization sequence = %v, want one credential per attempt", seenAuth)
 	}
 }
 
-// integRespondBatchParts answers a Gmail batch request with an HTTP 200 part
-// per embedded item, in the wire format parseBatchResponse expects.
-func integRespondBatchParts(t *testing.T, w http.ResponseWriter, r *http.Request) {
+func integRespondBatchParts(t *testing.T, w http.ResponseWriter, request *http.Request) {
 	t.Helper()
-	_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	_, params, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
 	if err != nil {
 		t.Errorf("batch content type: %v", err)
 		return
 	}
-	reader := multipart.NewReader(r.Body, params["boundary"])
+	reader := multipart.NewReader(request.Body, params["boundary"])
 	count := 0
 	for {
 		if _, err := reader.NextPart(); err != nil {
@@ -141,10 +125,10 @@ func integRespondBatchParts(t *testing.T, w http.ResponseWriter, r *http.Request
 	}
 	writer := multipart.NewWriter(w)
 	w.Header().Set("Content-Type", "multipart/mixed; boundary="+writer.Boundary())
-	for i := range count {
+	for index := range count {
 		header := textproto.MIMEHeader{}
 		header.Set("Content-Type", "application/http")
-		header.Set("Content-ID", fmt.Sprintf("<response-item%d>", i))
+		header.Set("Content-ID", fmt.Sprintf("<response-item%d>", index))
 		part, err := writer.CreatePart(header)
 		if err != nil {
 			t.Errorf("create part: %v", err)

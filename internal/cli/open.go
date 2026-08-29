@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/render"
 )
 
@@ -33,7 +34,7 @@ func runOpen(cc *cmdCtx, args []string) int {
 	if err != nil {
 		return next.runtimeError(account, source, err)
 	}
-	if err := render.OpenURL(path); err != nil {
+	if err := render.OpenURL(path, auth.ScrubbedEnviron(next.cfg)); err != nil {
 		return next.runtimeError(account, source, fmt.Errorf("open HTML file: %w", err))
 	}
 	fmt.Fprintf(next.stderr, "handed to opener: %s\n", path)
@@ -43,7 +44,7 @@ func runOpen(cc *cmdCtx, args []string) int {
 			ThreadID  string `json:"threadId"`
 			MessageID string `json:"messageId"`
 			File      string `json:"file"`
-		}{Account: string(account), ThreadID: threadID, MessageID: messageID, File: path}
+		}{Account: account, ThreadID: threadID, MessageID: messageID, File: path}
 		if err := writeJSON(next.stdout, output); err != nil {
 			return next.runtimeError(account, source, wrapError("write JSON", err))
 		}

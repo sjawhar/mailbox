@@ -87,7 +87,7 @@ func TestCacheRoundTripAndByteIdenticalWrites(t *testing.T) {
 	t.Setenv("MAILBOX_CACHE_DIR", dir)
 	fp := sourceFingerprint("work", ClassRead, testSource())
 	tok := cachedToken{AccessToken: "tok", Route: RouteCmd, Expiry: time.Now().Add(time.Hour).UTC().Truncate(time.Second), Fingerprint: fp}
-	path, err := cachePathFP("work", fp)
+	path, err := cachePath("work", fp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,14 +100,14 @@ func TestCacheRoundTripAndByteIdenticalWrites(t *testing.T) {
 	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCacheFP("work", fp, tok); err != nil {
+	if err := writeCache("work", fp, tok); err != nil {
 		t.Fatal(err)
 	}
 	first, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCacheFP("work", fp, tok); err != nil {
+	if err := writeCache("work", fp, tok); err != nil {
 		t.Fatal(err)
 	}
 	second, err := os.ReadFile(path)
@@ -117,9 +117,9 @@ func TestCacheRoundTripAndByteIdenticalWrites(t *testing.T) {
 	if string(first) != string(second) {
 		t.Fatal("cache write is not byte-identical across writes")
 	}
-	got, err := readCacheFP("work", fp)
+	got, err := readCache("work", fp)
 	if err != nil || got == nil || got.AccessToken != "tok" || got.Fingerprint != fp {
-		t.Fatalf("readCacheFP = %+v, %v", got, err)
+		t.Fatalf("readCache = %+v, %v", got, err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -141,7 +141,7 @@ func TestCacheFingerprintMismatchRemovesFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("MAILBOX_CACHE_DIR", dir)
 	fp := sourceFingerprint("work", ClassRead, testSource())
-	path, err := cachePathFP("work", fp)
+	path, err := cachePath("work", fp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestCacheFingerprintMismatchRemovesFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := readCacheFP("work", fp)
+	got, err := readCache("work", fp)
 	if err != nil || got != nil {
 		t.Fatalf("mismatched entry must miss: %+v, %v", got, err)
 	}
@@ -162,7 +162,7 @@ func TestCacheMissingFingerprintRemovesFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("MAILBOX_CACHE_DIR", dir)
 	fp := sourceFingerprint("work", ClassRead, testSource())
-	path, err := cachePathFP("work", fp)
+	path, err := cachePath("work", fp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestCacheMissingFingerprintRemovesFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := readCacheFP("work", fp)
+	got, err := readCache("work", fp)
 	if err != nil || got != nil {
 		t.Fatalf("missing fingerprint entry must miss: %+v, %v", got, err)
 	}
@@ -187,7 +187,7 @@ func TestCacheV020ShapedFileSelfInvalidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	fp := sourceFingerprint("work", ClassRead, testSource())
-	got, err := readCacheFP("work", fp)
+	got, err := readCache("work", fp)
 	if err != nil || got != nil {
 		t.Fatalf("legacy file must never be read as a hit: %+v, %v", got, err)
 	}
