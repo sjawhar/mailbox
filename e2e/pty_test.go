@@ -3,10 +3,7 @@ package e2e
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -246,24 +243,6 @@ func (s *tmuxSession) WaitForExit(timeout time.Duration) {
 	s.t.Fatalf("tmux session %s did not exit within %s", s.name, timeout)
 }
 
-// fingerprintFor must track internal/auth/cache.go's unexported
-// sourceFingerprint. Length-prefix framing avoids source-identity collisions
-// involving embedded NUL bytes.
-func fingerprintFor(account, class, kind string, identity ...string) string {
-	parts := append([]string{account, class, kind}, identity...)
-	preimageLen := 8 * len(parts)
-	for _, part := range parts {
-		preimageLen += len(part)
-	}
-	preimage := make([]byte, 0, preimageLen)
-	for _, part := range parts {
-		preimage = binary.BigEndian.AppendUint64(preimage, uint64(len(part)))
-		preimage = append(preimage, part...)
-	}
-	sum := sha256.Sum256(preimage)
-	return hex.EncodeToString(sum[:])[:16]
-}
-
 // writeE2EConfig writes a trust-check-passing config into dir and returns its path.
 func writeE2EConfig(t *testing.T, dir, body string) string {
 	t.Helper()
@@ -329,6 +308,50 @@ func environment(env map[string]string) []string {
 	return values
 }
 
+func withEnvironment(env map[string]string, additions map[string]string) map[string]string {
+	result := make(map[string]string, len(env)+len(additions))
+	for key, value := range env {
+		result[key] = value
+	}
+	for key, value := range additions {
+		result[key] = value
+	}
+	return result
+}
+
+// seedReadCache runs the shipped binary against the configured non-interactive
+// read source, then returns the cache entry that the binary itself created.
+func seedReadCache(t *testing.T, env map[string]string) (string, []byte) {
+	t.Helper()
+	code, stdout, stderr := runBinary(t, env, "status", "--json")
+	if code != 0 {
+		t.Fatalf("seed read cache: status exit = %d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	cacheDir := env["MAILBOX_CACHE_DIR"]
+	if cacheDir == "" {
+		t.Fatal("seed read cache requires MAILBOX_CACHE_DIR")
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cacheFiles []os.DirEntry
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".token.json") {
+			cacheFiles = append(cacheFiles, entry)
+		}
+	}
+	if len(cacheFiles) != 1 {
+		t.Fatalf("black-box seed cache entries = %v, want exactly one token entry", entries)
+	}
+	path := filepath.Join(cacheDir, cacheFiles[0].Name())
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path, data
+}
+
 func writeExecutable(t *testing.T, path, script string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
@@ -337,23 +360,6 @@ func writeExecutable(t *testing.T, path, script string) {
 	if err := os.Chmod(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func seedCachedToken(t *testing.T, dir, account, class, kind string, identity []string, accessToken string) (string, []byte) {
-	t.Helper()
-	fingerprint := fingerprintFor(account, class, kind, identity...)
-	path := filepath.Join(dir, account+"."+fingerprint+".token.json")
-	data := []byte(fmt.Sprintf(`{"access_token":%q,"route":%q,"expiry":%q,"fingerprint":%q}`, accessToken, kind, time.Now().Add(30*time.Minute).Format(time.RFC3339), fingerprint))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path, data
 }
 
 func fileLines(t *testing.T, path string) []string {
@@ -433,7 +439,6 @@ write_label = "PTY approval"
 credential_env_passthrough = ["STUB_TOKEN_URL"]
 `, binary))
 	cache := t.TempDir()
-	cachePath, cacheData := seedCachedToken(t, cache, "work", "read", "env", []string{"PTY_READ_OAUTH"}, "pty-read-tok")
 	env := map[string]string{
 		"HOME":                   os.Getenv("HOME"),
 		"TERM":                   "xterm-256color",
@@ -443,6 +448,10 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 		"MAILBOX_CACHE_DIR":      cache,
 		"STUB_TOKEN_URL":         gmail.token.URL,
 	}
+	cachePath, cacheData := seedReadCache(t, withEnvironment(env, map[string]string{
+		"PTY_READ_OAUTH":    testAuthorizedUser,
+		"MAILBOX_TOKEN_URL": gmail.token.URL,
+	}))
 	session := newTmuxSession(t, env, binary)
 	cleanupCredentialHelper(t, session, approve)
 	session.WaitFor("Mailbox — work inbox", 15*time.Second)
@@ -504,15 +513,19 @@ write_interactive = true
 write_label = "Q"
 `, timeoutSeconds))
 	cache := t.TempDir()
-	seedCachedToken(t, cache, "work", "read", "env", []string{"PTY_READ_OAUTH"}, "pty-read-tok")
-	session := newTmuxSession(t, map[string]string{
+	env := map[string]string{
 		"HOME":                   os.Getenv("HOME"),
 		"TERM":                   "xterm-256color",
 		"PATH":                   stubs + ":/usr/bin:/bin",
 		"MAILBOX_CONFIG":         config,
 		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
 		"MAILBOX_CACHE_DIR":      cache,
-	}, binary)
+	}
+	seedReadCache(t, withEnvironment(env, map[string]string{
+		"PTY_READ_OAUTH":    testAuthorizedUser,
+		"MAILBOX_TOKEN_URL": gmail.token.URL,
+	}))
+	session := newTmuxSession(t, env, binary)
 	cleanupCredentialHelper(t, session, approve)
 	session.WaitFor("Mailbox — work inbox", 15*time.Second)
 	session.WaitFor("PTY smoke", 15*time.Second)
@@ -643,15 +656,19 @@ write_credential_cmd = ["approve-write"]
 write_label = "PTY approval"
 `)
 	cache := t.TempDir()
-	seedCachedToken(t, cache, "work", "read", "env", []string{"PTY_READ_OAUTH"}, "pty-read-tok")
-
-	code, stdout, stderr := runBinary(t, map[string]string{
+	env := map[string]string{
 		"PATH":                   stubs + ":/usr/bin:/bin",
 		"MAILBOX_CONFIG":         config,
 		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
 		"MAILBOX_CACHE_DIR":      cache,
 		"PTY_MODIFY_OAUTH":       testAuthorizedUser,
-	}, "status", "--json")
+	}
+	seedReadCache(t, withEnvironment(env, map[string]string{
+		"PTY_READ_OAUTH":    testAuthorizedUser,
+		"MAILBOX_TOKEN_URL": gmail.token.URL,
+	}))
+
+	code, stdout, stderr := runBinary(t, env, "status", "--json")
 	if code != 0 {
 		t.Fatalf("status exit = %d, stdout=%q, stderr=%q", code, stdout, stderr)
 	}
@@ -696,13 +713,17 @@ read_credential_env = "PTY_READ_OAUTH"
 write_credential_cmd = [%q]
 `, approve))
 	cache := t.TempDir()
-	seedCachedToken(t, cache, "work", "read", "env", []string{"PTY_READ_OAUTH"}, "pty-read-tok")
-
-	code, stdout, stderr := runBinary(t, map[string]string{
+	env := map[string]string{
 		"MAILBOX_CONFIG":         config,
 		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
 		"MAILBOX_CACHE_DIR":      cache,
-	}, "archive", "t1", "--json")
+	}
+	seedReadCache(t, withEnvironment(env, map[string]string{
+		"PTY_READ_OAUTH":    testAuthorizedUser,
+		"MAILBOX_TOKEN_URL": gmail.token.URL,
+	}))
+
+	code, stdout, stderr := runBinary(t, env, "archive", "t1", "--json")
 	if code != 1 {
 		t.Fatalf("archive exit = %d, stdout=%q, stderr=%q", code, stdout, stderr)
 	}
@@ -746,8 +767,7 @@ write_label = "PTY approval"
 credential_env_passthrough = ["STUB_TOKEN_URL"]
 `, binary))
 	cache := t.TempDir()
-	seedCachedToken(t, cache, "work", "read", "env", []string{"PTY_READ_OAUTH"}, "pty-read-tok")
-	session := newTmuxSession(t, map[string]string{
+	env := map[string]string{
 		"HOME":                   os.Getenv("HOME"),
 		"TERM":                   "xterm-256color",
 		"PATH":                   stubs + ":/usr/bin:/bin",
@@ -756,7 +776,12 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 		"MAILBOX_CACHE_DIR":      cache,
 		"MAILBOX_TOKEN_URL":      "http://127.0.0.1:1/decoy",
 		"STUB_TOKEN_URL":         gmail.token.URL,
-	}, binary)
+	}
+	seedReadCache(t, withEnvironment(env, map[string]string{
+		"PTY_READ_OAUTH":    testAuthorizedUser,
+		"MAILBOX_TOKEN_URL": gmail.token.URL,
+	}))
+	session := newTmuxSession(t, env, binary)
 	cleanupCredentialHelper(t, session, approve)
 	session.WaitFor("PTY smoke", 15*time.Second)
 	session.SendKeys("e")
