@@ -168,15 +168,23 @@ func TestLoadConfigTrustChecks(t *testing.T) {
 			t.Fatalf("err = %v, want refusal", err)
 		}
 	})
-	t.Run("symlink to other-owner file refused", func(t *testing.T) {
+	t.Run("other-owner file refused", func(t *testing.T) {
 		if os.Getuid() == 0 {
-			t.Skip("running as root; ownership check cannot fail")
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte("[accounts.a]\nread_credential_env = \"V\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chown(path, 1, -1); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("MAILBOX_CONFIG", path)
+		} else {
+			link := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.Symlink("/etc/passwd", link); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("MAILBOX_CONFIG", link)
 		}
-		link := filepath.Join(t.TempDir(), "config.toml")
-		if err := os.Symlink("/etc/passwd", link); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("MAILBOX_CONFIG", link)
 		if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "owned") {
 			t.Fatalf("err = %v, want ownership refusal", err)
 		}
