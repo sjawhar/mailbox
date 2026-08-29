@@ -139,6 +139,10 @@ func (m inboxModel) title(account auth.Account, envToken bool) string {
 }
 
 func (m inboxModel) rowsView(width int, labelNameByID map[string]string, height int) string {
+	return m.rowsViewAt(width, labelNameByID, height, time.Now().Local())
+}
+
+func (m inboxModel) rowsViewAt(width int, labelNameByID map[string]string, height int, now time.Time) string {
 	if len(m.rows) == 0 {
 		return "No threads."
 	}
@@ -146,7 +150,7 @@ func (m inboxModel) rowsView(width int, labelNameByID map[string]string, height 
 	start := min(max(0, m.cursor-visible+1), max(0, len(m.rows)-visible))
 	end := min(len(m.rows), start+visible)
 	innerWidth := max(1, width-1)
-	const dateWidth = 6
+	const dateColumnWidth = 6
 	lines := make([]string, 0, (end-start)*2)
 	for index := start; index < end; index++ {
 		thread := m.rows[index]
@@ -158,17 +162,22 @@ func (m inboxModel) rowsView(width int, labelNameByID map[string]string, height 
 		if _, selected := m.selected[thread.ID]; selected {
 			selection = "*"
 		}
-		from, subject, date := metadata(thread)
-		senderWidth := max(1, innerWidth-4-dateWidth)
-		sender := padDisplay(truncateSender(from, senderWidth), senderWidth)
-		first := truncate(cursor+selection+" "+sender+" "+truncate(date, dateWidth), innerWidth)
-		var second string
+		from, subject, date := metadataAt(thread, now)
+		prefix := cursor + selection + " "
+		first := prefix + truncateSender(from, max(0, innerWidth-lipgloss.Width(prefix)))
+		indent := "     "
 		if selection == "*" {
-			second = "*    " + subject + labelChips(thread, labelNameByID)
-		} else {
-			second = "     " + subject + labelChips(thread, labelNameByID)
+			indent = "*    "
 		}
-		second = truncate(second, innerWidth)
+		leftWidth := innerWidth - dateColumnWidth - 1
+		var second string
+		if leftWidth <= 0 {
+			second = strings.Repeat(" ", max(0, innerWidth-lipgloss.Width(date))) + date
+		} else {
+			left := truncate(indent+subject+labelChips(thread, labelNameByID), leftWidth)
+			date = strings.Repeat(" ", max(0, dateColumnWidth-lipgloss.Width(date))) + date
+			second = padDisplay(left, leftWidth) + " " + date
+		}
 		if threadUnread(thread) {
 			first = unreadStyle.Render(first)
 		}
@@ -292,11 +301,25 @@ func (m app) startAction(action string, ids, add, remove []string, advance bool)
 }
 
 func metadata(thread *gmail.Thread) (from, subject, date string) {
+	return metadataAt(thread, time.Now().Local())
+}
+
+func metadataAt(thread *gmail.Thread, now time.Time) (from, subject, date string) {
 	message := gmail.LatestMessage(thread)
 	if message == nil {
 		return "", "", ""
 	}
-	return render.SanitizeTerminal(gmail.Sender(message.Header("From"))), render.SanitizeTerminal(message.Header("Subject")), time.UnixMilli(message.InternalDate).Local().Format("Jan 02")
+	date = formatInboxDate(time.UnixMilli(message.InternalDate).Local(), now)
+	return render.SanitizeTerminal(gmail.Sender(message.Header("From"))), render.SanitizeTerminal(message.Header("Subject")), date
+}
+
+func formatInboxDate(dateTime, now time.Time) string {
+	dateTime = dateTime.Local()
+	now = now.Local()
+	if dateTime.Year() == now.Year() && dateTime.Month() == now.Month() && dateTime.Day() == now.Day() {
+		return dateTime.Format("15:04")
+	}
+	return dateTime.Format("Jan 02")
 }
 
 func threadUnread(thread *gmail.Thread) bool {

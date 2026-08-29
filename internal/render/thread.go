@@ -30,7 +30,7 @@ type RenderedThread struct {
 	Messages     []RenderedMessage `json:"messages"`
 }
 
-// RenderThread renders every message in oldest-to-newest order.
+// RenderThread renders every message in newest-to-oldest order.
 func RenderThread(thread *gmail.Thread, opts Options) (*RenderedThread, error) {
 	messages, contents, _, err := threadContent(thread)
 	if err != nil {
@@ -38,6 +38,9 @@ func RenderThread(thread *gmail.Thread, opts Options) (*RenderedThread, error) {
 	}
 
 	rendered := &RenderedThread{ID: thread.ID}
+	if len(messages) > 0 {
+		rendered.Subject = messages[len(messages)-1].Header("Subject")
+	}
 	seenParticipants := make(map[string]struct{})
 	nextLinkN := 1
 	for index, message := range messages {
@@ -51,9 +54,6 @@ func RenderThread(thread *gmail.Thread, opts Options) (*RenderedThread, error) {
 		if _, seen := seenParticipants[from]; !seen {
 			seenParticipants[from] = struct{}{}
 			rendered.Participants = append(rendered.Participants, from)
-		}
-		if index == 0 {
-			rendered.Subject = message.Header("Subject")
 		}
 		rendered.Messages = append(rendered.Messages, RenderedMessage{
 			ID:          message.ID,
@@ -161,7 +161,7 @@ func ThreadAttachments(thread *gmail.Thread) ([]Attachment, error) {
 func threadContent(thread *gmail.Thread) ([]*gmail.Message, []*MessageContent, []Attachment, error) {
 	messages := append([]*gmail.Message(nil), thread.Messages...)
 	sort.SliceStable(messages, func(left, right int) bool {
-		return messages[left].InternalDate < messages[right].InternalDate
+		return messages[left].InternalDate > messages[right].InternalDate
 	})
 
 	contents := make([]*MessageContent, len(messages))

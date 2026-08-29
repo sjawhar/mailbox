@@ -135,6 +135,81 @@ func TestEscapeReturnsToInboxAfterOpeningMultiDigitLink(t *testing.T) {
 	}
 }
 
+func TestReaderNextThreadLoadsAndAdvancesListCursor(t *testing.T) {
+	rows := testThreads(2)
+	model, api := newTestApp(rows)
+	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: rows[0]})
+
+	model, cmd := update(t, model, key("n"))
+	if model.view != threadView || model.list.cursor != 1 || !model.loading {
+		t.Fatalf("next thread state = (view=%v cursor=%d loading=%v), want reader at second thread while loading", model.view, model.list.cursor, model.loading)
+	}
+	model, _ = update(t, model, runCmd(t, cmd))
+	if model.thread.thread.ID != rows[1].ID || len(api.getCalls) != 1 || api.getCalls[0].id != rows[1].ID {
+		t.Fatalf("next thread = %q, get calls = %#v, want second thread %q", model.thread.thread.ID, api.getCalls, rows[1].ID)
+	}
+}
+
+func TestReaderNextAtLastThreadStaysInReader(t *testing.T) {
+	rows := testThreads(2)
+	model, api := newTestApp(rows)
+	model.list.cursor = 1
+	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: rows[1]})
+
+	model, cmd := update(t, model, key("n"))
+	if cmd != nil || model.view != threadView || model.list.cursor != 1 || model.status != "no newer threads" || len(api.getCalls) != 0 {
+		t.Fatalf("next at last thread = (cmd=%v view=%v cursor=%d status=%q calls=%#v), want reader status without request", cmd != nil, model.view, model.list.cursor, model.status, api.getCalls)
+	}
+}
+
+func TestReaderPreviousThreadLoadsAndMovesListCursor(t *testing.T) {
+	rows := testThreads(2)
+	model, api := newTestApp(rows)
+	model.list.cursor = 1
+	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: rows[1]})
+
+	model, cmd := update(t, model, key("p"))
+	if model.view != threadView || model.list.cursor != 0 || !model.loading {
+		t.Fatalf("previous thread state = (view=%v cursor=%d loading=%v), want reader at first thread while loading", model.view, model.list.cursor, model.loading)
+	}
+	model, _ = update(t, model, runCmd(t, cmd))
+	if model.thread.thread.ID != rows[0].ID || len(api.getCalls) != 1 || api.getCalls[0].id != rows[0].ID {
+		t.Fatalf("previous thread = %q, get calls = %#v, want first thread %q", model.thread.thread.ID, api.getCalls, rows[0].ID)
+	}
+}
+
+func TestReaderPreviousAtFirstThreadStaysInReader(t *testing.T) {
+	rows := testThreads(2)
+	model, api := newTestApp(rows)
+	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: rows[0]})
+
+	model, cmd := update(t, model, key("p"))
+	if cmd != nil || model.view != threadView || model.list.cursor != 0 || model.status != "no older threads" || len(api.getCalls) != 0 {
+		t.Fatalf("previous at first thread = (cmd=%v view=%v cursor=%d status=%q calls=%#v), want reader status without request", cmd != nil, model.view, model.list.cursor, model.status, api.getCalls)
+	}
+}
+
+func TestEscapeAfterReaderNextReturnsToNavigatedThread(t *testing.T) {
+	rows := testThreads(2)
+	model, _ := newTestApp(rows)
+	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: rows[0]})
+
+	model, cmd := update(t, model, key("n"))
+	model, _ = update(t, model, runCmd(t, cmd))
+	model, _ = update(t, model, key("esc"))
+	if model.view != listView || model.list.cursor != 1 {
+		t.Fatalf("escape after next = (view=%v cursor=%d), want inbox on navigated second thread", model.view, model.list.cursor)
+	}
+}
+
+func TestThreadViewDocumentsNextAndPreviousNavigation(t *testing.T) {
+	model, _ := newTestApp(testThreads(1))
+
+	if view := ansi.Strip(model.threadView()); !strings.Contains(view, "n/p") {
+		t.Fatalf("thread view = %q, want next/previous key help", view)
+	}
+}
+
 func TestHTMLBackstopOpensSanitizedDocument(t *testing.T) {
 	thread := threadFixture(1, `<script>steal()</script><a href="https://example.test/two" onclick="steal()">two</a><img src="https://tracker.example/pixel">`)
 	model, _ := newTestApp([]*gmail.Thread{thread})
