@@ -33,13 +33,13 @@ func TestStandardViewsMatchCapturedBaseline(t *testing.T) {
 		"reader":        reader.viewport.View(),
 	}
 	baselineRawSHA256 := map[string]string{
-		"rows-standard": "fa9f9a41860bc13c47d6859a5d2b90bab3517fb4104837be3c9ea25bdc1f625d",
-		"rows-label":    "c38d28f4478de20e89eace3ac4d17751d69c6c37e9f70c5e48cf647f3f09fa0f",
+		"rows-standard": "ac81e7915404f38ced3fc30acf3f63ea56e015d172463f5418a5b6eddf831315",
+		"rows-label":    "5c49c87626cc45aa8e2c7dc53d08496769bfbbfef3565fad614f4954fa28bbbe",
 		"reader":        "44ff1df3b975e1146af013e1b3fe65cd44de0618de2e989db8bd55769aa898bf",
 	}
 	baselineStrippedSHA256 := map[string]string{
-		"rows-standard": "fa9f9a41860bc13c47d6859a5d2b90bab3517fb4104837be3c9ea25bdc1f625d",
-		"rows-label":    "c38d28f4478de20e89eace3ac4d17751d69c6c37e9f70c5e48cf647f3f09fa0f",
+		"rows-standard": "ac81e7915404f38ced3fc30acf3f63ea56e015d172463f5418a5b6eddf831315",
+		"rows-label":    "5c49c87626cc45aa8e2c7dc53d08496769bfbbfef3565fad614f4954fa28bbbe",
 		"reader":        "7b922b17060a9ac72fbee104f58b1fafffdb9ce48ecc05b714982cf75d8e2642",
 	}
 	for name, view := range views {

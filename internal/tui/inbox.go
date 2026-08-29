@@ -146,7 +146,7 @@ func (m inboxModel) rowsView(width int, labelNameByID map[string]string, height 
 	start := min(max(0, m.cursor-visible+1), max(0, len(m.rows)-visible))
 	end := min(len(m.rows), start+visible)
 	innerWidth := max(1, width-1)
-	const dateWidth = 6
+	const dateColumnWidth = 6
 	lines := make([]string, 0, (end-start)*2)
 	for index := start; index < end; index++ {
 		thread := m.rows[index]
@@ -159,16 +159,21 @@ func (m inboxModel) rowsView(width int, labelNameByID map[string]string, height 
 			selection = "*"
 		}
 		from, subject, date := metadata(thread)
-		senderWidth := max(1, innerWidth-4-dateWidth)
-		sender := padDisplay(truncateSender(from, senderWidth), senderWidth)
-		first := truncate(cursor+selection+" "+sender+" "+truncate(date, dateWidth), innerWidth)
-		var second string
+		prefix := cursor + selection + " "
+		first := prefix + truncateSender(from, max(0, innerWidth-lipgloss.Width(prefix)))
+		indent := "     "
 		if selection == "*" {
-			second = "*    " + subject + labelChips(thread, labelNameByID)
-		} else {
-			second = "     " + subject + labelChips(thread, labelNameByID)
+			indent = "*    "
 		}
-		second = truncate(second, innerWidth)
+		leftWidth := innerWidth - dateColumnWidth - 1
+		var second string
+		if leftWidth <= 0 {
+			second = strings.Repeat(" ", max(0, innerWidth-lipgloss.Width(date))) + date
+		} else {
+			left := truncate(indent+subject+labelChips(thread, labelNameByID), leftWidth)
+			date = strings.Repeat(" ", max(0, dateColumnWidth-lipgloss.Width(date))) + date
+			second = padDisplay(left, leftWidth) + " " + date
+		}
 		if threadUnread(thread) {
 			first = unreadStyle.Render(first)
 		}
@@ -296,7 +301,14 @@ func metadata(thread *gmail.Thread) (from, subject, date string) {
 	if message == nil {
 		return "", "", ""
 	}
-	return render.SanitizeTerminal(gmail.Sender(message.Header("From"))), render.SanitizeTerminal(message.Header("Subject")), time.UnixMilli(message.InternalDate).Local().Format("Jan 02")
+	dateTime := time.UnixMilli(message.InternalDate).Local()
+	now := time.Now().Local()
+	if dateTime.Year() == now.Year() && dateTime.Month() == now.Month() && dateTime.Day() == now.Day() {
+		date = dateTime.Format("15:04")
+	} else {
+		date = dateTime.Format("Jan 02")
+	}
+	return render.SanitizeTerminal(gmail.Sender(message.Header("From"))), render.SanitizeTerminal(message.Header("Subject")), date
 }
 
 func threadUnread(thread *gmail.Thread) bool {
