@@ -595,7 +595,7 @@ func TestWriteUnlockRequiresKeypress(t *testing.T) {
 		ConfigPath: model.cfg.Path,
 		Reason:     auth.ReasonInteractive,
 	}
-	api.listErr = needsCredential
+	api.labelsErrs = []error{needsCredential}
 
 	model = drainCommands(t, model, model.Init())
 	_ = model.View()

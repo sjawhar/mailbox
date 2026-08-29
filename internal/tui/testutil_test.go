@@ -34,7 +34,7 @@ type fakeAPI struct {
 	modifyErrs  []error
 	trashErrs   []error
 	labelsErr   error
-
+	labelsErrs  []error
 	attachments map[string][]byte
 }
 
@@ -123,6 +123,11 @@ func (f *fakeAPI) TrashThreads(_ context.Context, ids []string) error {
 }
 
 func (f *fakeAPI) ListLabels(_ context.Context) ([]gmail.Label, error) {
+	if len(f.labelsErrs) > 0 {
+		err := f.labelsErrs[0]
+		f.labelsErrs = f.labelsErrs[1:]
+		return nil, err
+	}
 	if f.labelsErr != nil {
 		return nil, f.labelsErr
 	}
