@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -496,15 +495,4 @@ func (e *NeedsCredentialError) Error() string {
 		return fmt.Sprintf("account %q has no usable %s credential: %s — create %s (see README, Configuration) or set MAILBOX_TOKEN", safeForTerminal(e.Account), e.Class, e.Reason, safeForTerminal(e.ConfigPath))
 	}
 	return fmt.Sprintf("account %q has no usable %s credential: %s — %s (config: %s)", safeForTerminal(e.Account), e.Class, e.Reason, safeForTerminal(e.ConfigKey), safeForTerminal(e.ConfigPath))
-}
-
-// Acquired is one acquisition outcome.
-type Acquired struct {
-	Token      Token
-	Diagnostic string
-}
-
-// Acquirer acquires one credential class for an account.
-type Acquirer interface {
-	Acquire(ctx context.Context, acct *AccountConfig, class Class) (Acquired, error)
 }
