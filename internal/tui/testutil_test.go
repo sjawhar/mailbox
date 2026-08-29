@@ -260,6 +260,31 @@ func runMessage(t *testing.T, message tea.Msg) tea.Msg {
 	return nil
 }
 
+func drainCommands(t *testing.T, model app, command tea.Cmd) app {
+	t.Helper()
+	queue := []tea.Cmd{command}
+	for len(queue) > 0 {
+		command := queue[0]
+		queue = queue[1:]
+		if command == nil {
+			continue
+		}
+		switch message := command().(type) {
+		case spinner.TickMsg:
+			continue
+		case tea.BatchMsg:
+			queue = append(queue, message...)
+		default:
+			var next tea.Cmd
+			model, next = update(t, model, message)
+			if next != nil {
+				queue = append(queue, next)
+			}
+		}
+	}
+	return model
+}
+
 func key(value string) tea.KeyMsg {
 	switch value {
 	case "enter":

@@ -579,7 +579,7 @@ func TestReadUnlockKeepsCompletionDiagnosticAfterRetry(t *testing.T) {
 }
 
 func TestWriteUnlockRequiresKeypress(t *testing.T) {
-	model, _, recorder, _ := newUnlockApp(1)
+	model, api, recorder, _ := newUnlockApp(1)
 	model.ctx.acct.Write = &auth.CredentialSource{
 		Class:       auth.ClassWrite,
 		Kind:        auth.SourceCmd,
@@ -588,19 +588,23 @@ func TestWriteUnlockRequiresKeypress(t *testing.T) {
 		Interactive: true,
 		ConfigKey:   "accounts.work.write_credential_cmd",
 	}
-
-	initial := runCmd(t, model.Init())
-	model, launch := update(t, model, initial)
-	if launch != nil {
-		model, _ = update(t, model, runCmd(t, launch))
+	needsCredential := &auth.NeedsCredentialError{
+		Account:    "work",
+		Class:      auth.ClassRead,
+		ConfigKey:  "accounts.work.read_credential_cmd",
+		ConfigPath: model.cfg.Path,
+		Reason:     auth.ReasonInteractive,
 	}
+	api.listErr = needsCredential
+
+	model = drainCommands(t, model, model.Init())
 	_ = model.View()
-	if recorder.calls != 0 || model.unlocking {
-		t.Fatalf("non-keypress path started write unlock: calls=%d unlocking=%t", recorder.calls, model.unlocking)
+	if len(recorder.classes) != 1 || recorder.classes[0] != auth.ClassRead || model.unlocking {
+		t.Fatalf("launch credential classes/unlocking = %v/%t, want [%s]/false", recorder.classes, model.unlocking, auth.ClassRead)
 	}
 
 	model, fence := update(t, model, key("e"))
-	if fence == nil || !model.unlocking || recorder.calls != 0 {
+	if fence == nil || !model.unlocking || recorder.calls != 1 {
 		t.Fatalf("write keypress did not solely arm unlock: fence=%v unlocking=%t calls=%d", fence != nil, model.unlocking, recorder.calls)
 	}
 }
