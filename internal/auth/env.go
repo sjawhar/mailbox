@@ -38,7 +38,7 @@ func CredentialChildEnviron(cfg *Config, acct *AccountConfig) []string {
 
 	depth := 0
 	if current, ok := environmentValue(parent, credentialDepthEnvironment); ok {
-		if parsed, err := strconv.Atoi(current); err == nil {
+		if parsed, err := strconv.Atoi(current); err == nil && parsed > 0 {
 			depth = parsed
 		}
 	}
@@ -61,7 +61,13 @@ func shouldScrubEnvironment(cfg *Config, name string) bool {
 	if name == credentialDepthEnvironment {
 		return false
 	}
-	if _, denied := credentialPassthroughDeny[name]; denied || isConfiguredCredentialEnvironment(cfg, name) {
+	if _, denied := credentialPassthroughDeny[name]; denied {
+		return true
+	}
+	if cfg == nil {
+		return false
+	}
+	if isConfiguredCredentialEnvironment(cfg, name) {
 		return true
 	}
 	for _, scrubbed := range cfg.ScrubEnv {
@@ -79,6 +85,9 @@ func shouldScrubEnvironment(cfg *Config, name string) bool {
 }
 
 func isConfiguredCredentialEnvironment(cfg *Config, name string) bool {
+	if cfg == nil {
+		return false
+	}
 	for _, acct := range cfg.Accounts {
 		for _, source := range []*CredentialSource{acct.Read, acct.Write} {
 			if source != nil && source.Kind == SourceEnv && source.EnvVar == name {

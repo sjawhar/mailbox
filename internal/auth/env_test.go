@@ -18,6 +18,7 @@ write_credential_cmd = ["my-approver"]
 credential_env_passthrough = ["ACME_SESSION_FILE", "ACME_REGION"]
 [accounts.personal]
 read_credential_env = "PERSONAL_READ_JSON"
+write_credential_env = "PERSONAL_WRITE_JSON"
 `)
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -56,6 +57,7 @@ func TestScrubbedEnviron(t *testing.T) {
 		"MAILBOX_CONFIG":           "/tmp/decoy.toml",
 		"WORK_READ_JSON":           "decoy",
 		"PERSONAL_READ_JSON":       "decoy",
+		"PERSONAL_WRITE_JSON":      "decoy",
 		"EXTRA_SENSITIVE":          "decoy",
 		"ACME_WORK_OAUTH":          "decoy",
 		"ACME_SESSION_FILE":        "session",
@@ -73,6 +75,7 @@ func TestScrubbedEnviron(t *testing.T) {
 		"MAILBOX_CONFIG",
 		"WORK_READ_JSON",
 		"PERSONAL_READ_JSON",
+		"PERSONAL_WRITE_JSON",
 		"EXTRA_SENSITIVE",
 		"ACME_WORK_OAUTH",
 		"ACME_SESSION_FILE",
@@ -86,6 +89,30 @@ func TestScrubbedEnviron(t *testing.T) {
 	}
 }
 
+// This fails if no-config handling loses the unconditional deny set or panics
+// while inspecting configured rules that do not exist.
+func TestScrubbedEnvironNilConfig(t *testing.T) {
+	for name, value := range map[string]string{
+		"MAILBOX_TOKEN":            "decoy",
+		"MAILBOX_TOKEN_URL":        "http://evil.example/token",
+		"MAILBOX_CONFIG":           "/tmp/decoy.toml",
+		"MAILBOX_CREDENTIAL_DEPTH": "1",
+		"MAILBOX_UNRELATED":        "kept",
+	} {
+		t.Setenv(name, value)
+	}
+
+	got := envNames(configScrubbedEnviron(nil))
+	for _, denied := range []string{"MAILBOX_TOKEN", "MAILBOX_TOKEN_URL", "MAILBOX_CONFIG"} {
+		if _, leaked := got[denied]; leaked {
+			t.Errorf("nil config leaked %s", denied)
+		}
+	}
+	if got["MAILBOX_CREDENTIAL_DEPTH"] != "1" || got["MAILBOX_UNRELATED"] != "kept" {
+		t.Fatalf("nil config kept vars wrong: %v", got)
+	}
+}
+
 // This fails if a credential child misses a declared exemption, leaks another
 // account's credential, does not increment depth, or duplicates an existing
 // passthrough-only variable.
@@ -96,11 +123,16 @@ func TestCredentialChildEnvironPassthroughExactness(t *testing.T) {
 		t.Fatal("work account missing")
 	}
 	for name, value := range map[string]string{
-		"ACME_SESSION_FILE":  "session-path",
-		"ACME_REGION":        "eu-1",
-		"PERSONAL_READ_JSON": "cross-account-decoy",
-		"WORK_READ_JSON":     "own-credential-decoy",
-		"MAILBOX_TOKEN":      "decoy",
+		"ACME_SESSION_FILE":   "session-path",
+		"ACME_REGION":         "eu-1",
+		"PERSONAL_READ_JSON":  "cross-account-decoy",
+		"WORK_READ_JSON":      "own-credential-decoy",
+		"PERSONAL_WRITE_JSON": "cross-account-write-decoy",
+		"MAILBOX_TOKEN":       "decoy",
+		"MAILBOX_TOKEN_URL":   "http://evil.example/token",
+		"MAILBOX_CONFIG":      "/tmp/decoy.toml",
+		"EXTRA_SENSITIVE":     "unrelated-scrubbed-decoy",
+		"ACME_WORK_OAUTH":     "unrelated-pattern-decoy",
 	} {
 		t.Setenv(name, value)
 	}
@@ -116,7 +148,16 @@ func TestCredentialChildEnvironPassthroughExactness(t *testing.T) {
 	if count := countEnvName(env, "ACME_REGION"); count != 1 {
 		t.Fatalf("ACME_REGION appears %d times, want exactly once: %v", count, env)
 	}
-	for _, denied := range []string{"WORK_READ_JSON", "PERSONAL_READ_JSON", "MAILBOX_TOKEN", "MAILBOX_TOKEN_URL"} {
+	for _, denied := range []string{
+		"WORK_READ_JSON",
+		"PERSONAL_READ_JSON",
+		"PERSONAL_WRITE_JSON",
+		"MAILBOX_TOKEN",
+		"MAILBOX_TOKEN_URL",
+		"MAILBOX_CONFIG",
+		"EXTRA_SENSITIVE",
+		"ACME_WORK_OAUTH",
+	} {
 		if _, leaked := got[denied]; leaked {
 			t.Errorf("credential child leaked %s", denied)
 		}
@@ -132,19 +173,23 @@ func TestCredentialChildEnvironPassthroughExactness(t *testing.T) {
 	}
 }
 
-// This fails if a malformed inherited recursion depth leaks into a child
-// instead of being treated as the initial invocation.
-func TestCredentialChildEnvironTreatsMalformedDepthAsZero(t *testing.T) {
+// This fails if a non-positive, malformed, or overflowing inherited recursion
+// depth survives instead of being treated as the initial invocation.
+func TestCredentialChildEnvironClampsInvalidDepth(t *testing.T) {
 	cfg := envTestConfig(t)
 	work, ok := cfg.Account("work")
 	if !ok {
 		t.Fatal("work account missing")
 	}
-	t.Setenv("MAILBOX_CREDENTIAL_DEPTH", "not-a-number")
+	for _, current := range []string{"-5", "abc", "", "9999999999999999999999999999999999999999"} {
+		t.Run(current, func(t *testing.T) {
+			t.Setenv("MAILBOX_CREDENTIAL_DEPTH", current)
 
-	got := envNames(CredentialChildEnviron(cfg, work))
-	if got["MAILBOX_CREDENTIAL_DEPTH"] != "1" {
-		t.Fatalf("depth = %q, want 1 for malformed parent depth", got["MAILBOX_CREDENTIAL_DEPTH"])
+			got := envNames(CredentialChildEnviron(cfg, work))
+			if got["MAILBOX_CREDENTIAL_DEPTH"] != "1" {
+				t.Fatalf("depth = %q, want 1 for invalid parent depth %q", got["MAILBOX_CREDENTIAL_DEPTH"], current)
+			}
+		})
 	}
 }
 
