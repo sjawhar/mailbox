@@ -79,8 +79,17 @@ type Envelope struct {
 	TargetMessageID string
 }
 
-// Resolve resolves message recipients and reply metadata without I/O.
+// Resolve derives a sendable envelope, including R5 body validation.
 func Resolve(req Request) (*Envelope, *Refusal) {
+	return resolveEnvelope(req, true)
+}
+
+// DeriveEnvelope derives recipients and reply metadata without requiring a body.
+func DeriveEnvelope(req Request) (*Envelope, *Refusal) {
+	return resolveEnvelope(req, false)
+}
+
+func resolveEnvelope(req Request, validateBody bool) (*Envelope, *Refusal) {
 	if hasHeaderInjection(req) {
 		return nil, refusal("R4", "header_injection", "R4 header_injection: header values must not contain CR or LF")
 	}
@@ -92,7 +101,7 @@ func Resolve(req Request) (*Envelope, *Refusal) {
 		return nil, refusal("R3", "invalid_address", "R3 invalid_address: recipient address is invalid")
 	}
 
-	if strings.TrimSpace(req.Body) == "" {
+	if validateBody && strings.TrimSpace(req.Body) == "" {
 		return nil, refusal("R5", "empty_body", "R5 empty_body: message body is empty")
 	}
 

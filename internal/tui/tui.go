@@ -51,6 +51,7 @@ type accountCtx struct {
 	self            string
 	lastRoute       func() auth.Route
 	writeRoute      func() auth.Route
+	sendRoute       func() auth.Route
 	writeReady      func() bool
 	invalidateWrite func()
 	invalidateSend  func()
@@ -78,6 +79,7 @@ var newAccountCtx = func(cfg *auth.Config, acct *auth.AccountConfig) (*accountCt
 		api:        client,
 		lastRoute:  source.LastRoute,
 		writeRoute: source.WriteRoute,
+		sendRoute:  source.SendRoute,
 		writeReady: func() bool {
 			_, err := writeCredentials.AccessToken(context.Background())
 			return err == nil
@@ -520,8 +522,11 @@ func (m *app) surfaceError(err error) {
 		var typed *gmail.ErrInsufficientScope
 		if errors.As(err, &typed) {
 			scope = typed.Scope
-			if scope == "gmail.modify" {
+			switch scope {
+			case "gmail.modify":
 				class, route = auth.ClassWrite, m.ctx.writeRoute()
+			case "gmail.send":
+				class, route = auth.ClassSend, m.ctx.sendRoute()
 			}
 		}
 		m.status += " — provision: " + auth.ScopeHint(m.ctx.acct, class, route, scope)
@@ -601,9 +606,7 @@ func (m *app) quitUnlock() (bool, tea.Cmd) {
 	const waiting = "waiting for unlock…"
 	const abandon = waiting + " (press again to abandon)"
 	if strings.Contains(m.status, abandon) {
-		if m.unlockCancel != nil {
-			m.unlockCancel()
-		}
+		m.abandonUnlock()
 		return true, tea.Quit
 	}
 	if strings.Contains(m.status, waiting) {
@@ -613,6 +616,27 @@ func (m *app) quitUnlock() (bool, tea.Cmd) {
 	}
 	m.statusError = false
 	return true, nil
+}
+
+func (m *app) abandonUnlock() {
+	if !m.unlocking {
+		return
+	}
+	if m.unlockCancel != nil {
+		m.unlockCancel()
+	}
+	switch m.unlockClass {
+	case auth.ClassWrite:
+		m.pending = nil
+	case auth.ClassSend:
+		m.pendingSend = nil
+	}
+	m.unlocking = false
+	m.unlockCtx = nil
+	m.unlockCancel = nil
+	m.loading = false
+	m.clearUnlockRetry()
+	m.beginRequest(unlockOperation)
 }
 
 func (m app) statusView() string {

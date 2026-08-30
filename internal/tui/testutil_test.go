@@ -212,6 +212,7 @@ func testAccountCtx(cfg *auth.Config, acct *auth.AccountConfig, api gmailAPI) *a
 		api:             api,
 		lastRoute:       func() auth.Route { return auth.RouteEnv },
 		writeRoute:      func() auth.Route { return auth.RouteCmd },
+		sendRoute:       func() auth.Route { return auth.RouteCmd },
 		writeReady:      func() bool { return true },
 		invalidateWrite: func() {},
 		invalidateSend:  func() {},

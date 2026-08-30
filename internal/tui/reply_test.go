@@ -240,6 +240,44 @@ func TestEscAbandonsWithoutTransmit(t *testing.T) {
 	}
 }
 
+func TestEscAfterConfirmAbandonsPendingSend(t *testing.T) {
+	thread := replyThread()
+	model, api := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	openReply(t, &model, thread)
+	model.reply.body.SetValue("Abandon body")
+	model = proceedToConfirm(t, model)
+
+	model, fence := update(t, model, key(keyConfirmSend))
+	request := model.currentRequest(unlockOperation)
+	cancellations := 0
+	model.unlockCancel = func() { cancellations++ }
+
+	model, _ = update(t, model, key("esc"))
+	if model.view != replyView || model.unlocking || model.pendingSend != nil {
+		t.Fatalf("escape state = view:%v unlocking:%t pending:%#v", model.view, model.unlocking, model.pendingSend)
+	}
+	if cancellations != 1 {
+		t.Fatalf("unlock cancellations = %d, want 1", cancellations)
+	}
+	if model.generations[unlockOperation] == request.generation {
+		t.Fatalf("unlock generation = %d, want invalidate %d", model.generations[unlockOperation], request.generation)
+	}
+
+	armed := runCmd(t, fence).(unlockArmedMsg)
+	model, command := update(t, model, armed)
+	if command != nil {
+		t.Fatal("abandoned unlock armed a credential acquisition")
+	}
+	model, command = update(t, model, unlockDoneMsg{request: request, class: auth.ClassSend})
+	if command != nil {
+		model, _ = update(t, model, runCmd(t, command))
+	}
+	if len(api.sendCalls) != 0 || model.pendingSend != nil {
+		t.Fatalf("abandoned send dispatched: sends:%d pending:%#v", len(api.sendCalls), model.pendingSend)
+	}
+}
+
 func TestMidflightAbandonNeverTransmits(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
@@ -338,6 +376,35 @@ func TestTUISendSurfacesBroadScopeWarning(t *testing.T) {
 	model = finishConfirmedSend(t, proceedToConfirm(t, model))
 	if strings.Contains(model.status, "granted scope exceeds") {
 		t.Fatalf("exact scope unexpectedly warned: %q", model.status)
+	}
+}
+func TestTUISendScopeFailureNamesSendCredentialConfig(t *testing.T) {
+	thread := replyThread()
+	model, api := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	model.ctx.acct.Send = &auth.CredentialSource{
+		Class:     auth.ClassSend,
+		Kind:      auth.SourceCmd,
+		Argv0:     "/abs/send-approver",
+		ConfigKey: "accounts.work.send_credential_cmd",
+	}
+	api.sendErr = &gmail.ErrInsufficientScope{
+		Account: "work",
+		Scope:   "gmail.send",
+		Err: &gmail.APIError{
+			Status: 403,
+			Reason: "insufficientPermissions",
+		},
+	}
+	openReply(t, &model, thread)
+	model.reply.body.SetValue("Scope test")
+	model = finishConfirmedSend(t, proceedToConfirm(t, model))
+
+	if !model.statusError || !strings.Contains(model.status, "accounts.work.send_credential_cmd") {
+		t.Fatalf("send scope status = %q", model.status)
+	}
+	if len(api.sendCalls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(api.sendCalls))
 	}
 }
 

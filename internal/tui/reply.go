@@ -43,14 +43,11 @@ func (m app) openReply() (tea.Model, tea.Cmd) {
 		m.surfaceError(errNoReplyTarget)
 		return m, nil
 	}
-	// A draft has no body yet, so use a private non-empty value to derive the
-	// read-only recipient fields. Confirmation resolves the actual body.
-	envelope, refusal := m.resolveReply(target, m.thread.thread.ID, "draft")
+	envelope, refusal := m.deriveReply(target, m.thread.thread.ID)
 	if refusal != nil {
 		m.surfaceReplyRefusal(refusal)
 		return m, nil
 	}
-	envelope.Body = ""
 
 	body := textarea.New()
 	body.Prompt = ""
@@ -68,13 +65,26 @@ func (m app) openReply() (tea.Model, tea.Cmd) {
 	return m, m.reply.body.Focus()
 }
 
+func (m app) deriveReply(target *gmail.Message, threadID string) (*send.Envelope, *send.Refusal) {
+	envelope, refusal := send.DeriveEnvelope(m.replyRequest(target, ""))
+	return finishReplyEnvelope(target, threadID, envelope, refusal)
+}
+
 func (m app) resolveReply(target *gmail.Message, threadID, body string) (*send.Envelope, *send.Refusal) {
-	envelope, refusal := send.Resolve(send.Request{
+	envelope, refusal := send.Resolve(m.replyRequest(target, body))
+	return finishReplyEnvelope(target, threadID, envelope, refusal)
+}
+
+func (m app) replyRequest(target *gmail.Message, body string) send.Request {
+	return send.Request{
 		Mode:   send.ModeReply,
 		Body:   body,
 		Self:   m.ctx.self,
 		Target: replyTargetHeaders(target),
-	})
+	}
+}
+
+func finishReplyEnvelope(target *gmail.Message, threadID string, envelope *send.Envelope, refusal *send.Refusal) (*send.Envelope, *send.Refusal) {
 	if refusal != nil {
 		return nil, refusal
 	}
@@ -164,7 +174,11 @@ func (m app) updateReplyKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m app) updateReplyConfirmKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "esc":
+		if m.unlocking && m.unlockClass == auth.ClassSend && m.pendingSend != nil {
+			m.abandonUnlock()
+		}
 		m.view = replyView
+		m.clearStatus()
 		return m, nil
 	case keyConfirmSend:
 		mime, err := send.BuildMIME(m.reply.envelope, nil, "")

@@ -174,6 +174,32 @@ func TestResolveRefusals(t *testing.T) {
 	})
 }
 
+func TestDeriveEnvelopeAllowsEmptyBody(t *testing.T) {
+	envelope, refusal := DeriveEnvelope(Request{
+		Mode: ModeReply,
+		Self: "me@example.test",
+		Target: &TargetHeaders{
+			From:      "Sender <sender@example.test>",
+			To:        "Me <me@example.test>",
+			Subject:   "Target subject",
+			MessageID: "<target@example.test>",
+		},
+	})
+	if refusal != nil {
+		t.Fatalf("DeriveEnvelope() refusal = %v", refusal)
+	}
+	if envelope.Body != "" {
+		t.Fatalf("DeriveEnvelope() body = %q, want empty", envelope.Body)
+	}
+	if envelope.Subject != "Re: Target subject" {
+		t.Fatalf("DeriveEnvelope() subject = %q, want reply subject", envelope.Subject)
+	}
+	wantRecipients := []Recipient{{Address: "sender@example.test", Display: "Sender", Provenance: ProvenanceFrom}}
+	if !reflect.DeepEqual(envelope.To, wantRecipients) {
+		t.Fatalf("DeriveEnvelope() To = %#v, want %#v", envelope.To, wantRecipients)
+	}
+}
+
 func TestResolveReplyDerivation(t *testing.T) {
 	t.Run("reply all removes self and preserves source provenance", func(t *testing.T) {
 		env, refusal := Resolve(Request{
