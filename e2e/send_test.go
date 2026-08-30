@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -224,7 +225,13 @@ func TestFormatResolutionMatrixEndToEnd(t *testing.T) {
 	binary := buildMailbox(t)
 
 	session := newTmuxSession(t, fixture.env, "sh", "-c", binary+" inbox && sleep 30")
-	pane := session.WaitFor("1\tt1", 15*time.Second)
+	// Tab handling in capture-pane differs across tmux versions (3.7 preserves
+	// hard tabs, older builds expand them to spaces), so match the row with
+	// whitespace-agnostic shape instead of a literal \t.
+	pane := session.WaitFor("PTY smoke", 15*time.Second)
+	if !regexp.MustCompile(`(?m)^1\s+t1\s+true\s`).MatchString(pane) {
+		t.Fatalf("TTY inbox row missing human column layout:\n%s", pane)
+	}
 	if strings.Contains(pane, "account: work") {
 		t.Fatalf("TTY inbox selected machine output:\n%s", pane)
 	}
