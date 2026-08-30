@@ -62,21 +62,45 @@ func findTmux(t *testing.T) string {
 	return ""
 }
 
+type capturedSend struct {
+	Auth     string
+	Raw      []byte
+	ThreadID string
+}
+
 type fakeGmail struct {
-	mu         sync.Mutex
-	readAuths  []string
-	writeAuths []string
-	threads    map[string]string
-	server     *httptest.Server
-	token      *httptest.Server
+	mu          sync.Mutex
+	readAuths   []string
+	writeAuths  []string
+	sendAuths   []string
+	sent        []capturedSend
+	threads     map[string]string
+	messages    map[string]string
+	rawMessages map[string][]byte
+	server      *httptest.Server
+	token       *httptest.Server
 }
 
 func newFakeGmail(t *testing.T) *fakeGmail {
 	t.Helper()
+	t1 := fakeMessage("t1", "PTY smoke", "A <a@example.test>", "B <b@example.test>", "C <c@example.test>", "A <a@example.test>")
+	t2 := fakeMessage("t2", "Second PTY smoke", "A <a@example.test>", "B <b@example.test>", "", "")
+	t3 := fakeMessage("t3", "self-only", "Self <work@example.test>", "Self <work@example.test>", "Self <work@example.test>", "")
 	g := &fakeGmail{
 		threads: map[string]string{
-			"t1": fakeThread("t1", "PTY smoke"),
-			"t2": fakeThread("t2", "Second PTY smoke"),
+			"t1": fakeThread("t1", t1),
+			"t2": fakeThread("t2", t2),
+			"t3": fakeThread("t3", t3),
+		},
+		messages: map[string]string{
+			"m-t1": t1,
+			"m-t2": t2,
+			"m-t3": t3,
+		},
+		rawMessages: map[string][]byte{
+			"m-t1": []byte("From: A <a@example.test>\r\nTo: B <b@example.test>\r\nSubject: PTY smoke\r\n\r\noriginal"),
+			"m-t2": []byte("From: A <a@example.test>\r\nTo: B <b@example.test>\r\nSubject: Second PTY smoke\r\n\r\noriginal"),
+			"m-t3": []byte("From: Self <work@example.test>\r\nTo: Self <work@example.test>\r\nSubject: self-only\r\n\r\noriginal"),
 		},
 	}
 	mux := http.NewServeMux()
@@ -91,6 +115,43 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	mux.HandleFunc("/gmail/v1/users/me/profile", func(w http.ResponseWriter, request *http.Request) {
 		g.recordReadAuth(request)
 		fmt.Fprint(w, `{"emailAddress":"work@example.test"}`)
+	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/send", func(w http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Raw      string `json:"raw"`
+			ThreadID string `json:"threadId"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid send request", http.StatusBadRequest)
+			return
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(body.Raw)
+		if err != nil {
+			http.Error(w, "invalid raw message", http.StatusBadRequest)
+			return
+		}
+		g.recordSendAuth(request)
+		g.recordSend(request, raw, body.ThreadID)
+		fmt.Fprint(w, `{"id":"sent-e2e-1","threadId":"t1"}`)
+	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/", func(w http.ResponseWriter, request *http.Request) {
+		g.recordReadAuth(request)
+		id := strings.TrimPrefix(request.URL.Path, "/gmail/v1/users/me/messages/")
+		if request.URL.Query().Get("format") == "raw" {
+			raw, ok := g.rawMessages[id]
+			if !ok {
+				http.NotFound(w, request)
+				return
+			}
+			fmt.Fprintf(w, `{"id":%q,"threadId":%q,"raw":%q}`, id, strings.TrimPrefix(id, "m-"), base64.RawURLEncoding.EncodeToString(raw))
+			return
+		}
+		message, ok := g.messages[id]
+		if !ok {
+			http.NotFound(w, request)
+			return
+		}
+		fmt.Fprint(w, message)
 	})
 	mux.HandleFunc("/gmail/v1/users/me/threads/", func(w http.ResponseWriter, request *http.Request) {
 		if strings.HasSuffix(request.URL.Path, "/modify") {
@@ -125,9 +186,38 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	return g
 }
 
-func fakeThread(id, subject string) string {
+func fakeThread(id, message string) string {
+	return fmt.Sprintf(`{"id":%q,"messages":[%s]}`, id, message)
+}
+
+func fakeMessage(threadID, subject, from, to, carbonCopy, replyTo string) string {
 	body := base64.RawURLEncoding.EncodeToString([]byte("<p>hi</p>"))
-	return fmt.Sprintf(`{"id":%q,"messages":[{"id":%q,"threadId":%q,"internalDate":"1788000000000","labelIds":["INBOX","UNREAD"],"payload":{"mimeType":"text/html","headers":[{"name":"From","value":"A <a@example.test>"},{"name":"To","value":"B <b@example.test>"},{"name":"Subject","value":%q}],"body":{"data":%q}}}]}`, id, "m-"+id, id, subject, body)
+	headers := []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}{
+		{Name: "From", Value: from},
+		{Name: "To", Value: to},
+		{Name: "Subject", Value: subject},
+		{Name: "Message-ID", Value: "<m-" + threadID + "@example.test>"},
+	}
+	if carbonCopy != "" {
+		headers = append(headers, struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}{Name: "Cc", Value: carbonCopy})
+	}
+	if replyTo != "" {
+		headers = append(headers, struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}{Name: "Reply-To", Value: replyTo})
+	}
+	headerJSON, err := json.Marshal(headers)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf(`{"id":%q,"threadId":%q,"internalDate":"1788000000000","labelIds":["INBOX","UNREAD"],"payload":{"mimeType":"text/html","headers":%s,"body":{"data":%q}}}`, "m-"+threadID, threadID, headerJSON, body)
 }
 
 func (g *fakeGmail) recordReadAuth(request *http.Request) {
@@ -142,6 +232,18 @@ func (g *fakeGmail) recordWriteAuth(request *http.Request) {
 	g.writeAuths = append(g.writeAuths, request.Header.Get("Authorization"))
 }
 
+func (g *fakeGmail) recordSendAuth(request *http.Request) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sendAuths = append(g.sendAuths, request.Header.Get("Authorization"))
+}
+
+func (g *fakeGmail) recordSend(request *http.Request, raw []byte, threadID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sent = append(g.sent, capturedSend{Auth: request.Header.Get("Authorization"), Raw: append([]byte(nil), raw...), ThreadID: threadID})
+}
+
 func (g *fakeGmail) recordedReadAuths() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -152,6 +254,18 @@ func (g *fakeGmail) recordedWriteAuths() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return append([]string(nil), g.writeAuths...)
+}
+
+func (g *fakeGmail) recordedSendAuths() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.sendAuths...)
+}
+
+func (g *fakeGmail) recordedSends() []capturedSend {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]capturedSend(nil), g.sent...)
 }
 
 type tmuxSession struct {
@@ -208,6 +322,20 @@ func (s *tmuxSession) SendKeys(keys string) {
 	s.t.Helper()
 	if output, err := s.cmd("send-keys", "-l", "-t", s.name, keys).CombinedOutput(); err != nil {
 		s.t.Fatalf("tmux send-keys: %v: %s", err, output)
+	}
+}
+
+func (s *tmuxSession) SendEnter() {
+	s.t.Helper()
+	if output, err := s.cmd("send-keys", "-t", s.name, "Enter").CombinedOutput(); err != nil {
+		s.t.Fatalf("tmux send Enter: %v: %s", err, output)
+	}
+}
+
+func (s *tmuxSession) SendCtrl(key string) {
+	s.t.Helper()
+	if output, err := s.cmd("send-keys", "-t", s.name, "C-"+key).CombinedOutput(); err != nil {
+		s.t.Fatalf("tmux send Ctrl-%s: %v: %s", key, err, output)
 	}
 }
 
@@ -970,6 +1098,42 @@ read_credential_cmd = ["token-helper"]
 	if lines := fileLines(t, spawns); len(lines) != 1 {
 		t.Fatalf("cache hit re-ran command credential helper: %q", lines)
 	}
+	t.Run("agent pipe keeps inner mint JSON", func(t *testing.T) {
+		gmail := newFakeGmail(t)
+		stubs := t.TempDir()
+		spawns := filepath.Join(stubs, "mint-helper-spawns")
+		binary := buildMailbox(t)
+		writeExecutable(t, filepath.Join(stubs, "mint-helper"), fmt.Sprintf(`#!/bin/sh
+printf 'spawned\n' >> %q
+export MAILBOX_TOKEN_URL="$STUB_TOKEN_URL"
+exec "$TEST_BINARY" __mint --env MINT_READ_OAUTH
+`, spawns))
+		config := writeE2EConfig(t, stubs, `default_account = "work"
+[accounts.work]
+read_credential_cmd = ["mint-helper"]
+credential_env_passthrough = ["AGENT", "MINT_READ_OAUTH", "STUB_TOKEN_URL", "TEST_BINARY"]
+`)
+		cache := t.TempDir()
+		env := map[string]string{
+			"PATH":                   stubs + ":/usr/bin:/bin",
+			"MAILBOX_CONFIG":         config,
+			"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
+			"MAILBOX_CACHE_DIR":      cache,
+			"AGENT":                  "1",
+			"MINT_READ_OAUTH":        testAuthorizedUser,
+			"STUB_TOKEN_URL":         gmail.token.URL,
+			"TEST_BINARY":            binary,
+		}
+
+		code, stdout, stderr := runBinary(t, env, "inbox")
+		if code != 0 {
+			t.Fatalf("agent inbox exit = %d, stdout=%q, stderr=%q", code, stdout, stderr)
+		}
+		assertTOONInbox(t, stdout)
+		if lines := fileLines(t, spawns); len(lines) != 1 || lines[0] != "spawned" {
+			t.Fatalf("mint command spawns = %q, want [spawned]", lines)
+		}
+	})
 }
 
 func TestCLIRoutesEnvSourceEndToEnd(t *testing.T) {
