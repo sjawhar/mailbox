@@ -360,3 +360,46 @@ func assertRefusal(t *testing.T, req Request, wantRule, wantCode string) {
 		t.Fatalf("Resolve() refusal message = %q, Error() = %q; want message naming %s", refusal.Message, refusal.Error(), wantRule)
 	}
 }
+
+func TestReplyToOwnMessagePromotesOriginalToRecipients(t *testing.T) {
+	env, ref := Resolve(Request{
+		Mode: ModeReply,
+		Self: "me@example.test",
+		Body: "following up",
+		Target: &TargetHeaders{
+			From:    "Me <me@example.test>",
+			To:      "Ada <ada@example.test>, me@example.test",
+			Cc:      "Grace <grace@example.test>",
+			Subject: "Getting set up",
+		},
+	})
+	if ref != nil {
+		t.Fatalf("refusal = %+v, want none", ref)
+	}
+	if len(env.To) != 1 || env.To[0].Address != "ada@example.test" || env.To[0].Provenance != ProvenanceTo {
+		t.Fatalf("To = %+v, want promoted original-To recipient ada@example.test", env.To)
+	}
+	if len(env.Cc) != 1 || env.Cc[0].Address != "grace@example.test" || env.Cc[0].Provenance != ProvenanceCC {
+		t.Fatalf("Cc = %+v, want grace@example.test retained as CC", env.Cc)
+	}
+}
+
+func TestReplyToOwnMessageWithSelfOnlyToStaysUnpromoted(t *testing.T) {
+	env, ref := Resolve(Request{
+		Mode: ModeReply,
+		Self: "me@example.test",
+		Body: "note",
+		Target: &TargetHeaders{
+			From:    "Me <me@example.test>",
+			To:      "me@example.test",
+			Cc:      "Grace <grace@example.test>",
+			Subject: "Note to self",
+		},
+	})
+	if ref != nil {
+		t.Fatalf("refusal = %+v, want none", ref)
+	}
+	if len(env.To) != 0 || len(env.Cc) != 1 {
+		t.Fatalf("To,Cc = %+v,%+v; want empty To and grace in CC", env.To, env.Cc)
+	}
+}

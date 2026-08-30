@@ -113,7 +113,8 @@ func Resolve(req Request) (*Envelope, *Refusal) {
 		env.Bcc = parseExplicit(req.Bcc)
 		env.Subject = "Fwd: " + stripLeadingToken(target(req).Subject, "Fwd:")
 	case ModeReply:
-		if len(req.To) > 0 || len(req.Cc) > 0 {
+		derived := len(req.To) == 0 && len(req.Cc) == 0
+		if !derived {
 			env.To = parseExplicit(req.To)
 			env.Cc = parseExplicit(req.Cc)
 		} else {
@@ -143,6 +144,23 @@ func Resolve(req Request) (*Envelope, *Refusal) {
 		env.To = subtractSelf(env.To, req.Self)
 		env.Cc = subtractSelf(env.Cc, req.Self)
 		env.Bcc = subtractSelf(env.Bcc, req.Self)
+		if derived && len(env.To) == 0 {
+			// Replying to your own message: the Reply-To/From set was Self and
+			// vanished under subtraction. Promote the original To recipients so
+			// a follow-up addresses them directly instead of sending CC-only
+			// mail; original CC stays CC. (Spec §3, live-smoke amendment.)
+			var to, cc []Recipient
+			for _, recipient := range env.Cc {
+				if recipient.Provenance == ProvenanceTo {
+					to = append(to, recipient)
+				} else {
+					cc = append(cc, recipient)
+				}
+			}
+			if len(to) > 0 {
+				env.To, env.Cc = to, cc
+			}
+		}
 		env.Subject = "Re: " + stripLeadingToken(target(req).Subject, "Re:")
 		if messageID := target(req).MessageID; ValidMsgID(messageID) {
 			env.InReplyTo = messageID
