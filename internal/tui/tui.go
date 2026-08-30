@@ -15,17 +15,23 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sjawhar/mailbox/internal/auth"
+	"github.com/sjawhar/mailbox/internal/filter"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/render"
 )
 
 // Run starts the interactive TUI on the configured account and blocks until quit.
-func Run(cfg *auth.Config, initial *auth.AccountConfig) error {
+func Run(cfg *auth.Config, initial *auth.AccountConfig, startFilter string) error {
+	filterIndex, err := startFilterIndex(cfg, startFilter)
+	if err != nil {
+		return err
+	}
 	account, err := newAccountCtx(cfg, initial)
 	if err != nil {
 		return err
 	}
 	model := newApp(account)
+	model.filterIndex = filterIndex
 	model.loading = true
 	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
 	return err
@@ -150,6 +156,7 @@ type app struct {
 	statusNote   string
 	loading      bool
 	listLoaded   bool
+	filterIndex  int
 	layout       layoutMetrics
 	pending      *pendingAction
 	pendingSend  *pendingSend
@@ -216,7 +223,36 @@ func (m app) firstReadCommand() tea.Cmd {
 }
 
 func (m app) listReadCommand() tea.Cmd {
-	return m.loadingCmd(listThreadsCmd(m.currentRequest(listOperation), m.list.query))
+	return m.loadingCmd(listThreadsCmd(m.currentRequest(listOperation), m.list.query, m.activeFilter()))
+}
+
+func (m app) activeFilter() *filter.Filter {
+	if m.filterIndex == 0 {
+		return nil
+	}
+	return m.cfg.Filters[m.filterIndex-1]
+}
+
+func (m app) activeFilterName() string {
+	if active := m.activeFilter(); active != nil {
+		return active.Name
+	}
+	return ""
+}
+
+func startFilterIndex(cfg *auth.Config, name string) (int, error) {
+	if name == "" {
+		return 0, nil
+	}
+	for i, active := range cfg.Filters {
+		if active.Name == name {
+			return i + 1, nil
+		}
+	}
+	if names := cfg.FilterNames(); len(names) > 0 {
+		return 0, fmt.Errorf("unknown filter %q; defined filters: %s", name, strings.Join(names, ", "))
+	}
+	return 0, fmt.Errorf("unknown filter %q; no filters are defined (config: %s)", name, cfg.DisplayPath())
 }
 
 func (m *app) beginListing() asyncRequest {

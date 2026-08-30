@@ -122,13 +122,13 @@ func (m *inboxModel) updateLabels(ids, add, remove []string) {
 	}
 }
 
-func (m inboxModel) View(account string, width, height int, labelNameByID map[string]string, envToken bool) string {
+func (m inboxModel) View(account string, width, height int, labelNameByID map[string]string, envToken bool, filterName string) string {
 	help := listHelp
 	if m.selecting {
 		help = selectHelp
 	}
 	lines := []string{
-		titleStyle.Render(m.title(account, envToken)),
+		titleStyle.Render(m.title(account, envToken, filterName)),
 		helpStyle.Render(help),
 		m.rowsView(width, labelNameByID, height-3),
 	}
@@ -140,22 +140,26 @@ func (m app) inboxView() string {
 	if m.list.selecting {
 		help = selectHelp
 	}
+	filterName := m.activeFilterName()
 	if !m.previewEnabled() {
-		return m.list.View(m.account, m.layout.width, m.layout.height, m.ctx.labelNameByID, m.usesEnvToken()) + "\n" + m.statusView()
+		return m.list.View(m.account, m.layout.width, m.layout.height, m.ctx.labelNameByID, m.usesEnvToken(), filterName) + "\n" + m.statusView()
 	}
 	listPane := paneStyle.Width(m.layout.listPaneWidth).Height(m.layout.splitPaneHeight).Render(m.list.rowsView(m.layout.listContentWidth, m.ctx.labelNameByID, m.layout.splitContentHeight))
 	previewPane := paneStyle.Width(m.layout.previewPaneWidth).Height(m.layout.splitPaneHeight).Render(m.previewView(m.layout.previewContentWidth, m.layout.splitContentHeight))
-	return titleStyle.Render(m.list.title(m.account, m.usesEnvToken())) + "\n" +
+	return titleStyle.Render(m.list.title(m.account, m.usesEnvToken(), filterName)) + "\n" +
 		helpStyle.Render(help) + "\n" +
 		lipgloss.JoinHorizontal(lipgloss.Top, listPane, previewPane) + "\n" +
 		m.statusView()
 }
 
-func (m inboxModel) title(account string, envToken bool) string {
+func (m inboxModel) title(account string, envToken bool, filterName string) string {
 	account = render.SanitizeTerminal(account)
 	title := fmt.Sprintf("Mailbox — %s inbox", account)
 	if m.query != "" {
 		title = fmt.Sprintf("Mailbox — %s search: %s", account, m.query)
+	}
+	if filterName != "" {
+		title += " · filter: " + render.SanitizeTerminal(filterName)
 	}
 	if envToken {
 		return title + " [pinned]"
@@ -260,6 +264,19 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.list.move(-1)
 		command := m.requestPreview()
 		return m, command
+	case keyFilter:
+		if m.deflectUnlock() {
+			return m, nil
+		}
+		if len(m.cfg.Filters) == 0 {
+			m.status = "no filters defined"
+			m.statusError = false
+			return m, nil
+		}
+		m.filterIndex = (m.filterIndex + 1) % (len(m.cfg.Filters) + 1)
+		m.loading = true
+		request := m.beginListing()
+		return m, m.loadingCmd(listThreadsCmd(request, m.list.query, m.activeFilter()))
 	case keySelect:
 		m.list.selecting = true
 		return m, nil
@@ -330,7 +347,7 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keyRefresh:
 		m.loading = true
 		request := m.beginListing()
-		return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
+		return m, m.loadingCmd(listThreadsCmd(request, m.list.query, m.activeFilter()))
 	case keyQuit:
 		if m.deflectUnlock() {
 			return m, nil

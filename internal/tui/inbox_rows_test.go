@@ -44,7 +44,7 @@ func TestInboxListingExcludesThreadsWithoutInboxMessage(t *testing.T) {
 	threads[1].Messages[0].LabelIDs = []string{"SENT"}
 	model, _ := newTestApp(threads)
 
-	message := runCmd(t, listThreadsCmd(model.currentRequest(listOperation), ""))
+	message := runCmd(t, listThreadsCmd(model.currentRequest(listOperation), "", nil))
 	listing, ok := message.(threadsMsg)
 	if !ok {
 		t.Fatalf("listThreadsCmd() = %T, want threadsMsg", message)

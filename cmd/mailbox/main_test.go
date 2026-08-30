@@ -74,17 +74,24 @@ func TestTopLevelFlagGrammarDrivesBareAndCLIPaths(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("MAILBOX_TOKEN", "test-token")
 	tuiCalls := 0
-	runTUI = func(_ *auth.Config, account *auth.AccountConfig) error {
+	var startFilters []string
+	runTUI = func(_ *auth.Config, account *auth.AccountConfig, startFilter string) error {
 		tuiCalls++
 		if account.Name != "default" {
 			t.Fatalf("bare account = %q, want default", account.Name)
 		}
+		startFilters = append(startFilters, startFilter)
 		return nil
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := dispatch([]string{"--json"}, &stdout, &stderr, true); code != 0 || tuiCalls != 1 {
-		t.Fatalf("bare --json = (%d, calls=%d, stdout=%q, stderr=%q)", code, tuiCalls, stdout.String(), stderr.String())
+	if code := dispatch([]string{"--json"}, &stdout, &stderr, true); code != 0 || tuiCalls != 1 || startFilters[0] != "" {
+		t.Fatalf("bare --json = (%d, calls=%d, filters=%q, stdout=%q, stderr=%q)", code, tuiCalls, startFilters, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := dispatch([]string{"--filter", "github"}, &stdout, &stderr, true); code != 0 || tuiCalls != 2 || startFilters[1] != "github" {
+		t.Fatalf("bare --filter = (%d, calls=%d, filters=%q, stdout=%q, stderr=%q)", code, tuiCalls, startFilters, stdout.String(), stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()

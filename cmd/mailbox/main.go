@@ -54,7 +54,7 @@ func dispatch(args []string, stdout, stderr io.Writer, terminal bool) int {
 		fmt.Fprintln(stderr, "mailbox:", err)
 		return 1
 	}
-	if err := runTUI(cfg, account); err != nil {
+	if err := runTUI(cfg, account, flags.Filter); err != nil {
 		fmt.Fprintln(stderr, "mailbox:", err)
 		return 1
 	}
