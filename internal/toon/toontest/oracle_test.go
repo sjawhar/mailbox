@@ -70,6 +70,29 @@ func TestDecodeEncoderForms(t *testing.T) {
 	}
 }
 
+func TestDecodeUppercaseExponentNumbers(t *testing.T) {
+	for _, test := range []struct {
+		token string
+		want  string
+	}{
+		{token: "1E+03", want: "1E+03"},
+		{token: "3E-02", want: "3E-02"},
+		{token: "5E+00", want: "5E+00"},
+		{token: "-1E+03", want: "-1E+03"},
+	} {
+		t.Run(test.token, func(t *testing.T) {
+			got, err := Decode("value: " + test.token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := object(field("value", numberValue(test.want)))
+			if !equalValue(got, want) {
+				t.Fatalf("Decode(%q) = %#v, want %#v", test.token, got, want)
+			}
+		})
+	}
+}
+
 func TestDecodeRejectsMalformedEncoderOutput(t *testing.T) {
 	for _, test := range []struct {
 		name string

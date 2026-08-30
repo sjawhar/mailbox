@@ -11,7 +11,7 @@ import (
 
 var (
 	integerLiteral = regexp.MustCompile(`^-?(0|[1-9][0-9]*)$`)
-	numericLike    = regexp.MustCompile(`^[+-]?[0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?$`)
+	numericLike    = regexp.MustCompile(`^[+-]?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$`)
 	plainKey       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`)
 )
 

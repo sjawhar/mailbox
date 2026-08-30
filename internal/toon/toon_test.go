@@ -118,6 +118,23 @@ func TestEncodeMailboxShapes(t *testing.T) {
 	}
 }
 
+func TestEncodeQuotesUppercaseExponentStrings(t *testing.T) {
+	for _, value := range []string{"1E+03", "3E-02", "5E+00", "-1E+03"} {
+		t.Run(value, func(t *testing.T) {
+			got, err := Encode(struct {
+				Value string `json:"value"`
+			}{Value: value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `value: "` + value + `"`
+			if got != want {
+				t.Fatalf("Encode(%q) = %q, want %q", value, got, want)
+			}
+		})
+	}
+}
+
 func TestEncodeJSONRejectsTrailingContent(t *testing.T) {
 	_, err := EncodeJSON([]byte(`{"ok":true} {"extra":true}`))
 	if err == nil || !strings.Contains(err.Error(), "trailing content") {
