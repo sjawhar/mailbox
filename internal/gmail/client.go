@@ -77,6 +77,21 @@ type ListOptions struct {
 	Query      string
 	LabelIDs   []string
 	MaxResults int64
+	PageToken  string
+}
+
+// WriteFailure is one terminal per-thread write outcome.
+type WriteFailure struct {
+	ID     string
+	Status int
+	Reason string
+	Err    error
+}
+
+// WriteReceipts records confirmed outcomes for a thread write.
+type WriteReceipts struct {
+	Succeeded []string
+	Failed    []WriteFailure
 }
 
 // ListThreads returns one page of threads matching opts.
@@ -90,6 +105,9 @@ func (c *Client) ListThreads(ctx context.Context, opts ListOptions) (*ThreadList
 	}
 	for _, labelID := range opts.LabelIDs {
 		query.Add("labelIds", labelID)
+	}
+	if opts.PageToken != "" {
+		query.Set("pageToken", opts.PageToken)
 	}
 
 	var threads ThreadList
@@ -142,13 +160,19 @@ func (c *Client) GetThreadsMetadata(ctx context.Context, ids []string) ([]*Threa
 				path:   "/gmail/v1/users/me/threads/" + url.PathEscape(id),
 				query: url.Values{
 					"format":          {"metadata"},
-					"metadataHeaders": {"From", "To", "Subject", "Date"},
+					"metadataHeaders": {"From", "To", "Cc", "Subject", "Date", "List-ID"},
 				},
 			})
 		}
-		results, err := c.doBatch(ctx, c.read, items)
+		results, failures, err := c.doBatch(ctx, c.read, items)
 		if err != nil {
+			if len(failures) > 0 {
+				err = fmt.Errorf("%w; prior terminal batch failures: %s", err, newBatchFailure(failures))
+			}
 			return nil, c.scopeMapped(err, "gmail.readonly")
+		}
+		if len(failures) > 0 {
+			return nil, c.scopeMapped(newBatchFailure(failures), "gmail.readonly")
 		}
 		for _, result := range results {
 			var thread Thread
@@ -174,7 +198,8 @@ func (c *Client) ModifyThreads(ctx context.Context, ids, addLabelIDs, removeLabe
 	if len(ids) == 1 {
 		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/modify", nil, body, nil), "gmail.modify")
 	}
-	return c.scopeMapped(c.batchThreadOperations(ctx, creds, ids, "/modify", body), "gmail.modify")
+	receipts, err := c.batchThreadReceipts(ctx, creds, ids, "/modify", body)
+	return c.scopeMapped(receiptsError(receipts, err), "gmail.modify")
 }
 
 // TrashThreads moves ids to Gmail trash.
@@ -186,7 +211,38 @@ func (c *Client) TrashThreads(ctx context.Context, ids []string) error {
 	if len(ids) == 1 {
 		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil), "gmail.modify")
 	}
-	return c.scopeMapped(c.batchThreadOperations(ctx, creds, ids, "/trash", nil), "gmail.modify")
+	receipts, err := c.batchThreadReceipts(ctx, creds, ids, "/trash", nil)
+	return c.scopeMapped(receiptsError(receipts, err), "gmail.modify")
+}
+
+// ModifyThreadsReceipts adds and removes labels and returns per-thread outcomes.
+func (c *Client) ModifyThreadsReceipts(ctx context.Context, ids, addLabelIDs, removeLabelIDs []string) (WriteReceipts, error) {
+	if len(ids) == 0 {
+		return WriteReceipts{}, nil
+	}
+	body := modifyThreadRequest{
+		AddLabelIDs:    nonNilStrings(addLabelIDs),
+		RemoveLabelIDs: nonNilStrings(removeLabelIDs),
+	}
+	ids = uniqueIDs(ids)
+	if len(ids) == 1 {
+		return c.singleWriteReceipt(ids[0], c.scopeMapped(c.do(ctx, c.write, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/modify", nil, body, nil), "gmail.modify"))
+	}
+	receipts, err := c.batchThreadReceipts(ctx, c.write, ids, "/modify", body)
+	return receipts, c.scopeMapped(err, "gmail.modify")
+}
+
+// TrashThreadsReceipts moves ids to Gmail trash and returns per-thread outcomes.
+func (c *Client) TrashThreadsReceipts(ctx context.Context, ids []string) (WriteReceipts, error) {
+	if len(ids) == 0 {
+		return WriteReceipts{}, nil
+	}
+	ids = uniqueIDs(ids)
+	if len(ids) == 1 {
+		return c.singleWriteReceipt(ids[0], c.scopeMapped(c.do(ctx, c.write, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil), "gmail.modify"))
+	}
+	receipts, err := c.batchThreadReceipts(ctx, c.write, ids, "/trash", nil)
+	return receipts, c.scopeMapped(err, "gmail.modify")
 }
 
 // SendMessage sends a base64url-encoded MIME message using the send credentials.
@@ -294,7 +350,22 @@ func (c *Client) scopeMapped(err error, scope string) error {
 	return &ErrInsufficientScope{Account: c.account, Scope: scope, Err: err}
 }
 
-func (c *Client) batchThreadOperations(ctx context.Context, creds Credentials, ids []string, suffix string, body any) error {
+func uniqueIDs(ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	return unique
+}
+
+func (c *Client) batchThreadReceipts(ctx context.Context, creds Credentials, ids []string, suffix string, body any) (WriteReceipts, error) {
+	ids = uniqueIDs(ids)
+	var receipts WriteReceipts
 	for start := 0; start < len(ids); start += maxBatchParts {
 		end := min(start+maxBatchParts, len(ids))
 		items := make([]batchItem, 0, end-start)
@@ -306,11 +377,71 @@ func (c *Client) batchThreadOperations(ctx context.Context, creds Credentials, i
 				body:   body,
 			})
 		}
-		if _, err := c.doBatch(ctx, creds, items); err != nil {
-			return err
+		results, failures, err := c.doBatch(ctx, creds, items)
+		failedIDs := make(map[string]struct{}, len(failures))
+		for _, failure := range failures {
+			failedIDs[failure.id] = struct{}{}
+			receipts.Failed = append(receipts.Failed, writeFailure(failure))
+		}
+		if err != nil {
+			for index, id := range ids[start:end] {
+				if _, failed := failedIDs[id]; failed {
+					continue
+				}
+				if index < len(results) && results[index].body != nil {
+					receipts.Succeeded = append(receipts.Succeeded, id)
+				}
+			}
+			return receipts, err
+		}
+		for _, id := range ids[start:end] {
+			if _, failed := failedIDs[id]; !failed {
+				receipts.Succeeded = append(receipts.Succeeded, id)
+			}
 		}
 	}
-	return nil
+	return receipts, nil
+}
+
+func writeFailure(failure batchFailure) WriteFailure {
+	reason := ""
+	var apiErr *APIError
+	if errors.As(failure.err, &apiErr) {
+		reason = apiErr.Reason
+	}
+	return WriteFailure{ID: failure.id, Status: failure.status, Reason: reason, Err: failure.err}
+}
+
+func (c *Client) singleWriteReceipt(id string, err error) (WriteReceipts, error) {
+	if err == nil {
+		return WriteReceipts{Succeeded: []string{id}}, nil
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return WriteReceipts{
+			Failed: []WriteFailure{{
+				ID:     id,
+				Status: apiErr.Status,
+				Reason: apiErr.Reason,
+				Err:    err,
+			}},
+		}, nil
+	}
+	return WriteReceipts{}, err
+}
+
+func receiptsError(receipts WriteReceipts, err error) error {
+	if err != nil {
+		return err
+	}
+	if len(receipts.Failed) == 0 {
+		return nil
+	}
+	failures := make([]batchFailure, len(receipts.Failed))
+	for index, failure := range receipts.Failed {
+		failures[index] = batchFailure{id: failure.ID, status: failure.Status, err: failure.Err}
+	}
+	return newBatchFailure(failures)
 }
 
 func (c *Client) do(ctx context.Context, creds Credentials, method, path string, query url.Values, body, out any) error {

@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -136,7 +137,7 @@ func requireMetadataPart(t *testing.T, part receivedBatchPart, index int, id str
 	if got := query.Get("format"); got != "metadata" {
 		t.Fatalf("inner format = %q, want metadata", got)
 	}
-	if got, want := query["metadataHeaders"], []string{"From", "To", "Subject", "Date"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] || got[3] != want[3] {
+	if got, want := query["metadataHeaders"], []string{"From", "To", "Cc", "Subject", "Date", "List-ID"}; !slices.Equal(got, want) {
 		t.Fatalf("metadataHeaders = %v, want %v", got, want)
 	}
 }
@@ -1008,5 +1009,310 @@ func TestBatchPartUnauthorizedRetriesWholeBatch(t *testing.T) {
 	}
 	if got, want := authorization, []string{"Bearer old", "Bearer new"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("Authorization values = %v, want %v", got, want)
+	}
+}
+
+func TestModifyThreadsReceiptsSurviveMiddleChunkFailure(t *testing.T) {
+	ids := make([]string, 250)
+	for index := range ids {
+		ids[index] = fmt.Sprintf("t-%d", index)
+	}
+
+	var requests [][]string
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		parts := readBatchRequest(t, r)
+		request := make([]string, 0, len(parts))
+		responses := make([]batchResponsePart, 0, len(parts))
+		for index, part := range parts {
+			id := strings.TrimSuffix(strings.TrimPrefix(part.request.URL.Path, "/gmail/v1/users/me/threads/"), "/modify")
+			request = append(request, id)
+			if id == "t-149" {
+				responses = append(responses, batchResponsePart{
+					index:  index,
+					status: http.StatusForbidden,
+					body:   `{"error":{"code":403,"message":"Forbidden","errors":[{"reason":"insufficientPermissions"}]}}`,
+				})
+				continue
+			}
+			responses = append(responses, batchResponsePart{index: index, status: http.StatusNoContent})
+		}
+		requests = append(requests, request)
+		writeBatchResponse(t, w, responses)
+	}, "token")
+
+	receipts, err := client.ModifyThreadsReceipts(context.Background(), ids, nil, nil)
+	if err != nil {
+		t.Fatalf("ModifyThreadsReceipts: %v", err)
+	}
+	if len(requests) != 3 {
+		t.Fatalf("batch requests = %d, want 3", len(requests))
+	}
+	var gotIDs []string
+	for _, request := range requests {
+		gotIDs = append(gotIDs, request...)
+	}
+	if !slices.Equal(gotIDs, ids) {
+		t.Fatalf("batch ids = %v, want %v", gotIDs, ids)
+	}
+	wantSucceeded := make([]string, 0, len(ids)-1)
+	for _, id := range ids {
+		if id != "t-149" {
+			wantSucceeded = append(wantSucceeded, id)
+		}
+	}
+	if !slices.Equal(receipts.Succeeded, wantSucceeded) {
+		t.Fatalf("Succeeded = %v, want %v", receipts.Succeeded, wantSucceeded)
+	}
+	if len(receipts.Failed) != 1 {
+		t.Fatalf("Failed = %#v, want one failure", receipts.Failed)
+	}
+	failure := receipts.Failed[0]
+	if failure.ID != "t-149" || failure.Status != http.StatusForbidden || failure.Reason != "insufficientPermissions" {
+		t.Fatalf("Failed[0] = %#v, want t-149 403 insufficientPermissions", failure)
+	}
+}
+
+func TestReceipts429RetriesPendingOnlyThenReports(t *testing.T) {
+	var requests [][]string
+	var slept []time.Duration
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		parts := readBatchRequest(t, r)
+		request := make([]string, 0, len(parts))
+		for _, part := range parts {
+			request = append(request, strings.TrimSuffix(strings.TrimPrefix(part.request.URL.Path, "/gmail/v1/users/me/threads/"), "/modify"))
+		}
+		requests = append(requests, request)
+		switch len(requests) {
+		case 1:
+			writeBatchResponse(t, w, []batchResponsePart{
+				{index: 0, status: http.StatusNoContent},
+				{
+					index:   1,
+					status:  http.StatusTooManyRequests,
+					headers: http.Header{"Retry-After": {"1"}},
+					body:    `{"error":{"code":429,"message":"Rate Limit Exceeded","errors":[{"reason":"rateLimitExceeded"}]}}`,
+				},
+			})
+		case 2:
+			writeBatchResponse(t, w, []batchResponsePart{{index: 0, status: http.StatusNoContent}})
+		default:
+			t.Fatalf("unexpected batch request %d", len(requests))
+		}
+	}, "token")
+	client.sleep = func(ctx context.Context, delay time.Duration) error {
+		slept = append(slept, delay)
+		return nil
+	}
+	client.jitter = func(time.Duration) time.Duration { return 0 }
+
+	receipts, err := client.ModifyThreadsReceipts(context.Background(), []string{"t1", "t2"}, nil, nil)
+	if err != nil {
+		t.Fatalf("ModifyThreadsReceipts: %v", err)
+	}
+	if got, want := requests, [][]string{{"t1", "t2"}, {"t2"}}; len(got) != len(want) || !slices.Equal(got[0], want[0]) || !slices.Equal(got[1], want[1]) {
+		t.Fatalf("batch requests = %v, want %v", got, want)
+	}
+	if got, want := slept, []time.Duration{time.Second}; !slices.Equal(got, want) {
+		t.Fatalf("retry sleeps = %v, want %v", got, want)
+	}
+	if got, want := receipts.Succeeded, []string{"t1", "t2"}; !slices.Equal(got, want) {
+		t.Fatalf("Succeeded = %v, want %v", got, want)
+	}
+	if len(receipts.Failed) != 0 {
+		t.Fatalf("Failed = %#v, want none", receipts.Failed)
+	}
+}
+
+func TestReceiptsTransportAbortReportsPartialAttempt(t *testing.T) {
+	ids := make([]string, 150)
+	for index := range ids {
+		ids[index] = fmt.Sprintf("t-%d", index)
+	}
+
+	var requests int
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		parts := readBatchRequest(t, r)
+		switch requests {
+		case 1:
+			if len(parts) != 100 {
+				t.Fatalf("first batch parts = %d, want 100", len(parts))
+			}
+			responses := make([]batchResponsePart, len(parts))
+			for index := range parts {
+				responses[index] = batchResponsePart{index: index, status: http.StatusNoContent}
+			}
+			writeBatchResponse(t, w, responses)
+		case 2:
+			if len(parts) != 50 {
+				t.Fatalf("second batch parts = %d, want 50", len(parts))
+			}
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("response writer does not support connection hijacking")
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Fatalf("hijack batch connection: %v", err)
+			}
+			conn.Close()
+		default:
+			t.Fatalf("unexpected batch request %d", requests)
+		}
+	}, "token")
+
+	receipts, err := client.ModifyThreadsReceipts(context.Background(), ids, nil, nil)
+	if err == nil {
+		t.Fatal("ModifyThreadsReceipts error = nil, want transport failure")
+	}
+	if requests != 2 {
+		t.Fatalf("batch requests = %d, want 2", requests)
+	}
+	if got, want := receipts.Succeeded, ids[:100]; !slices.Equal(got, want) {
+		t.Fatalf("Succeeded = %v, want %v", got, want)
+	}
+	if len(receipts.Failed) != 0 {
+		t.Fatalf("Failed = %#v, want none", receipts.Failed)
+	}
+}
+
+func TestReceiptsKeepConfirmedSuccessOnCancelDuringRetryWait(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var requests int
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		parts := readBatchRequest(t, r)
+		if len(parts) != 2 {
+			t.Fatalf("batch parts = %d, want 2", len(parts))
+		}
+		writeBatchResponse(t, w, []batchResponsePart{
+			{index: 0, status: http.StatusNoContent},
+			{
+				index:   1,
+				status:  http.StatusTooManyRequests,
+				headers: http.Header{"Retry-After": {"1"}},
+				body:    `{"error":{"code":429,"message":"Rate Limit Exceeded","errors":[{"reason":"rateLimitExceeded"}]}}`,
+			},
+		})
+	}, "token")
+	client.sleep = func(context.Context, time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}
+
+	receipts, err := client.ModifyThreadsReceipts(ctx, []string{"t1", "t2"}, nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ModifyThreadsReceipts error = %v, want context cancellation", err)
+	}
+	if requests != 1 {
+		t.Fatalf("batch requests = %d, want 1", requests)
+	}
+	if got, want := receipts.Succeeded, []string{"t1"}; !slices.Equal(got, want) {
+		t.Fatalf("Succeeded = %v, want %v", got, want)
+	}
+	if len(receipts.Failed) != 0 {
+		t.Fatalf("Failed = %#v, want none", receipts.Failed)
+	}
+}
+
+func TestReceiptsDeduplicateIdsFirstSeen(t *testing.T) {
+	var requests int
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		parts := readBatchRequest(t, r)
+		if len(parts) != 2 {
+			t.Fatalf("batch parts = %d, want 2", len(parts))
+		}
+		for index, want := range []string{"t1", "t2"} {
+			if got := strings.TrimSuffix(strings.TrimPrefix(parts[index].request.URL.Path, "/gmail/v1/users/me/threads/"), "/modify"); got != want {
+				t.Fatalf("part %d thread id = %q, want %q", index, got, want)
+			}
+		}
+		writeBatchResponse(t, w, []batchResponsePart{
+			{index: 0, status: http.StatusNoContent},
+			{index: 1, status: http.StatusNoContent},
+		})
+	}, "token")
+
+	receipts, err := client.ModifyThreadsReceipts(context.Background(), []string{"t1", "t2", "t1"}, nil, nil)
+	if err != nil {
+		t.Fatalf("ModifyThreadsReceipts: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("batch requests = %d, want 1", requests)
+	}
+	if got, want := receipts.Succeeded, []string{"t1", "t2"}; !slices.Equal(got, want) {
+		t.Fatalf("Succeeded = %v, want %v", got, want)
+	}
+	if len(receipts.Failed) != 0 {
+		t.Fatalf("Failed = %#v, want none", receipts.Failed)
+	}
+}
+
+func TestModifyThreadsMultiIdStillReportsBatchFailuresError(t *testing.T) {
+	ids := make([]string, 250)
+	for index := range ids {
+		ids[index] = fmt.Sprintf("t-%d", index)
+	}
+
+	var requests [][]string
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		parts := readBatchRequest(t, r)
+		request := make([]string, 0, len(parts))
+		responses := make([]batchResponsePart, 0, len(parts))
+		for index, part := range parts {
+			id := strings.TrimSuffix(strings.TrimPrefix(part.request.URL.Path, "/gmail/v1/users/me/threads/"), "/modify")
+			request = append(request, id)
+			if id == "t-149" {
+				responses = append(responses, batchResponsePart{
+					index:  index,
+					status: http.StatusForbidden,
+					body:   `{"error":{"code":403,"message":"Forbidden","errors":[{"reason":"insufficientPermissions"}]}}`,
+				})
+				continue
+			}
+			responses = append(responses, batchResponsePart{index: index, status: http.StatusNoContent})
+		}
+		requests = append(requests, request)
+		writeBatchResponse(t, w, responses)
+	}, "token")
+
+	err := client.ModifyThreads(context.Background(), ids, nil, nil)
+	var failures *batchFailuresError
+	if !errors.As(err, &failures) {
+		t.Fatalf("ModifyThreads error = %v, want batch failures", err)
+	}
+	if len(failures.failures) != 1 {
+		t.Fatalf("batch failures = %#v, want one failure", failures.failures)
+	}
+	failure := failures.failures[0]
+	if failure.id != "t-149" || failure.status != http.StatusForbidden {
+		t.Fatalf("batch failure = %#v, want t-149 403", failure)
+	}
+	var gotIDs []string
+	for _, request := range requests {
+		gotIDs = append(gotIDs, request...)
+	}
+	if !slices.Equal(gotIDs, ids) {
+		t.Fatalf("batch ids = %v, want %v", gotIDs, ids)
+	}
+}
+
+func TestSingleIdWriteErrorShapeUnchanged(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requireRequest(t, r, http.MethodPost, "/gmail/v1/users/me/threads/t1/trash", "token")
+		writeJSON(t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions", "Forbidden"))
+	}, "token")
+
+	err := client.TrashThreads(context.Background(), []string{"t1"})
+	var scope *ErrInsufficientScope
+	if !errors.As(err, &scope) {
+		t.Fatalf("TrashThreads error = %v, want insufficient scope error", err)
+	}
+	var failures *batchFailuresError
+	if errors.As(err, &failures) {
+		t.Fatalf("TrashThreads error = %v, must not be a batch failures error", err)
 	}
 }

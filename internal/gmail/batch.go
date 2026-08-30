@@ -33,7 +33,7 @@ type batchResult struct {
 	body []byte
 }
 
-func (c *Client) doBatch(ctx context.Context, creds Credentials, items []batchItem) ([]batchResult, error) {
+func (c *Client) doBatch(ctx context.Context, creds Credentials, items []batchItem) ([]batchResult, []batchFailure, error) {
 	results := make([]batchResult, len(items))
 	pending := make([]batchItem, len(items))
 	for index, item := range items {
@@ -49,13 +49,10 @@ func (c *Client) doBatch(ctx context.Context, creds Credentials, items []batchIt
 		if err != nil {
 			if isRateLimitError(err) && rateLimitRetries < maxRateLimitRetries {
 				if err := c.waitForRateLimit(ctx, rateLimitRetries, retryAfter(err)); err != nil {
-					return nil, err
+					return results, terminalFailures, err
 				}
 				rateLimitRetries++
 				continue
-			}
-			if len(terminalFailures) == 0 {
-				return nil, err
 			}
 
 			var apiErr *APIError
@@ -67,27 +64,24 @@ func (c *Client) doBatch(ctx context.Context, creds Credentials, items []batchIt
 						err:    err,
 					})
 				}
-				return nil, newBatchFailure(terminalFailures)
+				return results, terminalFailures, nil
 			}
-			return nil, fmt.Errorf("%w; prior terminal batch failures: %s", err, newBatchFailure(terminalFailures))
+			return results, terminalFailures, err
 		}
 
 		mergeBatchResults(results, pending, outcome.results)
 		terminalFailures = append(terminalFailures, outcome.failures...)
 		if len(outcome.retryItems) == 0 {
-			if len(terminalFailures) > 0 {
-				return nil, newBatchFailure(terminalFailures)
-			}
-			return results, nil
+			return results, terminalFailures, nil
 		}
 		if rateLimitRetries == maxRateLimitRetries {
 			for _, retryItem := range outcome.retryItems {
 				terminalFailures = append(terminalFailures, retryItem.failure)
 			}
-			return nil, newBatchFailure(terminalFailures)
+			return results, terminalFailures, nil
 		}
 		if err := c.waitForRateLimit(ctx, rateLimitRetries, batchRetryAfter(outcome.retryItems)); err != nil {
-			return nil, err
+			return results, terminalFailures, err
 		}
 		rateLimitRetries++
 		pending = make([]batchItem, len(outcome.retryItems))
