@@ -14,9 +14,9 @@ import (
 )
 
 func runStatus(cc *cmdCtx, args []string) int {
-	fs, accountFlag, jsonOutput := cc.flags("status")
-	pos, next, code := cc.parse(fs, accountFlag, jsonOutput, args)
-	if code != 0 {
+	cf := cc.flags("status")
+	pos, next, done, code := cc.parse(cf, args)
+	if done || code != 0 {
 		return code
 	}
 	if err := requireArity(pos, 0, 0, "status"); err != nil {
@@ -78,12 +78,13 @@ func runStatus(cc *cmdCtx, args []string) int {
 		output.Accounts = append(output.Accounts, row)
 	}
 
-	if next.json {
-		if err := writeJSON(next.stdout, output); err != nil {
+	switch next.format() {
+	case FormatText:
+		next.writeStatus(next.stdout, output)
+	default:
+		if err := next.writeMachine(output); err != nil {
 			return next.runtimeError("", nil, wrapError("write JSON", err))
 		}
-	} else {
-		next.writeStatus(next.stdout, output)
 	}
 	for _, source := range diagnosticSources {
 		next.emitCredentialDiagnostic(source, auth.ClassRead)

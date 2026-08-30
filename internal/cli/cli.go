@@ -18,6 +18,7 @@ import (
 type cmdCtx struct {
 	accountFlag string
 	json        bool
+	text        bool
 	stdout      io.Writer
 	stderr      io.Writer
 	rawArgs     []string
@@ -57,11 +58,12 @@ func commandByName(name string) (commandSpec, bool) {
 
 // PrintHelp writes the public command and configuration summary.
 func PrintHelp(output io.Writer) {
-	fmt.Fprintln(output, "usage: mailbox [--account NAME] [--json] <command> [options]")
+	fmt.Fprintln(output, "usage: mailbox [--account NAME] [--json] [--text] <command> [options]")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "global flags:")
 	fmt.Fprintln(output, "  --account NAME   account name from config")
-	fmt.Fprintln(output, "  --json           machine-readable output")
+	fmt.Fprintln(output, "  --json           machine-readable JSON output (stable)")
+	fmt.Fprintln(output, "  --text           human output (overrides agent/pipe detection)")
 	fmt.Fprintln(output, "  --help, -h       show this help")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands:")
@@ -78,6 +80,7 @@ func PrintHelp(output io.Writer) {
 type TopLevelFlags struct {
 	Account string
 	JSON    bool
+	Text    bool
 	Help    bool
 }
 
@@ -88,12 +91,13 @@ func ParseTopLevel(args []string) (TopLevelFlags, []string, error) {
 	flags.SetOutput(io.Discard)
 	account := flags.String("account", "", "account name from config")
 	jsonOutput := flags.Bool("json", false, "machine output")
+	textOutput := flags.Bool("text", false, "human output")
 	help := flags.Bool("help", false, "show help")
 	shortHelp := flags.Bool("h", false, "show help")
 	if err := flags.Parse(args); err != nil {
 		return TopLevelFlags{}, nil, err
 	}
-	return TopLevelFlags{Account: *account, JSON: *jsonOutput, Help: *help || *shortHelp}, flags.Args(), nil
+	return TopLevelFlags{Account: *account, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp}, flags.Args(), nil
 }
 
 // Run executes a one-shot command. args excludes the program name.
@@ -110,7 +114,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return failUsage(stderr, nil)
 	}
 
-	cc := &cmdCtx{accountFlag: global.Account, json: global.JSON, stdout: stdout, stderr: stderr, rawArgs: args}
+	cc := &cmdCtx{accountFlag: global.Account, json: global.JSON, text: global.Text, stdout: stdout, stderr: stderr, rawArgs: args}
 	if rest[0] == "__mint" {
 		return runMint(cc, rest[1:])
 	}
@@ -133,23 +137,46 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	return command.run(cc, rest[1:])
 }
 
-func (cc *cmdCtx) flags(name string) (*flag.FlagSet, *string, *bool) {
+type commonFlags struct {
+	fs         *flag.FlagSet
+	account    *string
+	json, text *bool
+	help       *bool
+}
+
+func (cc *cmdCtx) flags(name string) commonFlags {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	account := fs.String("account", cc.accountFlag, "account name from config")
 	jsonOutput := fs.Bool("json", cc.json, "machine output")
-	return fs, account, jsonOutput
+	textOutput := fs.Bool("text", cc.text, "human output")
+	help := false
+	fs.BoolVar(&help, "help", false, "show help")
+	fs.BoolVar(&help, "h", false, "show help")
+	return commonFlags{fs: fs, account: account, json: jsonOutput, text: textOutput, help: &help}
 }
 
-func (cc *cmdCtx) parse(fs *flag.FlagSet, account *string, jsonOutput *bool, args []string) ([]string, *cmdCtx, int) {
-	pos, err := parseInterspersed(fs, args)
+func (cc *cmdCtx) parse(cf commonFlags, args []string) (pos []string, next *cmdCtx, done bool, code int) {
+	pos, err := parseInterspersed(cf.fs, args)
 	if err != nil {
-		return nil, nil, failUsage(cc.stderr, err)
+		return nil, nil, false, failUsage(cc.stderr, err)
 	}
-	next := *cc
-	next.accountFlag = *account
-	next.json = *jsonOutput
-	return pos, &next, 0
+	copy := *cc
+	copy.accountFlag = *cf.account
+	copy.json = *cf.json
+	copy.text = *cf.text
+	next = &copy
+	if *cf.help {
+		next.printCommandHelp(cf.fs.Name())
+		return pos, next, true, 0
+	}
+	return pos, next, false, 0
+}
+
+func (cc *cmdCtx) printCommandHelp(name string) {
+	if command, ok := commandByName(name); ok {
+		fmt.Fprintf(cc.stdout, "usage: mailbox %s [options]\n\n%s\n", name, command.description)
+	}
 }
 
 func (cc *cmdCtx) start() (string, *auth.Source, *gmail.Client, int) {
@@ -216,25 +243,27 @@ func (cc *cmdCtx) runtimeErrorForScope(_ string, source *auth.Source, err error,
 	return 1
 }
 
+type errorEnvelope struct {
+	Error struct {
+		Code      string `json:"code"`
+		Account   string `json:"account"`
+		ConfigKey string `json:"config_key"`
+		Config    string `json:"config"`
+	} `json:"error"`
+}
+
 func (cc *cmdCtx) needsCredential(err *auth.NeedsCredentialError) int {
-	if !cc.json {
+	if cc.format() == FormatText {
 		fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
 		return 1
 	}
-	output := struct {
-		Error struct {
-			Code      string `json:"code"`
-			Account   string `json:"account"`
-			ConfigKey string `json:"config_key"`
-			Config    string `json:"config"`
-		} `json:"error"`
-	}{}
+	output := errorEnvelope{}
 	output.Error.Code = "needs_" + string(err.Class) + "_credential"
 	output.Error.Account = err.Account
 	output.Error.ConfigKey = err.ConfigKey
 	output.Error.Config = err.ConfigPath
-	if writeErr := writeJSON(cc.stdout, output); writeErr != nil {
-		fmt.Fprintf(cc.stderr, "mailbox: write credential error JSON: %v\n", writeErr)
+	if writeErr := cc.writeMachine(output); writeErr != nil {
+		fmt.Fprintf(cc.stderr, "mailbox: write credential error output: %v\n", writeErr)
 	}
 	return 1
 }

@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/mailbox/internal/refs"
+	"github.com/sjawhar/mailbox/internal/toon/toontest"
 )
 
 type gmailTestServer struct {
@@ -507,9 +508,85 @@ func TestReadPipedMarkdown(t *testing.T) {
 	g := newGmailTestServer(t)
 	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
 	seedRefs(t, "t1")
-	code, stdout, _ := runCLI(t, g, "read", "1")
+	code, stdout, _ := runCLI(t, g, "read", "1", "--text")
 	if code != 0 || !strings.HasPrefix(stdout, "# ") {
 		t.Fatalf("read stdout = %q, want raw markdown", stdout)
+	}
+}
+
+func TestReadPipedDefaultsToTOON(t *testing.T) {
+	g := newGmailTestServer(t)
+	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+	seedRefs(t, "t1")
+	code, stdout, _ := runCLI(t, g, "read", "1")
+	if code != 0 || !strings.HasPrefix(stdout, "account: ") {
+		t.Fatalf("read stdout = %q, want TOON account field", stdout)
+	}
+	if _, err := toontest.Decode(strings.TrimSuffix(stdout, "\n")); err != nil {
+		t.Fatalf("decode TOON stdout %q: %v", stdout, err)
+	}
+}
+
+func TestStructuredSurfacesDefaultToTOON(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*testing.T, *gmailTestServer) []string
+	}{
+		{name: "inbox", prepare: func(_ *testing.T, _ *gmailTestServer) []string { return []string{"inbox"} }},
+		{name: "search", prepare: func(_ *testing.T, _ *gmailTestServer) []string { return []string{"search", "from:alice"} }},
+		{name: "read", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"read", "1"}
+		}},
+		{name: "status", prepare: func(_ *testing.T, _ *gmailTestServer) []string { return []string{"status"} }},
+		{name: "archive", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"archive", "1"}
+		}},
+		{name: "trash", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"trash", "1"}
+		}},
+		{name: "mark", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"mark", "unread", "1"}
+		}},
+		{name: "label", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"label", "add", "Newsletters", "1"}
+		}},
+		{name: "attachment list", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"attachment", "1"}
+		}},
+		{name: "attachment save", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"attachment", "1", "1", "-o", t.TempDir()}
+		}},
+		{name: "open", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			stub := t.TempDir()
+			path := filepath.Join(stub, "xdg-open")
+			if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", stub+":"+os.Getenv("PATH"))
+			seedRefs(t, "t1")
+			return []string{"open", "1"}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := newGmailTestServer(t)
+			t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+			args := test.prepare(t, g)
+			code, stdout, stderr := runCLI(t, g, args...)
+			if code != 0 {
+				t.Fatalf("%v = (%d, %q, %q), want success", args, code, stdout, stderr)
+			}
+			if _, err := toontest.Decode(strings.TrimSuffix(stdout, "\n")); err != nil {
+				t.Fatalf("%v TOON decode %q: %v", args, stdout, err)
+			}
+		})
 	}
 }
 
@@ -628,7 +705,7 @@ func TestTrashHumanOutput(t *testing.T) {
 	g := newGmailTestServer(t)
 	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
 	seedRefs(t, "t1")
-	code, stdout, _ := runCLI(t, g, "trash", "1")
+	code, stdout, _ := runCLI(t, g, "trash", "1", "--text")
 	if code != 0 || stdout != "trashed 1 thread(s)\n" {
 		t.Fatalf("trash = (%d, %q), want human trash line", code, stdout)
 	}
@@ -800,7 +877,7 @@ func TestStatusJSON(t *testing.T) {
 
 func TestStatusHumanWritesAllStatusLinesToStdout(t *testing.T) {
 	g := newGmailTestServer(t)
-	code, stdout, stderr := runCLI(t, g, "status")
+	code, stdout, stderr := runCLI(t, g, "status", "--text")
 	if code != 0 {
 		t.Fatalf("status exit = %d", code)
 	}

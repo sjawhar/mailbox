@@ -59,7 +59,7 @@ func TestPrintThreadsSanitizesMailText(t *testing.T) {
 
 func TestAttachmentListSanitizesMailFilename(t *testing.T) {
 	var output bytes.Buffer
-	ctx := &cmdCtx{stdout: &output}
+	ctx := &cmdCtx{stdout: &output, text: true}
 	if code := ctx.attachmentList("work", nil, "thread", []render.Attachment{{
 		N:        1,
 		Filename: "report\x1b]52;c;clipboard\a.pdf",

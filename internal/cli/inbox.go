@@ -12,11 +12,11 @@ import (
 )
 
 func runInbox(cc *cmdCtx, args []string) int {
-	fs, accountFlag, jsonOutput := cc.flags("inbox")
-	unread := fs.Bool("unread", false, "only unread threads")
-	max := fs.Int64("max", 25, "maximum threads (1..500)")
-	pos, next, code := cc.parse(fs, accountFlag, jsonOutput, args)
-	if code != 0 {
+	cf := cc.flags("inbox")
+	unread := cf.fs.Bool("unread", false, "only unread threads")
+	max := cf.fs.Int64("max", 25, "maximum threads (1..500)")
+	pos, next, done, code := cc.parse(cf, args)
+	if done || code != 0 {
 		return code
 	}
 	if err := requireArity(pos, 0, 0, "inbox"); err != nil {
@@ -33,10 +33,10 @@ func runInbox(cc *cmdCtx, args []string) int {
 }
 
 func runSearch(cc *cmdCtx, args []string) int {
-	fs, accountFlag, jsonOutput := cc.flags("search")
-	max := fs.Int64("max", 25, "maximum threads (1..500)")
-	pos, next, code := cc.parse(fs, accountFlag, jsonOutput, args)
-	if code != 0 {
+	cf := cc.flags("search")
+	max := cf.fs.Int64("max", 25, "maximum threads (1..500)")
+	pos, next, done, code := cc.parse(cf, args)
+	if done || code != 0 {
 		return code
 	}
 	if err := requireArity(pos, 1, -1, "search"); err != nil {
@@ -46,6 +46,11 @@ func runSearch(cc *cmdCtx, args []string) int {
 		return failUsage(cc.stderr, fmt.Errorf("--max must be in range 1..500"))
 	}
 	return runListing(next, gmail.ListOptions{Query: strings.Join(pos, " "), MaxResults: *max})
+}
+
+type listingPayload struct {
+	Account string      `json:"account"`
+	Threads []threadRow `json:"threads"`
 }
 
 func runListing(cc *cmdCtx, options gmail.ListOptions) int {
@@ -80,17 +85,17 @@ func runListing(cc *cmdCtx, options gmail.ListOptions) int {
 	if err := refs.Write(account, ids); err != nil {
 		return cc.runtimeError(account, source, err)
 	}
-	if cc.json {
-		if err := writeJSON(cc.stdout, struct {
-			Account string      `json:"account"`
-			Threads []threadRow `json:"threads"`
-		}{Account: string(account), Threads: rows}); err != nil {
+	switch cc.format() {
+	case FormatText:
+		if len(rows) == 0 {
+			fmt.Fprintln(cc.stdout, "no threads")
+		} else {
+			printThreads(cc.stdout, rows, isTerminal(cc.stdout))
+		}
+	default:
+		if err := cc.writeMachine(listingPayload{Account: string(account), Threads: rows}); err != nil {
 			return cc.runtimeError(account, source, wrapError("write JSON", err))
 		}
-	} else if len(rows) == 0 {
-		fmt.Fprintln(cc.stdout, "no threads")
-	} else {
-		printThreads(cc.stdout, rows, isTerminal(cc.stdout))
 	}
 	cc.emitCredentialDiagnostic(source, auth.ClassRead)
 	return 0
