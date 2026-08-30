@@ -98,7 +98,7 @@ func TestRenderedThreadMarkdownFormat(t *testing.T) {
 		},
 	}
 
-	want := "# Status\n\n" +
+	want := "# Status\n\n(newest first)\n\n" +
 		"## Alice <alice@example.com> → Bob <bob@example.com>, 2026-08-27 01:02 UTC\n\n" +
 		"First body\n\n" +
 		"Attachments: [1] report.pdf (application/pdf, 10.0 KB)\n\n" +

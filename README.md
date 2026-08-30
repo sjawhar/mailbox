@@ -44,12 +44,15 @@ Run `mailbox` without a subcommand in a terminal to open the interactive TUI. Fo
 | `mailbox label add\|rm <name> <ref>...` | Add or remove a Gmail label. |
 | `mailbox attachment <ref> [n] [-o path]` | List attachments, or download attachment `n`. |
 | `mailbox status` | Report the selected account's authentication route, Gmail profile, and cache state. |
+| `mailbox send [--to RECIPIENT] [--subject SUBJECT] [--reply THREAD] [--forward THREAD] --body BODY [--send]` | Preview a compose, reply, or forward envelope; add `--send` only to transmit it. |
 
-`inbox` and `search` assign numbered references for the selected account. A number resolves only against that account's most recent listing; a raw Gmail thread ID or message ID is always accepted. JSON listings expose the durable Gmail IDs, so automation should use IDs instead of numbered references.
+`inbox` and `search` assign numbered references for the selected account. A number resolves only against that account's most recent listing; every mailbox surface resolves identifiers to threads, and a raw message ID resolves to its parent thread. The one exception is `send --message`, which names a message within the thread. JSON listings expose the durable Gmail IDs, so automation should use IDs instead of numbered references.
 
 `--account NAME` selects a configured account and takes precedence over `MAILBOX_ACCOUNT`; when neither is set, mailbox uses `default_account`.
 
-Every command in the table accepts `--json`. It writes one JSON value to standard output and reserves standard error for diagnostics. A listing has this shape:
+## Output formats
+
+TOON is the default for agents and pipes. `--json` is the stable opt-in for machine-readable JSON, and `--text` forces human output. Every command in the table accepts these output flags. A listing rendered with `--json` has this shape:
 
 ```json
 {
@@ -91,14 +94,17 @@ read_interactive = false                 # false by default for a command source
 write_credential_cmd = ["my-approver", "--", "mailbox", "__mint", "--env", "ACME_OAUTH_JSON"]
 write_interactive = true                 # true by default for a command source
 write_label = "Approval required"        # optional text shown while the TUI waits
+send_credential_cmd = ["my-send-helper"]
+send_interactive = true                  # true by default for a command source
+send_label = "hardware key touch"        # optional text shown while the TUI waits
 credential_env_passthrough = ["ACME_SESSION_FILE"]
 
 # Instead of either command above, its class can read a value directly:
 # read_credential_env = "ACME_OAUTH_JSON"
 # write_credential_env = "ACME_WRITE_OAUTH_JSON"
-```
+# send_credential_env = "ACME_SEND_OAUTH_JSON"
 
-Each `[accounts.NAME]` table needs a read source. A write source is optional.
+Each `[accounts.NAME]` table needs a read source. Write and send sources are optional.
 For each class, choose exactly one of `_credential_env` and
 `_credential_cmd`; an environment source holds either an `authorized_user`
 JSON value or a bare access token. A command source is an argv array resolved
@@ -114,9 +120,9 @@ than a fallback to a bare token.
 | `scrub_env` | Exact environment-variable names removed from every mailbox child process. |
 | `scrub_env_patterns` | Shell-style glob patterns for additional names removed from every mailbox child process. |
 | `credential_timeout_secs` | Positive command timeout in seconds. The default is 120 seconds. Timeout cancels the credential helper's process group. |
-| `read_credential_env`, `write_credential_env` | The environment variable containing an `authorized_user` JSON value or bare token for that class. |
-| `read_interactive`, `write_interactive` | Applies only to a command source. Read defaults to `false`; write defaults to `true`. Batch surfaces refuse interactive sources; only the TUI executes them. |
-| `write_label` | Optional label shown by the TUI while a write credential command is awaiting approval. |
+| `read_credential_env`, `write_credential_env`, `send_credential_env` | The environment variable containing an `authorized_user` JSON value or bare token for that class. |
+| `read_interactive`, `write_interactive`, `send_interactive` | Applies only to a command source. Read defaults to `false`; write and send default to `true`. Batch surfaces refuse interactive sources; only the TUI executes them. |
+| `write_label`, `send_label` | Optional label shown by the TUI while a credential command is awaiting approval. |
 | `credential_env_passthrough` | Per-account allow-list restored only for that account's credential command after scrubbing. It cannot restore a credential variable or an unconditionally denied value. |
 
 Mailbox scrubs `MAILBOX_TOKEN`, `MAILBOX_TOKEN_URL`, `MAILBOX_CONFIG`, every
@@ -139,13 +145,11 @@ Mailbox keeps credentials separate by class:
 | --- | --- | --- |
 | Read | `inbox`, `search`, `read`, `open`, `attachment`, `status` | `gmail.readonly` |
 | Write | `archive`, `trash`, `mark`, `label` | `gmail.modify` |
+| Send | `send --send` | `gmail.send` |
 
-For each account and class, resolution is `MAILBOX_TOKEN`, then a valid read
-cache entry (read only), then the configured source. `MAILBOX_TOKEN` is an
-override for both classes; if its scope is insufficient for a write, mailbox
-reports that error rather than trying another source. The read cache stores
-only expiring tokens. Every entry is bound to its configured source, so
-changing that source invalidates its cache entry.
+Read and write resolution is `MAILBOX_TOKEN`, then a valid read cache entry (read only), then the configured source. `MAILBOX_TOKEN` is an override for those two classes; if its scope is insufficient for a write, mailbox reports that error rather than trying another source. The read cache stores only expiring tokens. Every entry is bound to its configured source, so changing that source invalidates its cache entry.
+
+Send tokens are resolved only from the configured send source, kept in memory only, and never cached or satisfied by `MAILBOX_TOKEN`.
 
 | Environment variable | Contract |
 | --- | --- |
@@ -169,9 +173,29 @@ With `--json`, the same condition writes this envelope to standard output:
 ```
 
 The read analogue uses `needs_read_credential` and the configured read key.
+
+The send analogue uses `needs_send_credential` and the configured send key.
+
 `mailbox __mint --env VAR` is an internal credential-helper child: it refuses
 `MAILBOX_TOKEN`, reads only `VAR`, prints one JSON object to standard output,
 writes nothing to disk, and does not load configuration.
+
+## Send
+
+`mailbox send` is a dry run by default: it resolves and prints the envelope with the read credential, without touching the send credential. Add `--send` only after inspecting that preview.
+
+For replies and forwards, `--message` selects the message within the named thread. `--send` requires that pin so the inspected envelope and sent message cannot diverge; without `--message`, a preview selects the newest message.
+
+For replies, mailbox derives recipients from `Reply-To` or `From`, plus the original `To` and `Cc`, then subtracts the account primary address from every final `To`, `Cc`, and `Bcc` set before evaluating refusals. Primary-address comparison is case-insensitive on the addr-spec; aliases, plus-tags, and dot variants are intentionally not treated as self.
+
+| Rule | Refusal |
+| --- | --- |
+| R1 | No recipients remain after resolution. |
+| R2 | A reply's recipients contain only the account primary address after self-subtraction. |
+| R3 | A recipient does not parse as an email address. |
+| R4 | A subject or recipient contains a carriage return or line feed. |
+| R5 | The message body is empty. |
+| R6 | `Reply-To` differs from `From`; provide explicit `--to` or `--cc`. |
 
 ## Migrating from v0.3.0 and earlier
 

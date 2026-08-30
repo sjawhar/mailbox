@@ -59,6 +59,19 @@ type RefusalPayload struct {
 	} `json:"error"`
 }
 
+// RuleDocs returns the stable refusal rule descriptions used by CLI help and
+// generated agent documentation.
+func RuleDocs() []struct{ Rule, Code, Doc string } {
+	return []struct{ Rule, Code, Doc string }{
+		{Rule: "R1", Code: "empty_recipients", Doc: "No recipients remain after resolution."},
+		{Rule: "R2", Code: "self_only_recipients", Doc: "A reply's recipients contain only the account's primary address after self-subtraction."},
+		{Rule: "R3", Code: "invalid_address", Doc: "A recipient does not parse as an email address."},
+		{Rule: "R4", Code: "header_injection", Doc: "A subject or recipient contains CR or LF."},
+		{Rule: "R5", Code: "empty_body", Doc: "The message body is empty."},
+		{Rule: "R6", Code: "needs_explicit_recipient", Doc: "Reply-To differs from From; provide --to or --cc."},
+	}
+}
+
 // VisibleOneLine makes layout-relevant whitespace visible, then removes terminal
 // control sequences from untrusted text.
 func VisibleOneLine(s string) string {

@@ -15,6 +15,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -547,6 +548,9 @@ func TestReadPipedMarkdown(t *testing.T) {
 	code, stdout, _ := runCLI(t, g, "read", "1", "--text")
 	if code != 0 || !strings.HasPrefix(stdout, "# ") {
 		t.Fatalf("read stdout = %q, want raw markdown", stdout)
+	}
+	if !strings.Contains(stdout, "\n(newest first)\n") {
+		t.Fatalf("read stdout = %q, want newest-first marker", stdout)
 	}
 }
 
@@ -1093,6 +1097,117 @@ func TestHelpListsEveryPublicCommand(t *testing.T) {
 			t.Fatalf("help for %q omitted config location: %q", args, stdout.String())
 		}
 	}
+}
+
+func TestCommandHelpDocumentsReadSearchAndSend(t *testing.T) {
+	setCLIConfig(t)
+
+	readHelp := commandHelp(t, "read")
+	for _, want := range []string{
+		"usage: mailbox read [--full] [--text|--json] <thread>",
+		"Messages print newest first.",
+		"--full",
+	} {
+		if !strings.Contains(readHelp, want) {
+			t.Fatalf("read help = %q, want %q", readHelp, want)
+		}
+	}
+
+	searchHelp := commandHelp(t, "search")
+	wantOperators := "Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax)."
+	if !strings.Contains(searchHelp, wantOperators) {
+		t.Fatalf("search help = %q, want operator passthrough", searchHelp)
+	}
+
+	sendHelp := commandHelp(t, "send")
+	for _, want := range []string{
+		"mailbox send --to a@x [--cc b@y] [--bcc c@z] --subject S --body TEXT      # compose",
+		"mailbox send --reply=<thread-id>  --body TEXT [--message=<id>] [--to ...] # reply",
+		"mailbox send --forward=<thread-id> --to a@x --body TEXT [--message=<id>]  # forward",
+		"dry-run",
+		"--message",
+		"--send",
+		"R1",
+		"R2",
+		"R3",
+		"R4",
+		"R5",
+		"R6",
+	} {
+		if !strings.Contains(sendHelp, want) {
+			t.Fatalf("send help = %q, want %q", sendHelp, want)
+		}
+	}
+}
+
+func TestCommandHelpDoesNotRequireConfiguration(t *testing.T) {
+	t.Setenv("MAILBOX_CONFIG", filepath.Join(t.TempDir(), "missing-config.toml"))
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"read", "--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("read --help exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Messages print newest first.") {
+		t.Fatalf("read help = %q, want ordering documentation", stdout.String())
+	}
+}
+
+func TestHelpDocumentsThreadIDSemantics(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("help exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+	}
+	want := "ids: mailbox ids are THREAD ids everywhere; the one exception is 'send --message', which names a message WITHIN the given thread (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing."
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("help = %q, want id semantics", stdout.String())
+	}
+}
+
+func TestSkillGeneratorDocumentsDispatchAndHelp(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "SKILL.md")
+	command := exec.Command("go", "run", "./cmd/skillgen", "-out", output)
+	command.Dir = filepath.Join("..", "..")
+	if result, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generate skill: %v\n%s", err, result)
+	}
+	document, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skill := string(document)
+	for _, command := range commandSpecs() {
+		if !strings.Contains(skill, "`"+command.name+"`") {
+			t.Fatalf("generated skill omitted command %q:\n%s", command.name, skill)
+		}
+	}
+	for _, want := range []string{
+		"---\nname: mailbox\ndescription: Gmail triage CLI — one-shot commands with TOON/JSON machine output\n---",
+		"Messages print newest first.",
+		"Gmail query operators pass through verbatim:",
+		"mailbox ids are THREAD ids everywhere",
+		"TOON is the default for agents and pipes.",
+		"`--json` is the stable opt-in.",
+		"`--text` forces human output.",
+		"Start with the dry run, copy its `--message` value, then add `--send` to transmit that exact target.",
+		"| R1 | empty_recipients |",
+		"| R2 | self_only_recipients |",
+		"| R3 | invalid_address |",
+		"| R4 | header_injection |",
+		"| R5 | empty_body |",
+		"| R6 | needs_explicit_recipient |",
+	} {
+		if !strings.Contains(skill, want) {
+			t.Fatalf("generated skill omitted %q:\n%s", want, skill)
+		}
+	}
+}
+
+func commandHelp(t *testing.T, name string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{name, "--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("%s --help exit = %d, stdout=%q, stderr=%q", name, code, stdout.String(), stderr.String())
+	}
+	return stdout.String()
 }
 
 func TestInvalidGlobalFlagRemainsUsageError(t *testing.T) {

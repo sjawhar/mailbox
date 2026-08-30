@@ -23,6 +23,10 @@ func runStatus(cc *cmdCtx, args []string) int {
 		return failUsage(cc.stderr, err)
 	}
 
+	if err := next.loadConfig(); err != nil {
+		return next.runtimeError("", nil, err)
+	}
+
 	accounts, err := next.statusAccounts()
 	if err != nil {
 		return next.runtimeError("", nil, err)
