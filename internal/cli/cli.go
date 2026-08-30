@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/sjawhar/mailbox/internal/auth"
@@ -21,6 +22,7 @@ type cmdCtx struct {
 	text        bool
 	stdout      io.Writer
 	stderr      io.Writer
+	stdin       io.Reader
 	rawArgs     []string
 	cfg         *auth.Config
 	acct        *auth.AccountConfig
@@ -44,6 +46,7 @@ func commandSpecs() []commandSpec {
 		{name: "label", description: "add or remove a label", run: runLabel},
 		{name: "attachment", description: "list or save attachments", run: runAttachment},
 		{name: "status", description: "show configured account status", run: runStatus},
+		{name: "send", description: "compose, reply, or forward mail (dry-run by default)", run: runSend},
 	}
 }
 
@@ -114,7 +117,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return failUsage(stderr, nil)
 	}
 
-	cc := &cmdCtx{accountFlag: global.Account, json: global.JSON, text: global.Text, stdout: stdout, stderr: stderr, rawArgs: args}
+	cc := &cmdCtx{accountFlag: global.Account, json: global.JSON, text: global.Text, stdout: stdout, stderr: stderr, stdin: os.Stdin, rawArgs: args}
 	if rest[0] == "__mint" {
 		return runMint(cc, rest[1:])
 	}
@@ -205,20 +208,38 @@ func (cc *cmdCtx) startWrite() (string, *auth.Source, *gmail.Client, int) {
 	return acct.Name, source, client, 0
 }
 
+func (cc *cmdCtx) startSend() (string, *auth.Source, *gmail.Client, int) {
+	acct, err := cc.cfg.ResolveAccount(cc.accountFlag)
+	if err != nil {
+		return "", nil, nil, cc.runtimeError("", nil, err)
+	}
+	cc.acct = acct
+	source := auth.NewSource(cc.cfg, acct)
+	if _, err := source.SendToken(context.Background(), auth.BatchAcquirer(cc.cfg, acct, auth.ClassSend)); err != nil {
+		return "", nil, nil, cc.sendRuntimeError(acct.Name, source, err)
+	}
+	client := gmail.NewClient(gmail.ClientConfig{
+		Read:    source.ReadCredentials(auth.BatchAcquirer(cc.cfg, acct, auth.ClassRead)),
+		Send:    source.SendCredentials(),
+		Account: acct.Name,
+	})
+	return acct.Name, source, client, 0
+}
+
 func (cc *cmdCtx) runtimeError(account string, source *auth.Source, err error) int {
-	return cc.runtimeErrorForScope(account, source, err, false)
+	return cc.runtimeErrorForClass(account, source, err, auth.ClassRead)
 }
 
 func (cc *cmdCtx) writeRuntimeError(account string, source *auth.Source, err error) int {
-	return cc.runtimeErrorForScope(account, source, err, true)
+	return cc.runtimeErrorForClass(account, source, err, auth.ClassWrite)
 }
 
-func (cc *cmdCtx) runtimeErrorForScope(_ string, source *auth.Source, err error, write bool) int {
+func (cc *cmdCtx) sendRuntimeError(account string, source *auth.Source, err error) int {
+	return cc.runtimeErrorForClass(account, source, err, auth.ClassSend)
+}
+
+func (cc *cmdCtx) runtimeErrorForClass(_ string, source *auth.Source, err error, class auth.Class) int {
 	if source != nil {
-		class := auth.ClassRead
-		if write {
-			class = auth.ClassWrite
-		}
 		cc.emitCredentialDiagnostic(source, class)
 	}
 	var credentialError *auth.NeedsCredentialError
@@ -227,15 +248,21 @@ func (cc *cmdCtx) runtimeErrorForScope(_ string, source *auth.Source, err error,
 	}
 	fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
 	if source != nil && gmail.IsInsufficientScope(err) {
-		class, route, scope := auth.ClassRead, source.LastRoute(), "gmail.readonly"
-		if write {
-			class, route, scope = auth.ClassWrite, source.WriteRoute(), "gmail.modify"
+		route, scope := source.LastRoute(), "gmail.readonly"
+		switch class {
+		case auth.ClassWrite:
+			route, scope = source.WriteRoute(), "gmail.modify"
+		case auth.ClassSend:
+			route, scope = source.SendRoute(), "gmail.send"
 		}
 		var typed *gmail.ErrInsufficientScope
 		if errors.As(err, &typed) {
 			scope = typed.Scope
-			if scope == "gmail.modify" {
+			switch scope {
+			case "gmail.modify":
 				class, route = auth.ClassWrite, source.WriteRoute()
+			case "gmail.send":
+				class, route = auth.ClassSend, source.SendRoute()
 			}
 		}
 		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ScopeHint(source.Account(), class, route, scope))
@@ -286,6 +313,18 @@ func (cc *cmdCtx) retryWrite(source *auth.Source, action func() error) error {
 	}
 	source.InvalidateWrite()
 	if _, err = source.WriteToken(context.Background(), auth.BatchAcquirer(cc.cfg, cc.acct, auth.ClassWrite)); err != nil {
+		return err
+	}
+	return action()
+}
+
+func (cc *cmdCtx) retrySend(source *auth.Source, action func() error) error {
+	err := action()
+	if !errors.Is(err, auth.ErrExpiredSendToken) {
+		return err
+	}
+	source.InvalidateSend()
+	if _, err = source.SendToken(context.Background(), auth.BatchAcquirer(cc.cfg, cc.acct, auth.ClassSend)); err != nil {
 		return err
 	}
 	return action()

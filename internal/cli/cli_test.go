@@ -35,6 +35,11 @@ type gmailTestServer struct {
 	listIDs        []string
 	attachment     []byte
 	metadata       map[string]map[string]any
+	messages       map[string]map[string]any
+	rawMessages    map[string][]byte
+	sentBodies     []map[string]any
+	sendStatus     int
+	readToken      string
 	rawMessageID   string
 	forbidden      bool
 	readForbidden  bool
@@ -66,12 +71,11 @@ func (g *gmailTestServer) tokenURL(t *testing.T, accessToken string) string {
 	t.Cleanup(server.Close)
 	return server.URL
 }
-
 func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	g.t.Helper()
 	// Write commands use the configured write credential for every request.
 	if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-		if g.writeToken == "" || got != "Bearer "+g.writeToken {
+		if (g.readToken == "" || got != "Bearer "+g.readToken) && (g.writeToken == "" || got != "Bearer "+g.writeToken) {
 			g.t.Fatalf("Authorization = %q, want test token", got)
 		}
 	}
@@ -92,6 +96,38 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 			g.t.Fatalf("raw message format = %q, want minimal", r.URL.Query().Get("format"))
 		}
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"id": g.rawMessageID, "threadId": "t1"})
+	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/messages/") && r.Method == http.MethodGet && !strings.Contains(r.URL.Path, "/attachments/"):
+		id := strings.TrimPrefix(r.URL.Path, "/gmail/v1/users/me/messages/")
+		message, ok := g.messages[id]
+		if !ok {
+			writeResponse(g.t, w, http.StatusNotFound, googleError(http.StatusNotFound, "notFound"))
+			return
+		}
+		switch r.URL.Query().Get("format") {
+		case "raw":
+			writeResponse(g.t, w, http.StatusOK, map[string]any{
+				"id":       id,
+				"threadId": message["threadId"],
+				"raw":      base64.RawURLEncoding.EncodeToString(g.rawMessages[id]),
+			})
+		case "minimal":
+			writeResponse(g.t, w, http.StatusOK, map[string]any{"id": id, "threadId": message["threadId"]})
+		default:
+			writeResponse(g.t, w, http.StatusOK, message)
+		}
+	case r.URL.Path == "/gmail/v1/users/me/messages/send" && r.Method == http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			g.t.Fatalf("decode sent message body: %v", err)
+		}
+		g.sentBodies = append(g.sentBodies, body)
+		if g.sendStatus != 0 && g.sendStatus != http.StatusOK {
+			status := g.sendStatus
+			g.sendStatus = 0
+			writeResponse(g.t, w, status, googleError(status, "sendFailed"))
+			return
+		}
+		writeResponse(g.t, w, http.StatusOK, map[string]any{"id": "sent-1", "threadId": "t1"})
 	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/threads/") && r.Method == http.MethodGet:
 		if g.readForbidden {
 			writeResponse(g.t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions"))
@@ -1048,7 +1084,7 @@ func TestHelpListsEveryPublicCommand(t *testing.T) {
 		if code := Run(args, &stdout, &stderr); code != 0 {
 			t.Fatalf("Run(%q) exit = %d, stdout=%q, stderr=%q", args, code, stdout.String(), stderr.String())
 		}
-		for _, command := range []string{"inbox", "search", "read", "open", "archive", "trash", "mark", "label", "attachment", "status"} {
+		for _, command := range []string{"inbox", "search", "read", "open", "archive", "trash", "mark", "label", "attachment", "status", "send"} {
 			if !strings.Contains(stdout.String(), command) {
 				t.Fatalf("help for %q omitted %q: %q", args, command, stdout.String())
 			}
