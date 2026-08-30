@@ -2,6 +2,8 @@
 package gmail
 
 import (
+	"encoding/base64"
+	"fmt"
 	"io"
 	"mime"
 	"slices"
@@ -41,6 +43,13 @@ type Message struct {
 	InternalDate int64        `json:"internalDate,string"` // ms since epoch; Gmail sends it as a JSON string
 	SizeEstimate int64        `json:"sizeEstimate"`
 	Payload      *MessagePart `json:"payload"`
+	Raw          string       `json:"raw,omitempty"`
+}
+
+// SentMessage is Gmail's response after accepting a sent message.
+type SentMessage struct {
+	ID       string `json:"id"`
+	ThreadID string `json:"threadId"`
 }
 
 var headerDecoder = &mime.WordDecoder{
@@ -65,6 +74,19 @@ func (m *Message) Header(name string) string {
 		}
 	}
 	return ""
+}
+
+// RawBytes decodes the raw Gmail message content.
+func (m *Message) RawBytes() ([]byte, error) {
+	data, err := base64.RawURLEncoding.DecodeString(m.Raw)
+	if err == nil {
+		return data, nil
+	}
+	data, paddedErr := base64.URLEncoding.DecodeString(m.Raw)
+	if paddedErr != nil {
+		return nil, fmt.Errorf("gmail: decode raw message: %w", paddedErr)
+	}
+	return data, nil
 }
 
 // HasLabel reports whether id is in LabelIDs.

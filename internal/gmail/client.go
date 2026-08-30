@@ -27,11 +27,11 @@ type Credentials interface {
 }
 
 // ClientConfig supplies credentials for a Gmail client. Read and Account are
-// required. Omit Write for a read-only client; supply it for a read-write
-// client.
+// required. Write and Send are optional credential classes.
 type ClientConfig struct {
 	Read    Credentials
 	Write   Credentials
+	Send    Credentials
 	Account string
 }
 
@@ -39,6 +39,7 @@ type ClientConfig struct {
 type Client struct {
 	read    Credentials
 	write   Credentials
+	send    Credentials
 	account string
 	BaseURL string
 	HTTP    *http.Client
@@ -47,7 +48,7 @@ type Client struct {
 	jitter func(time.Duration) time.Duration
 }
 
-// NewClient constructs a Gmail client in either read-only or read-write mode.
+// NewClient constructs a Gmail client.
 func NewClient(config ClientConfig) *Client {
 	if config.Read == nil {
 		panic("gmail: client requires read credentials")
@@ -62,6 +63,7 @@ func NewClient(config ClientConfig) *Client {
 	return &Client{
 		read:    config.Read,
 		write:   config.Write,
+		send:    config.Send,
 		account: config.Account,
 		BaseURL: baseURL,
 		HTTP:    &http.Client{Timeout: 30 * time.Second},
@@ -105,6 +107,26 @@ func (c *Client) GetThread(ctx context.Context, id, format string) (*Thread, err
 		return nil, err
 	}
 	return &thread, nil
+}
+
+// GetMessage fetches a Gmail message with all metadata headers.
+func (c *Client) GetMessage(ctx context.Context, id string) (*Message, error) {
+	var message Message
+	path := "/gmail/v1/users/me/messages/" + url.PathEscape(id)
+	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, path, url.Values{"format": {"metadata"}}, nil, &message), "gmail.readonly"); err != nil {
+		return nil, err
+	}
+	return &message, nil
+}
+
+// GetMessageRaw fetches a Gmail message with its complete raw content.
+func (c *Client) GetMessageRaw(ctx context.Context, id string) (*Message, error) {
+	var message Message
+	path := "/gmail/v1/users/me/messages/" + url.PathEscape(id)
+	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, path, url.Values{"format": {"raw"}}, nil, &message), "gmail.readonly"); err != nil {
+		return nil, err
+	}
+	return &message, nil
 }
 
 // GetThreadsMetadata fetches metadata for ids in Gmail batch requests.
@@ -165,6 +187,22 @@ func (c *Client) TrashThreads(ctx context.Context, ids []string) error {
 		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil), "gmail.modify")
 	}
 	return c.scopeMapped(c.batchThreadOperations(ctx, creds, ids, "/trash", nil), "gmail.modify")
+}
+
+// SendMessage sends a base64url-encoded MIME message using the send credentials.
+func (c *Client) SendMessage(ctx context.Context, raw []byte, threadID string) (*SentMessage, error) {
+	if c.send == nil {
+		return nil, errors.New("gmail: client has no send credentials")
+	}
+	var sent SentMessage
+	body := sendMessageRequest{
+		Raw:      base64.RawURLEncoding.EncodeToString(raw),
+		ThreadID: threadID,
+	}
+	if err := c.scopeMapped(c.do(ctx, c.send, http.MethodPost, "/gmail/v1/users/me/messages/send", nil, body, &sent), "gmail.send"); err != nil {
+		return nil, err
+	}
+	return &sent, nil
 }
 
 // ListLabels returns all labels for the current user.
@@ -235,6 +273,10 @@ func (c *Client) ResolveThreadID(ctx context.Context, id string) (string, error)
 type modifyThreadRequest struct {
 	AddLabelIDs    []string `json:"addLabelIds"`
 	RemoveLabelIDs []string `json:"removeLabelIds"`
+}
+type sendMessageRequest struct {
+	Raw      string `json:"raw"`
+	ThreadID string `json:"threadId,omitempty"`
 }
 
 func nonNilStrings(values []string) []string {

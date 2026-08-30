@@ -3,9 +3,11 @@ package gmail
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -73,18 +75,24 @@ func newTestClientWithConfig(t *testing.T, handler http.HandlerFunc, config Clie
 	client.HTTP = server.Client()
 	return client
 }
-func TestNewClientSupportsReadOnlyAndReadWriteModes(t *testing.T) {
+func TestNewClientCopiesOptionalCredentials(t *testing.T) {
 	read := &fakeCreds{tokens: []string{"read-token"}}
 	write := &fakeCreds{tokens: []string{"write-token"}}
+	send := &fakeCreds{tokens: []string{"send-token"}}
 
 	readOnly := NewClient(ClientConfig{Read: read, Account: "work"})
-	if readOnly.read != read || readOnly.write != nil || readOnly.account != "work" {
+	if readOnly.read != read || readOnly.write != nil || readOnly.send != nil || readOnly.account != "work" {
 		t.Fatalf("read-only client = %+v, want read credentials and account only", readOnly)
 	}
 
 	readWrite := NewClient(ClientConfig{Read: read, Write: write, Account: "work"})
-	if readWrite.read != read || readWrite.write != write || readWrite.account != "work" {
-		t.Fatalf("read-write client = %+v, want both credential classes and account", readWrite)
+	if readWrite.read != read || readWrite.write != write || readWrite.send != nil || readWrite.account != "work" {
+		t.Fatalf("read-write client = %+v, want read and write credentials only", readWrite)
+	}
+
+	readWriteSend := NewClient(ClientConfig{Read: read, Write: write, Send: send, Account: "work"})
+	if readWriteSend.read != read || readWriteSend.write != write || readWriteSend.send != send || readWriteSend.account != "work" {
+		t.Fatalf("send-enabled client = %+v, want all credentials and account", readWriteSend)
 	}
 }
 
@@ -540,5 +548,153 @@ func TestRead403MapsToErrInsufficientScope(t *testing.T) {
 	}
 	if scope.Scope != "gmail.readonly" {
 		t.Fatalf("scope = %q, want gmail.readonly", scope.Scope)
+	}
+}
+func TestSendMessagePostsMIMEWithSendCredentials(t *testing.T) {
+	raw := []byte("Subject: test\r\n\r\nBody")
+	read := &fakeCreds{tokens: []string{"read-token"}}
+	send := &fakeCreds{tokens: []string{"send-token"}}
+	client := newTestClientWithConfig(t, func(w http.ResponseWriter, request *http.Request) {
+		requireRequest(t, request, http.MethodPost, "/gmail/v1/users/me/messages/send", "send-token")
+		if got := request.URL.Query(); len(got) != 0 {
+			t.Fatalf("query = %q, want none", got.Encode())
+		}
+
+		var payload struct {
+			Raw      string `json:"raw"`
+			ThreadID string `json:"threadId"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if want := base64.RawURLEncoding.EncodeToString(raw); payload.Raw != want {
+			t.Fatalf("raw = %q, want %q", payload.Raw, want)
+		}
+		if payload.ThreadID != "t1" {
+			t.Fatalf("threadId = %q, want t1", payload.ThreadID)
+		}
+		writeJSON(t, w, http.StatusOK, map[string]string{"id": "sent1", "threadId": "t1"})
+	}, ClientConfig{Read: read, Send: send, Account: "work"})
+
+	sent, err := client.SendMessage(context.Background(), raw, "t1")
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if sent.ID != "sent1" || sent.ThreadID != "t1" {
+		t.Fatalf("sent message = %+v, want id sent1 in thread t1", sent)
+	}
+}
+
+func TestSendMessageOmitsEmptyThreadID(t *testing.T) {
+	client := newTestClientWithConfig(t, func(w http.ResponseWriter, request *http.Request) {
+		requireRequest(t, request, http.MethodPost, "/gmail/v1/users/me/messages/send", "send-token")
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		if bytes.Contains(body, []byte(`"threadId"`)) {
+			t.Fatalf("request body = %s, want threadId omitted", body)
+		}
+		writeJSON(t, w, http.StatusOK, map[string]string{"id": "sent1"})
+	}, ClientConfig{
+		Read:    &fakeCreds{tokens: []string{"read-token"}},
+		Send:    &fakeCreds{tokens: []string{"send-token"}},
+		Account: "work",
+	})
+
+	sent, err := client.SendMessage(context.Background(), []byte("MIME"), "")
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if sent.ID != "sent1" || sent.ThreadID != "" {
+		t.Fatalf("sent message = %+v, want id sent1 without thread", sent)
+	}
+}
+
+func TestSendMessageMapsInsufficientScope(t *testing.T) {
+	client := newTestClientWithConfig(t, func(w http.ResponseWriter, request *http.Request) {
+		requireRequest(t, request, http.MethodPost, "/gmail/v1/users/me/messages/send", "send-token")
+		writeJSON(t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions", "scope"))
+	}, ClientConfig{
+		Read:    &fakeCreds{tokens: []string{"read-token"}},
+		Send:    &fakeCreds{tokens: []string{"send-token"}},
+		Account: "work",
+	})
+
+	_, err := client.SendMessage(context.Background(), []byte("MIME"), "")
+	var scope *ErrInsufficientScope
+	if !errors.As(err, &scope) || scope.Scope != "gmail.send" {
+		t.Fatalf("SendMessage error = %v, scope = %+v, want gmail.send scope error", err, scope)
+	}
+}
+
+func TestSendMessageRequiresSendCredentials(t *testing.T) {
+	client := NewClient(ClientConfig{
+		Read:    &fakeCreds{tokens: []string{"read-token"}},
+		Account: "work",
+	})
+
+	_, err := client.SendMessage(context.Background(), []byte("MIME"), "")
+	if err == nil || err.Error() != "gmail: client has no send credentials" {
+		t.Fatalf("SendMessage error = %v, want missing send credentials error", err)
+	}
+}
+
+func TestGetMessage(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, request *http.Request) {
+		requireRequest(t, request, http.MethodGet, "/gmail/v1/users/me/messages/m1", "read-token")
+		if got := request.URL.Query().Get("format"); got != "metadata" {
+			t.Fatalf("format = %q, want metadata", got)
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id":       "m1",
+			"threadId": "t1",
+			"payload": map[string]any{
+				"headers": []map[string]string{{"name": "Subject", "value": "Test"}},
+			},
+		})
+	}, "read-token")
+
+	message, err := client.GetMessage(context.Background(), "m1")
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if message.ID != "m1" || message.ThreadID != "t1" || message.Header("Subject") != "Test" {
+		t.Fatalf("message = %+v, want m1 in t1 with metadata headers", message)
+	}
+}
+
+func TestGetMessageRawAndRawBytes(t *testing.T) {
+	raw := []byte("Subject: test\r\n\r\nBody")
+	client, _ := newTestClient(t, func(w http.ResponseWriter, request *http.Request) {
+		requireRequest(t, request, http.MethodGet, "/gmail/v1/users/me/messages/m1", "read-token")
+		if got := request.URL.Query().Get("format"); got != "raw" {
+			t.Fatalf("format = %q, want raw", got)
+		}
+		writeJSON(t, w, http.StatusOK, map[string]string{
+			"id":  "m1",
+			"raw": base64.RawURLEncoding.EncodeToString(raw),
+		})
+	}, "read-token")
+
+	message, err := client.GetMessageRaw(context.Background(), "m1")
+	if err != nil {
+		t.Fatalf("GetMessageRaw: %v", err)
+	}
+	got, err := message.RawBytes()
+	if err != nil {
+		t.Fatalf("RawBytes unpadded: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("RawBytes unpadded = %q, want %q", got, raw)
+	}
+
+	message.Raw = base64.URLEncoding.EncodeToString(raw)
+	got, err = message.RawBytes()
+	if err != nil {
+		t.Fatalf("RawBytes padded: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("RawBytes padded = %q, want %q", got, raw)
 	}
 }
