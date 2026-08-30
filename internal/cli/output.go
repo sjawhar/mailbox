@@ -9,7 +9,43 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/render"
+	"github.com/sjawhar/mailbox/internal/toon"
 )
+
+type Format uint8
+
+const (
+	FormatText Format = iota
+	FormatJSON
+	FormatTOON
+)
+
+// ResolveFormat selects the output format shared by every user-facing command.
+func ResolveFormat(jsonFlag, textFlag, agentEnv, terminal bool) Format {
+	switch {
+	case jsonFlag:
+		return FormatJSON
+	case textFlag:
+		return FormatText
+	case agentEnv || !terminal:
+		return FormatTOON
+	default:
+		return FormatText
+	}
+}
+
+func agentEnvironment() bool {
+	for _, name := range []string{"CLAUDECODE", "CLAUDE_CODE", "OPENCODE", "AGENT", "CI"} {
+		if _, ok := os.LookupEnv(name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (cc *cmdCtx) format() Format {
+	return ResolveFormat(cc.json, cc.text, agentEnvironment(), isTerminal(cc.stdout))
+}
 
 type threadRow struct {
 	N       int      `json:"n"`
@@ -26,6 +62,18 @@ func writeJSON(output io.Writer, value any) error {
 	encoder := json.NewEncoder(output)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(value)
+}
+
+func (cc *cmdCtx) writeMachine(value any) error {
+	if cc.format() == FormatJSON {
+		return writeJSON(cc.stdout, value)
+	}
+	doc, err := toon.Encode(value)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(cc.stdout, doc)
+	return err
 }
 
 func normalizeRenderedThread(thread *render.RenderedThread) {

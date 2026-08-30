@@ -58,6 +58,20 @@ type actionDoneMsg struct {
 
 func (message actionDoneMsg) requestRef() asyncRequest { return message.request }
 
+type profileMsg struct {
+	request asyncRequest
+	email   string
+}
+
+func (message profileMsg) requestRef() asyncRequest { return message.request }
+
+type sendDoneMsg struct {
+	request asyncRequest
+	sent    *gmail.SentMessage
+}
+
+func (message sendDoneMsg) requestRef() asyncRequest { return message.request }
+
 type errMsg struct {
 	request asyncRequest
 	err     error
@@ -141,6 +155,26 @@ func getThreadCmd(request asyncRequest, id string) tea.Cmd {
 			return errMsg{request: request, err: err}
 		}
 		return threadMsg{request: request, thread: thread}
+	}
+}
+
+func getProfileCmd(request asyncRequest) tea.Cmd {
+	return func() tea.Msg {
+		profile, err := request.ctx.api.GetProfile(context.Background())
+		if err != nil {
+			return errMsg{request: request, err: err, retry: getProfileCmd}
+		}
+		return profileMsg{request: request, email: profile.EmailAddress}
+	}
+}
+
+func sendCmd(request asyncRequest, raw []byte, threadID string) tea.Cmd {
+	return func() tea.Msg {
+		sent, err := request.ctx.api.SendMessage(context.Background(), raw, threadID)
+		if err != nil {
+			return errMsg{request: request, err: err}
+		}
+		return sendDoneMsg{request: request, sent: sent}
 	}
 }
 

@@ -80,7 +80,7 @@ func (thread *RenderedThread) AllLinks() []Link {
 // Markdown returns the complete thread in the documented terminal format.
 func (thread *RenderedThread) Markdown() string {
 	var output strings.Builder
-	fmt.Fprintf(&output, "# %s\n\n", SanitizeTerminal(thread.Subject))
+	fmt.Fprintf(&output, "# %s\n\n(newest first)\n\n", SanitizeTerminal(thread.Subject))
 	for index, message := range thread.Messages {
 		fmt.Fprintf(&output, "## %s → %s, %s\n\n", SanitizeTerminal(message.From), SanitizeTerminal(message.To), message.Date.UTC().Format("2006-01-02 15:04 MST"))
 		markdown := SanitizeTerminal(TerminalMarkdown(message.Markdown, message.Links))

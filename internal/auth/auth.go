@@ -22,6 +22,7 @@ type Token struct {
 	AccessToken string
 	Route       Route
 	Expiry      time.Time
+	Scope       string
 }
 
 type CacheState struct {
@@ -39,7 +40,7 @@ type readFlight struct {
 
 const maxPendingDiagnostics = 32
 
-// Source resolves one configured account's read and write credentials. It is
+// Source resolves one configured account's read, write, and send credentials. It is
 // safe for concurrent use and keeps each credential class independent.
 type Source struct {
 	cfg  *Config
@@ -56,6 +57,12 @@ type Source struct {
 	wrFlight      *writeFlight
 	wrRoute       Route
 	wrDiagnostics []string
+
+	sendMu          sync.Mutex
+	sendToken       *Token
+	sendFlight      *writeFlight
+	sendRoute       Route
+	sendDiagnostics []string
 }
 
 func NewSource(cfg *Config, acct *AccountConfig) *Source {
@@ -257,6 +264,12 @@ func (s *Source) TakeDiagnostic(class Class) string {
 		diagnostics := strings.Join(s.wrDiagnostics, "\n")
 		s.wrDiagnostics = nil
 		return diagnostics
+	case ClassSend:
+		s.sendMu.Lock()
+		defer s.sendMu.Unlock()
+		diagnostics := strings.Join(s.sendDiagnostics, "\n")
+		s.sendDiagnostics = nil
+		return diagnostics
 	default:
 		return ""
 	}
@@ -298,6 +311,8 @@ func sourceFor(acct *AccountConfig, class Class) *CredentialSource {
 		return acct.Read
 	case ClassWrite:
 		return acct.Write
+	case ClassSend:
+		return acct.Send
 	default:
 		return nil
 	}

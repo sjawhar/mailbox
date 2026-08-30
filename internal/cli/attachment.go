@@ -11,10 +11,10 @@ import (
 )
 
 func runAttachment(cc *cmdCtx, args []string) int {
-	fs, accountFlag, jsonOutput := cc.flags("attachment")
-	outputPath := fs.String("o", "", "output file or directory")
-	pos, next, code := cc.parse(fs, accountFlag, jsonOutput, args)
-	if code != 0 {
+	cf := cc.flags("attachment")
+	outputPath := cf.fs.String("o", "", "output file or directory")
+	pos, next, done, code := cc.parse(cf, args)
+	if done || code != 0 {
 		return code
 	}
 	if err := requireArity(pos, 1, 2, "attachment"); err != nil {
@@ -61,38 +61,44 @@ func runAttachment(cc *cmdCtx, args []string) int {
 		}
 		return next.runtimeError(account, source, fmt.Errorf("write attachment %q: %w", path, err))
 	}
-	if next.json {
-		output := struct {
-			Account  string `json:"account"`
-			File     string `json:"file"`
-			Filename string `json:"filename"`
-			Size     int64  `json:"size"`
-		}{Account: account, File: path, Filename: attachment.Filename, Size: attachment.Size}
-		if err := writeJSON(next.stdout, output); err != nil {
+	switch next.format() {
+	case FormatText:
+		fmt.Fprintf(next.stdout, "saved %s\n", render.SanitizeTerminal(path))
+	default:
+		output := attachmentSavePayload{Account: account, File: path, Filename: attachment.Filename, Size: attachment.Size}
+		if err := next.writeMachine(output); err != nil {
 			return next.runtimeError(account, source, wrapError("write JSON", err))
 		}
-	} else {
-		fmt.Fprintf(next.stdout, "saved %s\n", render.SanitizeTerminal(path))
 	}
 	next.emitCredentialDiagnostic(source, auth.ClassRead)
 	return 0
 }
 
+type attachmentSavePayload struct {
+	Account  string `json:"account"`
+	File     string `json:"file"`
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
+}
+
+type attachmentListPayload struct {
+	Account     string              `json:"account"`
+	ThreadID    string              `json:"threadId"`
+	Attachments []render.Attachment `json:"attachments"`
+}
+
 func (cc *cmdCtx) attachmentList(account string, source *auth.Source, threadID string, attachments []render.Attachment) int {
-	if cc.json {
-		attachments = normalizeAttachments(attachments)
-		output := struct {
-			Account     string              `json:"account"`
-			ThreadID    string              `json:"threadId"`
-			Attachments []render.Attachment `json:"attachments"`
-		}{Account: account, ThreadID: threadID, Attachments: attachments}
-		if err := writeJSON(cc.stdout, output); err != nil {
-			return cc.runtimeError(account, source, wrapError("write JSON", err))
-		}
-	} else {
+	switch cc.format() {
+	case FormatText:
 		fmt.Fprintln(cc.stdout, "n\tfilename\tmime\tsize")
 		for _, attachment := range attachments {
 			fmt.Fprintf(cc.stdout, "%d\t%s\t%s\t%d\n", attachment.N, render.SanitizeTerminal(attachment.Filename), render.SanitizeTerminal(attachment.MimeType), attachment.Size)
+		}
+	default:
+		attachments = normalizeAttachments(attachments)
+		output := attachmentListPayload{Account: account, ThreadID: threadID, Attachments: attachments}
+		if err := cc.writeMachine(output); err != nil {
+			return cc.runtimeError(account, source, wrapError("write JSON", err))
 		}
 	}
 	cc.emitCredentialDiagnostic(source, auth.ClassRead)

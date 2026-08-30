@@ -15,11 +15,13 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sjawhar/mailbox/internal/refs"
+	"github.com/sjawhar/mailbox/internal/toon/toontest"
 )
 
 type gmailTestServer struct {
@@ -34,6 +36,11 @@ type gmailTestServer struct {
 	listIDs        []string
 	attachment     []byte
 	metadata       map[string]map[string]any
+	messages       map[string]map[string]any
+	rawMessages    map[string][]byte
+	sentBodies     []map[string]any
+	sendStatus     int
+	readToken      string
 	rawMessageID   string
 	forbidden      bool
 	readForbidden  bool
@@ -65,12 +72,11 @@ func (g *gmailTestServer) tokenURL(t *testing.T, accessToken string) string {
 	t.Cleanup(server.Close)
 	return server.URL
 }
-
 func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	g.t.Helper()
 	// Write commands use the configured write credential for every request.
 	if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-		if g.writeToken == "" || got != "Bearer "+g.writeToken {
+		if (g.readToken == "" || got != "Bearer "+g.readToken) && (g.writeToken == "" || got != "Bearer "+g.writeToken) {
 			g.t.Fatalf("Authorization = %q, want test token", got)
 		}
 	}
@@ -91,6 +97,38 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 			g.t.Fatalf("raw message format = %q, want minimal", r.URL.Query().Get("format"))
 		}
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"id": g.rawMessageID, "threadId": "t1"})
+	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/messages/") && r.Method == http.MethodGet && !strings.Contains(r.URL.Path, "/attachments/"):
+		id := strings.TrimPrefix(r.URL.Path, "/gmail/v1/users/me/messages/")
+		message, ok := g.messages[id]
+		if !ok {
+			writeResponse(g.t, w, http.StatusNotFound, googleError(http.StatusNotFound, "notFound"))
+			return
+		}
+		switch r.URL.Query().Get("format") {
+		case "raw":
+			writeResponse(g.t, w, http.StatusOK, map[string]any{
+				"id":       id,
+				"threadId": message["threadId"],
+				"raw":      base64.RawURLEncoding.EncodeToString(g.rawMessages[id]),
+			})
+		case "minimal":
+			writeResponse(g.t, w, http.StatusOK, map[string]any{"id": id, "threadId": message["threadId"]})
+		default:
+			writeResponse(g.t, w, http.StatusOK, message)
+		}
+	case r.URL.Path == "/gmail/v1/users/me/messages/send" && r.Method == http.MethodPost:
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			g.t.Fatalf("decode sent message body: %v", err)
+		}
+		g.sentBodies = append(g.sentBodies, body)
+		if g.sendStatus != 0 && g.sendStatus != http.StatusOK {
+			status := g.sendStatus
+			g.sendStatus = 0
+			writeResponse(g.t, w, status, googleError(status, "sendFailed"))
+			return
+		}
+		writeResponse(g.t, w, http.StatusOK, map[string]any{"id": "sent-1", "threadId": "t1"})
 	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/threads/") && r.Method == http.MethodGet:
 		if g.readForbidden {
 			writeResponse(g.t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions"))
@@ -507,9 +545,88 @@ func TestReadPipedMarkdown(t *testing.T) {
 	g := newGmailTestServer(t)
 	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
 	seedRefs(t, "t1")
-	code, stdout, _ := runCLI(t, g, "read", "1")
+	code, stdout, _ := runCLI(t, g, "read", "1", "--text")
 	if code != 0 || !strings.HasPrefix(stdout, "# ") {
 		t.Fatalf("read stdout = %q, want raw markdown", stdout)
+	}
+	if !strings.Contains(stdout, "\n(newest first)\n") {
+		t.Fatalf("read stdout = %q, want newest-first marker", stdout)
+	}
+}
+
+func TestReadPipedDefaultsToTOON(t *testing.T) {
+	g := newGmailTestServer(t)
+	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+	seedRefs(t, "t1")
+	code, stdout, _ := runCLI(t, g, "read", "1")
+	if code != 0 || !strings.HasPrefix(stdout, "account: ") {
+		t.Fatalf("read stdout = %q, want TOON account field", stdout)
+	}
+	if _, err := toontest.Decode(strings.TrimSuffix(stdout, "\n")); err != nil {
+		t.Fatalf("decode TOON stdout %q: %v", stdout, err)
+	}
+}
+
+func TestStructuredSurfacesDefaultToTOON(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*testing.T, *gmailTestServer) []string
+	}{
+		{name: "inbox", prepare: func(_ *testing.T, _ *gmailTestServer) []string { return []string{"inbox"} }},
+		{name: "search", prepare: func(_ *testing.T, _ *gmailTestServer) []string { return []string{"search", "from:alice"} }},
+		{name: "read", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"read", "1"}
+		}},
+		{name: "status", prepare: func(_ *testing.T, _ *gmailTestServer) []string { return []string{"status"} }},
+		{name: "archive", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"archive", "1"}
+		}},
+		{name: "trash", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"trash", "1"}
+		}},
+		{name: "mark", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"mark", "unread", "1"}
+		}},
+		{name: "label", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"label", "add", "Newsletters", "1"}
+		}},
+		{name: "attachment list", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"attachment", "1"}
+		}},
+		{name: "attachment save", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			seedRefs(t, "t1")
+			return []string{"attachment", "1", "1", "-o", t.TempDir()}
+		}},
+		{name: "open", prepare: func(t *testing.T, _ *gmailTestServer) []string {
+			stub := t.TempDir()
+			path := filepath.Join(stub, "xdg-open")
+			if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", stub+":"+os.Getenv("PATH"))
+			seedRefs(t, "t1")
+			return []string{"open", "1"}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := newGmailTestServer(t)
+			t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+			args := test.prepare(t, g)
+			code, stdout, stderr := runCLI(t, g, args...)
+			if code != 0 {
+				t.Fatalf("%v = (%d, %q, %q), want success", args, code, stdout, stderr)
+			}
+			if _, err := toontest.Decode(strings.TrimSuffix(stdout, "\n")); err != nil {
+				t.Fatalf("%v TOON decode %q: %v", args, stdout, err)
+			}
+		})
 	}
 }
 
@@ -628,7 +745,7 @@ func TestTrashHumanOutput(t *testing.T) {
 	g := newGmailTestServer(t)
 	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
 	seedRefs(t, "t1")
-	code, stdout, _ := runCLI(t, g, "trash", "1")
+	code, stdout, _ := runCLI(t, g, "trash", "1", "--text")
 	if code != 0 || stdout != "trashed 1 thread(s)\n" {
 		t.Fatalf("trash = (%d, %q), want human trash line", code, stdout)
 	}
@@ -800,7 +917,7 @@ func TestStatusJSON(t *testing.T) {
 
 func TestStatusHumanWritesAllStatusLinesToStdout(t *testing.T) {
 	g := newGmailTestServer(t)
-	code, stdout, stderr := runCLI(t, g, "status")
+	code, stdout, stderr := runCLI(t, g, "status", "--text")
 	if code != 0 {
 		t.Fatalf("status exit = %d", code)
 	}
@@ -971,7 +1088,7 @@ func TestHelpListsEveryPublicCommand(t *testing.T) {
 		if code := Run(args, &stdout, &stderr); code != 0 {
 			t.Fatalf("Run(%q) exit = %d, stdout=%q, stderr=%q", args, code, stdout.String(), stderr.String())
 		}
-		for _, command := range []string{"inbox", "search", "read", "open", "archive", "trash", "mark", "label", "attachment", "status"} {
+		for _, command := range []string{"inbox", "search", "read", "open", "archive", "trash", "mark", "label", "attachment", "status", "send"} {
 			if !strings.Contains(stdout.String(), command) {
 				t.Fatalf("help for %q omitted %q: %q", args, command, stdout.String())
 			}
@@ -980,6 +1097,117 @@ func TestHelpListsEveryPublicCommand(t *testing.T) {
 			t.Fatalf("help for %q omitted config location: %q", args, stdout.String())
 		}
 	}
+}
+
+func TestCommandHelpDocumentsReadSearchAndSend(t *testing.T) {
+	setCLIConfig(t)
+
+	readHelp := commandHelp(t, "read")
+	for _, want := range []string{
+		"usage: mailbox read [--full] [--text|--json] <thread>",
+		"Messages print newest first.",
+		"--full",
+	} {
+		if !strings.Contains(readHelp, want) {
+			t.Fatalf("read help = %q, want %q", readHelp, want)
+		}
+	}
+
+	searchHelp := commandHelp(t, "search")
+	wantOperators := "Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax)."
+	if !strings.Contains(searchHelp, wantOperators) {
+		t.Fatalf("search help = %q, want operator passthrough", searchHelp)
+	}
+
+	sendHelp := commandHelp(t, "send")
+	for _, want := range []string{
+		"mailbox send --to a@x [--cc b@y] [--bcc c@z] --subject S --body TEXT      # compose",
+		"mailbox send --reply=<thread-id>  --body TEXT [--message=<id>] [--to ...] # reply",
+		"mailbox send --forward=<thread-id> --to a@x --body TEXT [--message=<id>]  # forward",
+		"dry-run",
+		"--message",
+		"--send",
+		"R1",
+		"R2",
+		"R3",
+		"R4",
+		"R5",
+		"R6",
+	} {
+		if !strings.Contains(sendHelp, want) {
+			t.Fatalf("send help = %q, want %q", sendHelp, want)
+		}
+	}
+}
+
+func TestCommandHelpDoesNotRequireConfiguration(t *testing.T) {
+	t.Setenv("MAILBOX_CONFIG", filepath.Join(t.TempDir(), "missing-config.toml"))
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"read", "--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("read --help exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Messages print newest first.") {
+		t.Fatalf("read help = %q, want ordering documentation", stdout.String())
+	}
+}
+
+func TestHelpDocumentsThreadIDSemantics(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("help exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+	}
+	want := "ids: mailbox ids are THREAD ids everywhere; the one exception is 'send --message', which names a message WITHIN the given thread (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing."
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("help = %q, want id semantics", stdout.String())
+	}
+}
+
+func TestSkillGeneratorDocumentsDispatchAndHelp(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "SKILL.md")
+	command := exec.Command("go", "run", "./cmd/skillgen", "-out", output)
+	command.Dir = filepath.Join("..", "..")
+	if result, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("generate skill: %v\n%s", err, result)
+	}
+	document, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skill := string(document)
+	for _, command := range commandSpecs() {
+		if !strings.Contains(skill, "`"+command.name+"`") {
+			t.Fatalf("generated skill omitted command %q:\n%s", command.name, skill)
+		}
+	}
+	for _, want := range []string{
+		"---\nname: mailbox\ndescription: Gmail triage CLI — one-shot commands with TOON/JSON machine output\n---",
+		"Messages print newest first.",
+		"Gmail query operators pass through verbatim:",
+		"mailbox ids are THREAD ids everywhere",
+		"TOON is the default for agents and pipes.",
+		"`--json` is the stable opt-in.",
+		"`--text` forces human output.",
+		"Start with the dry run, copy its `--message` value, then add `--send` to transmit that exact target.",
+		"| R1 | empty_recipients |",
+		"| R2 | self_only_recipients |",
+		"| R3 | invalid_address |",
+		"| R4 | header_injection |",
+		"| R5 | empty_body |",
+		"| R6 | needs_explicit_recipient |",
+	} {
+		if !strings.Contains(skill, want) {
+			t.Fatalf("generated skill omitted %q:\n%s", want, skill)
+		}
+	}
+}
+
+func commandHelp(t *testing.T, name string) string {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{name, "--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("%s --help exit = %d, stdout=%q, stderr=%q", name, code, stdout.String(), stderr.String())
+	}
+	return stdout.String()
 }
 
 func TestInvalidGlobalFlagRemainsUsageError(t *testing.T) {

@@ -29,5 +29,9 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - name: vet
         run: go vet ./...
+      - name: generated docs are current
+        run: |
+          go generate ./...
+          git diff --exit-code
       - name: test
         run: go test ./...

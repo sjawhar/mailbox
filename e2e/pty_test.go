@@ -62,21 +62,45 @@ func findTmux(t *testing.T) string {
 	return ""
 }
 
+type capturedSend struct {
+	Auth     string
+	Raw      []byte
+	ThreadID string
+}
+
 type fakeGmail struct {
-	mu         sync.Mutex
-	readAuths  []string
-	writeAuths []string
-	threads    map[string]string
-	server     *httptest.Server
-	token      *httptest.Server
+	mu          sync.Mutex
+	readAuths   []string
+	writeAuths  []string
+	sendAuths   []string
+	sent        []capturedSend
+	threads     map[string]string
+	messages    map[string]string
+	rawMessages map[string][]byte
+	server      *httptest.Server
+	token       *httptest.Server
 }
 
 func newFakeGmail(t *testing.T) *fakeGmail {
 	t.Helper()
+	t1 := fakeMessage("t1", "PTY smoke", "A <a@example.test>", "B <b@example.test>", "C <c@example.test>", "A <a@example.test>")
+	t2 := fakeMessage("t2", "Second PTY smoke", "A <a@example.test>", "B <b@example.test>", "", "")
+	t3 := fakeMessage("t3", "self-only", "Self <work@example.test>", "Self <work@example.test>", "Self <work@example.test>", "")
 	g := &fakeGmail{
 		threads: map[string]string{
-			"t1": fakeThread("t1", "PTY smoke"),
-			"t2": fakeThread("t2", "Second PTY smoke"),
+			"t1": fakeThread("t1", t1),
+			"t2": fakeThread("t2", t2),
+			"t3": fakeThread("t3", t3),
+		},
+		messages: map[string]string{
+			"m-t1": t1,
+			"m-t2": t2,
+			"m-t3": t3,
+		},
+		rawMessages: map[string][]byte{
+			"m-t1": []byte("From: A <a@example.test>\r\nTo: B <b@example.test>\r\nSubject: PTY smoke\r\n\r\noriginal"),
+			"m-t2": []byte("From: A <a@example.test>\r\nTo: B <b@example.test>\r\nSubject: Second PTY smoke\r\n\r\noriginal"),
+			"m-t3": []byte("From: Self <work@example.test>\r\nTo: Self <work@example.test>\r\nSubject: self-only\r\n\r\noriginal"),
 		},
 	}
 	mux := http.NewServeMux()
@@ -91,6 +115,43 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	mux.HandleFunc("/gmail/v1/users/me/profile", func(w http.ResponseWriter, request *http.Request) {
 		g.recordReadAuth(request)
 		fmt.Fprint(w, `{"emailAddress":"work@example.test"}`)
+	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/send", func(w http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Raw      string `json:"raw"`
+			ThreadID string `json:"threadId"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid send request", http.StatusBadRequest)
+			return
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(body.Raw)
+		if err != nil {
+			http.Error(w, "invalid raw message", http.StatusBadRequest)
+			return
+		}
+		g.recordSendAuth(request)
+		g.recordSend(request, raw, body.ThreadID)
+		fmt.Fprint(w, `{"id":"sent-e2e-1","threadId":"t1"}`)
+	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/", func(w http.ResponseWriter, request *http.Request) {
+		g.recordReadAuth(request)
+		id := strings.TrimPrefix(request.URL.Path, "/gmail/v1/users/me/messages/")
+		if request.URL.Query().Get("format") == "raw" {
+			raw, ok := g.rawMessages[id]
+			if !ok {
+				http.NotFound(w, request)
+				return
+			}
+			fmt.Fprintf(w, `{"id":%q,"threadId":%q,"raw":%q}`, id, strings.TrimPrefix(id, "m-"), base64.RawURLEncoding.EncodeToString(raw))
+			return
+		}
+		message, ok := g.messages[id]
+		if !ok {
+			http.NotFound(w, request)
+			return
+		}
+		fmt.Fprint(w, message)
 	})
 	mux.HandleFunc("/gmail/v1/users/me/threads/", func(w http.ResponseWriter, request *http.Request) {
 		if strings.HasSuffix(request.URL.Path, "/modify") {
@@ -125,9 +186,38 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	return g
 }
 
-func fakeThread(id, subject string) string {
+func fakeThread(id, message string) string {
+	return fmt.Sprintf(`{"id":%q,"messages":[%s]}`, id, message)
+}
+
+func fakeMessage(threadID, subject, from, to, carbonCopy, replyTo string) string {
 	body := base64.RawURLEncoding.EncodeToString([]byte("<p>hi</p>"))
-	return fmt.Sprintf(`{"id":%q,"messages":[{"id":%q,"threadId":%q,"internalDate":"1788000000000","labelIds":["INBOX","UNREAD"],"payload":{"mimeType":"text/html","headers":[{"name":"From","value":"A <a@example.test>"},{"name":"To","value":"B <b@example.test>"},{"name":"Subject","value":%q}],"body":{"data":%q}}}]}`, id, "m-"+id, id, subject, body)
+	headers := []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}{
+		{Name: "From", Value: from},
+		{Name: "To", Value: to},
+		{Name: "Subject", Value: subject},
+		{Name: "Message-ID", Value: "<m-" + threadID + "@example.test>"},
+	}
+	if carbonCopy != "" {
+		headers = append(headers, struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}{Name: "Cc", Value: carbonCopy})
+	}
+	if replyTo != "" {
+		headers = append(headers, struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}{Name: "Reply-To", Value: replyTo})
+	}
+	headerJSON, err := json.Marshal(headers)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf(`{"id":%q,"threadId":%q,"internalDate":"1788000000000","labelIds":["INBOX","UNREAD"],"payload":{"mimeType":"text/html","headers":%s,"body":{"data":%q}}}`, "m-"+threadID, threadID, headerJSON, body)
 }
 
 func (g *fakeGmail) recordReadAuth(request *http.Request) {
@@ -142,6 +232,18 @@ func (g *fakeGmail) recordWriteAuth(request *http.Request) {
 	g.writeAuths = append(g.writeAuths, request.Header.Get("Authorization"))
 }
 
+func (g *fakeGmail) recordSendAuth(request *http.Request) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sendAuths = append(g.sendAuths, request.Header.Get("Authorization"))
+}
+
+func (g *fakeGmail) recordSend(request *http.Request, raw []byte, threadID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sent = append(g.sent, capturedSend{Auth: request.Header.Get("Authorization"), Raw: append([]byte(nil), raw...), ThreadID: threadID})
+}
+
 func (g *fakeGmail) recordedReadAuths() []string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -154,15 +256,36 @@ func (g *fakeGmail) recordedWriteAuths() []string {
 	return append([]string(nil), g.writeAuths...)
 }
 
+func (g *fakeGmail) recordedSendAuths() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.sendAuths...)
+}
+
+func (g *fakeGmail) recordedSends() []capturedSend {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]capturedSend(nil), g.sent...)
+}
+
 type tmuxSession struct {
-	t    *testing.T
-	tmux string
-	name string
+	t      *testing.T
+	tmux   string
+	socket string
+	name   string
+}
+
+// cmd runs tmux against a test-owned absolute socket path, keeping e2e
+// sessions off whatever server (and TMUX_TMPDIR) the developer's own
+// terminal happens to use — and letting env-scrubbed credential stubs
+// address the same server unambiguously.
+func (s *tmuxSession) cmd(args ...string) *exec.Cmd {
+	return exec.Command(s.tmux, append([]string{"-S", s.socket}, args...)...)
 }
 
 func newTmuxSession(t *testing.T, env map[string]string, args ...string) *tmuxSession {
 	t.Helper()
-	session := &tmuxSession{t: t, tmux: findTmux(t), name: fmt.Sprintf("mailbox-e2e-%d", time.Now().UnixNano())}
+	session := &tmuxSession{t: t, tmux: findTmux(t), socket: filepath.Join(t.TempDir(), "tmux.sock"), name: fmt.Sprintf("mailbox-e2e-%d", time.Now().UnixNano())}
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
@@ -172,16 +295,24 @@ func newTmuxSession(t *testing.T, env map[string]string, args ...string) *tmuxSe
 	for _, key := range keys {
 		words = append(words, key+"="+env[key])
 	}
+	// Session plumbing for credential stubs that capture their own pane (via
+	// credential_env_passthrough): the pane command runs under `env -i`, so
+	// tmux's own TMUX/TMUX_PANE never survive — name the target explicitly.
+	words = append(words,
+		"PTY_TMUX_BIN="+session.tmux,
+		"PTY_TMUX_SOCKET="+session.socket,
+		"PTY_TMUX_SESSION="+session.name,
+	)
 	words = append(words, args...)
 	quoted := make([]string, len(words))
 	for index, word := range words {
 		quoted[index] = shellQuote(word)
 	}
-	run := exec.Command(session.tmux, "new-session", "-d", "-s", session.name, "-x", "160", "-y", "45", strings.Join(quoted, " "))
+	run := session.cmd("new-session", "-d", "-s", session.name, "-x", "160", "-y", "45", strings.Join(quoted, " "))
 	if output, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("tmux new-session: %v: %s", err, output)
 	}
-	t.Cleanup(func() { _ = exec.Command(session.tmux, "kill-session", "-t", session.name).Run() })
+	t.Cleanup(func() { _ = session.cmd("kill-session", "-t", session.name).Run() })
 	return session
 }
 
@@ -189,14 +320,28 @@ func shellQuote(word string) string { return "'" + strings.ReplaceAll(word, "'",
 
 func (s *tmuxSession) SendKeys(keys string) {
 	s.t.Helper()
-	if output, err := exec.Command(s.tmux, "send-keys", "-l", "-t", s.name, keys).CombinedOutput(); err != nil {
+	if output, err := s.cmd("send-keys", "-l", "-t", s.name, keys).CombinedOutput(); err != nil {
 		s.t.Fatalf("tmux send-keys: %v: %s", err, output)
+	}
+}
+
+func (s *tmuxSession) SendEnter() {
+	s.t.Helper()
+	if output, err := s.cmd("send-keys", "-t", s.name, "Enter").CombinedOutput(); err != nil {
+		s.t.Fatalf("tmux send Enter: %v: %s", err, output)
+	}
+}
+
+func (s *tmuxSession) SendCtrl(key string) {
+	s.t.Helper()
+	if output, err := s.cmd("send-keys", "-t", s.name, "C-"+key).CombinedOutput(); err != nil {
+		s.t.Fatalf("tmux send Ctrl-%s: %v: %s", key, err, output)
 	}
 }
 
 func (s *tmuxSession) Capture() string {
 	s.t.Helper()
-	output, err := exec.Command(s.tmux, "capture-pane", "-p", "-t", s.name).CombinedOutput()
+	output, err := s.cmd("capture-pane", "-p", "-t", s.name).CombinedOutput()
 	if err != nil {
 		s.t.Fatalf("tmux capture-pane: %v: %s", err, output)
 	}
@@ -228,7 +373,7 @@ func (s *tmuxSession) WaitFor(text string, timeout time.Duration) string {
 
 func (s *tmuxSession) Alive() bool {
 	s.t.Helper()
-	return exec.Command(s.tmux, "has-session", "-t", s.name).Run() == nil
+	return s.cmd("has-session", "-t", s.name).Run() == nil
 }
 
 func (s *tmuxSession) WaitForExit(timeout time.Duration) {
@@ -398,6 +543,22 @@ func assertNoSpawns(t *testing.T, path string) {
 	}
 }
 
+// assertSpawnPaneContains proves attribution-before-spawn without racing the
+// render fence: the credential stub captures its own pane as the FIRST thing it
+// does, so if the attribution line is in that capture, it was painted strictly
+// before the helper ran. Polling the pane from the test races the ~50ms fence
+// under load; this cannot.
+func assertSpawnPaneContains(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read spawn-time pane capture %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("attribution %q missing from spawn-time pane capture %s:\n%s", want, path, data)
+	}
+}
+
 func (g *fakeGmail) waitForWriteAuths(t *testing.T, count int, timeout time.Duration) []string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -420,8 +581,10 @@ func TestTUIUnlockFlowInRealPTY(t *testing.T) {
 	stubs := t.TempDir()
 	argvFile := filepath.Join(stubs, "approve-argv")
 	stdinFile := filepath.Join(stubs, "approve-stdin")
+	spawnPaneFile := filepath.Join(stubs, "approve-pane")
 	approve := filepath.Join(stubs, "approve-write")
 	writeExecutable(t, approve, fmt.Sprintf(`#!/bin/sh
+"$PTY_TMUX_BIN" -S "$PTY_TMUX_SOCKET" capture-pane -p -t "$PTY_TMUX_SESSION" > %q 2>&1
 printf '%%s\t' "$@" >> %q
 printf '\n' >> %q
 if [ -t 0 ]; then
@@ -434,7 +597,7 @@ sleep 2
 export PTY_MODIFY_OAUTH=%q
 export MAILBOX_TOKEN_URL="$STUB_TOKEN_URL"
 exec "$@"
-`, argvFile, argvFile, stdinFile, stdinFile, testAuthorizedUser))
+`, spawnPaneFile, argvFile, argvFile, stdinFile, stdinFile, testAuthorizedUser))
 
 	config := writeE2EConfig(t, stubs, fmt.Sprintf(`default_account = "work"
 [accounts.work]
@@ -442,7 +605,7 @@ read_credential_env = "PTY_READ_OAUTH"
 write_credential_cmd = ["approve-write", "--", %q, "__mint", "--env", "PTY_MODIFY_OAUTH"]
 write_interactive = true
 write_label = "PTY approval"
-credential_env_passthrough = ["STUB_TOKEN_URL"]
+credential_env_passthrough = ["STUB_TOKEN_URL", "PTY_TMUX_BIN", "PTY_TMUX_SOCKET", "PTY_TMUX_SESSION"]
 `, binary))
 	cache := t.TempDir()
 	env := map[string]string{
@@ -467,8 +630,8 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 	session.SendKeys("e")
 	attribution := "waiting for PTY approval; approve only this request — work write access via " + approve
 	session.WaitFor(attribution, 5*time.Second)
-	assertNoSpawns(t, argvFile)
 	session.WaitFor("archive completed", 15*time.Second)
+	assertSpawnPaneContains(t, spawnPaneFile, attribution)
 
 	lines := waitForFileLines(t, argvFile, time.Second)
 	if len(lines) != 1 {
@@ -543,14 +706,14 @@ write_label = "Q"
 
 func stopCredentialSession(session *tmuxSession, helper string) {
 	if session.Alive() {
-		_ = exec.Command(session.tmux, "send-keys", "-l", "-t", session.name, "q").Run()
-		_ = exec.Command(session.tmux, "send-keys", "-l", "-t", session.name, "q").Run()
+		_ = session.cmd("send-keys", "-l", "-t", session.name, "q").Run()
+		_ = session.cmd("send-keys", "-l", "-t", session.name, "q").Run()
 		deadline := time.Now().Add(time.Second)
 		for session.Alive() && time.Now().Before(deadline) {
 			time.Sleep(25 * time.Millisecond)
 		}
 		if session.Alive() {
-			_ = exec.Command(session.tmux, "kill-session", "-t", session.name).Run()
+			_ = session.cmd("kill-session", "-t", session.name).Run()
 		}
 	}
 	killCredentialProcessGroup(session.t, helper)
@@ -833,9 +996,11 @@ func TestTUIInteractiveReadUnlockInRealPTY(t *testing.T) {
 	stubs := t.TempDir()
 	readArgv := filepath.Join(stubs, "approve-read-argv")
 	writeArgv := filepath.Join(stubs, "approve-write-argv")
+	readPaneFile := filepath.Join(stubs, "approve-read-pane")
 	readApprove := filepath.Join(stubs, "approve-read")
 	writeApprove := filepath.Join(stubs, "approve-write")
 	writeExecutable(t, readApprove, fmt.Sprintf(`#!/bin/sh
+"$PTY_TMUX_BIN" -S "$PTY_TMUX_SOCKET" capture-pane -p -t "$PTY_TMUX_SESSION" > %q 2>&1
 printf '%%s\t' "$@" >> %q
 printf '\n' >> %q
 sleep 10
@@ -843,14 +1008,14 @@ sleep 10
 export PTY_READ_OAUTH=%q
 export MAILBOX_TOKEN_URL="$STUB_TOKEN_URL"
 exec "$@"
-`, readArgv, readArgv, testAuthorizedUser))
+`, readPaneFile, readArgv, readArgv, testAuthorizedUser))
 	writeExecutable(t, writeApprove, fmt.Sprintf("#!/bin/sh\nprintf 'spawned\\n' >> %q\nexit 99\n", writeArgv))
 	config := writeE2EConfig(t, stubs, fmt.Sprintf(`default_account = "work"
 [accounts.work]
 read_credential_cmd = ["approve-read", "--", %q, "__mint", "--env", "PTY_READ_OAUTH"]
 read_interactive = true
 write_credential_cmd = ["approve-write"]
-credential_env_passthrough = ["STUB_TOKEN_URL"]
+credential_env_passthrough = ["STUB_TOKEN_URL", "PTY_TMUX_BIN", "PTY_TMUX_SOCKET", "PTY_TMUX_SESSION"]
 `, binary))
 	cache := t.TempDir()
 	session := newTmuxSession(t, map[string]string{
@@ -867,9 +1032,9 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 	if !found || !strings.Contains(pane, filepath.Base(readApprove)) {
 		t.Fatalf("interactive-read attribution missing; helper spawns=%q; Gmail authorizations=%q; pane:\n%s", fileLines(t, readArgv), gmail.recordedReadAuths(), pane)
 	}
-	assertNoSpawns(t, readArgv)
 	assertNoSpawns(t, writeArgv)
 	session.WaitFor("PTY smoke", 15*time.Second)
+	assertSpawnPaneContains(t, readPaneFile, "work read access via")
 	readAuths := gmail.recordedReadAuths()
 	if len(readAuths) == 0 {
 		t.Fatal("interactive read unlock reached the inbox without a Gmail request")
@@ -933,6 +1098,42 @@ read_credential_cmd = ["token-helper"]
 	if lines := fileLines(t, spawns); len(lines) != 1 {
 		t.Fatalf("cache hit re-ran command credential helper: %q", lines)
 	}
+	t.Run("agent pipe keeps inner mint JSON", func(t *testing.T) {
+		gmail := newFakeGmail(t)
+		stubs := t.TempDir()
+		spawns := filepath.Join(stubs, "mint-helper-spawns")
+		binary := buildMailbox(t)
+		writeExecutable(t, filepath.Join(stubs, "mint-helper"), fmt.Sprintf(`#!/bin/sh
+printf 'spawned\n' >> %q
+export MAILBOX_TOKEN_URL="$STUB_TOKEN_URL"
+exec "$TEST_BINARY" __mint --env MINT_READ_OAUTH
+`, spawns))
+		config := writeE2EConfig(t, stubs, `default_account = "work"
+[accounts.work]
+read_credential_cmd = ["mint-helper"]
+credential_env_passthrough = ["AGENT", "MINT_READ_OAUTH", "STUB_TOKEN_URL", "TEST_BINARY"]
+`)
+		cache := t.TempDir()
+		env := map[string]string{
+			"PATH":                   stubs + ":/usr/bin:/bin",
+			"MAILBOX_CONFIG":         config,
+			"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
+			"MAILBOX_CACHE_DIR":      cache,
+			"AGENT":                  "1",
+			"MINT_READ_OAUTH":        testAuthorizedUser,
+			"STUB_TOKEN_URL":         gmail.token.URL,
+			"TEST_BINARY":            binary,
+		}
+
+		code, stdout, stderr := runBinary(t, env, "inbox")
+		if code != 0 {
+			t.Fatalf("agent inbox exit = %d, stdout=%q, stderr=%q", code, stdout, stderr)
+		}
+		assertTOONInbox(t, stdout)
+		if lines := fileLines(t, spawns); len(lines) != 1 || lines[0] != "spawned" {
+			t.Fatalf("mint command spawns = %q, want [spawned]", lines)
+		}
+	})
 }
 
 func TestCLIRoutesEnvSourceEndToEnd(t *testing.T) {

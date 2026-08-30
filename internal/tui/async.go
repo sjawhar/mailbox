@@ -10,6 +10,8 @@ const (
 	labelOperation
 	attachmentOperation
 	openOperation
+	profileOperation
+	sendOperation
 	unlockOperation
 	asyncOperationCount
 )

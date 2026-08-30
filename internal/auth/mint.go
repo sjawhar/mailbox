@@ -16,6 +16,7 @@ const mintStdoutLimit = 16 << 10
 type mintOutput struct {
 	AccessToken string `json:"access_token"`
 	Expiry      string `json:"expiry"`
+	Scope       string `json:"scope,omitempty"`
 }
 
 // RunMintChild implements `mailbox __mint --env VAR`. It deliberately loads
@@ -31,13 +32,14 @@ func RunMintChild(ctx context.Context, envVar string, stdout io.Writer) error {
 	if raw == "" {
 		return fmt.Errorf("%s is unset", envVar)
 	}
-	accessToken, expiry, err := refreshAccessToken(ctx, envVar, raw)
+	accessToken, scope, expiry, err := refreshAccessToken(ctx, envVar, raw)
 	if err != nil {
 		return err
 	}
 	return json.NewEncoder(stdout).Encode(mintOutput{
 		AccessToken: accessToken,
 		Expiry:      expiry.UTC().Format(time.RFC3339),
+		Scope:       scope,
 	})
 }
 
@@ -66,5 +68,5 @@ func parseMintOutput(data []byte) (Token, error) {
 	if !expiry.After(time.Now()) {
 		return Token{}, errors.New("__mint returned an already-expired token")
 	}
-	return Token{AccessToken: output.AccessToken, Route: RouteCmd, Expiry: expiry}, nil
+	return Token{AccessToken: output.AccessToken, Route: RouteCmd, Expiry: expiry, Scope: output.Scope}, nil
 }

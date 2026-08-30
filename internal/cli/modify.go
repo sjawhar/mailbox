@@ -12,9 +12,9 @@ import (
 )
 
 func runBulk(cc *cmdCtx, action string, args []string) int {
-	fs, accountFlag, jsonOutput := cc.flags(action)
-	pos, next, code := cc.parse(fs, accountFlag, jsonOutput, args)
-	if code != 0 {
+	cf := cc.flags(action)
+	pos, next, done, code := cc.parse(cf, args)
+	if done || code != 0 {
 		return code
 	}
 	if err := requireArity(pos, 1, -1, action); err != nil {
@@ -49,9 +49,9 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 }
 
 func runMark(cc *cmdCtx, args []string) int {
-	fs, accountFlag, jsonOutput := cc.flags("mark")
-	pos, next, code := cc.parse(fs, accountFlag, jsonOutput, args)
-	if code != 0 {
+	cf := cc.flags("mark")
+	pos, next, done, code := cc.parse(cf, args)
+	if done || code != 0 {
 		return code
 	}
 	if err := requireArity(pos, 2, -1, "mark"); err != nil {
@@ -84,9 +84,9 @@ func runMark(cc *cmdCtx, args []string) int {
 }
 
 func runLabel(cc *cmdCtx, args []string) int {
-	fs, accountFlag, jsonOutput := cc.flags("label")
-	pos, next, code := cc.parse(fs, accountFlag, jsonOutput, args)
-	if code != 0 {
+	cf := cc.flags("label")
+	pos, next, done, code := cc.parse(cf, args)
+	if done || code != 0 {
 		return code
 	}
 	if err := requireArity(pos, 3, -1, "label"); err != nil {
@@ -126,19 +126,22 @@ func runLabel(cc *cmdCtx, args []string) int {
 	return next.actionResult(account, source, "label", verb, ids)
 }
 
+type actionPayload struct {
+	Account   string   `json:"account"`
+	Action    string   `json:"action"`
+	ThreadIDs []string `json:"threadIds"`
+	OK        bool     `json:"ok"`
+}
+
 func (cc *cmdCtx) actionResult(account string, source *auth.Source, action, verb string, ids []string) int {
-	if cc.json {
-		output := struct {
-			Account   string   `json:"account"`
-			Action    string   `json:"action"`
-			ThreadIDs []string `json:"threadIds"`
-			OK        bool     `json:"ok"`
-		}{Account: account, Action: action, ThreadIDs: ids, OK: true}
-		if err := writeJSON(cc.stdout, output); err != nil {
+	switch cc.format() {
+	case FormatText:
+		fmt.Fprintf(cc.stdout, "%s %d thread(s)\n", verb, len(ids))
+	default:
+		output := actionPayload{Account: account, Action: action, ThreadIDs: ids, OK: true}
+		if err := cc.writeMachine(output); err != nil {
 			return cc.writeRuntimeError(account, source, wrapError("write JSON", err))
 		}
-	} else {
-		fmt.Fprintf(cc.stdout, "%s %d thread(s)\n", verb, len(ids))
 	}
 	cc.emitCredentialDiagnostic(source, auth.ClassWrite)
 	return 0

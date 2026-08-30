@@ -7,19 +7,23 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/refs"
 	"github.com/sjawhar/mailbox/internal/render"
+	"github.com/sjawhar/mailbox/internal/send"
 )
 
 type cmdCtx struct {
 	accountFlag string
 	json        bool
+	text        bool
 	stdout      io.Writer
 	stderr      io.Writer
+	stdin       io.Reader
 	rawArgs     []string
 	cfg         *auth.Config
 	acct        *auth.AccountConfig
@@ -28,22 +32,117 @@ type cmdCtx struct {
 type commandSpec struct {
 	name        string
 	description string
+	usage       string
+	help        string
 	run         func(*cmdCtx, []string) int
 }
 
+const idSemantics = "ids: mailbox ids are THREAD ids everywhere; the one exception is 'send --message', which names a message WITHIN the given thread (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing."
+
+const jsonFlagHelp = "machine-readable JSON output (stable)"
+
+const textFlagHelp = "human output (overrides agent/pipe detection)"
+
+const outputFormats = "TOON is the default for agents and pipes. --json is the stable opt-in. --text forces human output."
+
+const sendWorkflow = "Start with the dry run, copy its --message value, then add --send to transmit that exact target."
+
+//go:generate go run github.com/sjawhar/mailbox/cmd/skillgen -out ../../docs/agent-skill/SKILL.md
+
 func commandSpecs() []commandSpec {
 	return []commandSpec{
-		{name: "inbox", description: "list inbox threads", run: runInbox},
-		{name: "search", description: "search threads", run: runSearch},
-		{name: "read", description: "read a thread", run: runRead},
-		{name: "open", description: "open thread HTML in a browser", run: runOpen},
-		{name: "archive", description: "archive threads", run: func(cc *cmdCtx, args []string) int { return runBulk(cc, "archive", args) }},
-		{name: "trash", description: "move threads to trash", run: func(cc *cmdCtx, args []string) int { return runBulk(cc, "trash", args) }},
-		{name: "mark", description: "mark threads read or unread", run: runMark},
-		{name: "label", description: "add or remove a label", run: runLabel},
-		{name: "attachment", description: "list or save attachments", run: runAttachment},
-		{name: "status", description: "show configured account status", run: runStatus},
+		{
+			name:        "inbox",
+			description: "list inbox threads",
+			usage:       "mailbox inbox [--unread] [--max N] [--text|--json]",
+			help:        "Lists inbox threads. It takes no positional arguments; --unread restricts results to unread threads and --max sets 1–500 rows (default 25).",
+			run:         runInbox,
+		},
+		{
+			name:        "search",
+			description: "search threads",
+			usage:       "mailbox search [--max N] [--text|--json] <query...>",
+			help:        "Searches threads with one or more query terms; --max sets 1–500 rows (default 25). Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax).",
+			run:         runSearch,
+		},
+		{
+			name:        "read",
+			description: "read a thread",
+			usage:       "mailbox read [--full] [--text|--json] <thread>",
+			help:        "Reads one thread. Messages print newest first. --full keeps quoted history.",
+			run:         runRead,
+		},
+		{
+			name:        "open",
+			description: "open thread HTML in a browser",
+			usage:       "mailbox open [--text|--json] <thread>",
+			help:        "Renders the newest HTML message from one thread and hands it to the system browser.",
+			run:         runOpen,
+		},
+		{
+			name:        "archive",
+			description: "archive threads",
+			usage:       "mailbox archive [--text|--json] <thread>...",
+			help:        "Removes the INBOX label from one or more threads.",
+			run:         func(cc *cmdCtx, args []string) int { return runBulk(cc, "archive", args) },
+		},
+		{
+			name:        "trash",
+			description: "move threads to trash",
+			usage:       "mailbox trash [--text|--json] <thread>...",
+			help:        "Moves one or more threads to Trash.",
+			run:         func(cc *cmdCtx, args []string) int { return runBulk(cc, "trash", args) },
+		},
+		{
+			name:        "mark",
+			description: "mark threads read or unread",
+			usage:       "mailbox mark [--text|--json] <read|unread> <thread>...",
+			help:        "Marks one or more threads read or unread.",
+			run:         runMark,
+		},
+		{
+			name:        "label",
+			description: "add or remove a label",
+			usage:       "mailbox label [--text|--json] <add|rm> <label> <thread>...",
+			help:        "Adds or removes one Gmail label on one or more threads.",
+			run:         runLabel,
+		},
+		{
+			name:        "attachment",
+			description: "list or save attachments",
+			usage:       "mailbox attachment [-o PATH] [--text|--json] <thread> [attachment]",
+			help:        "Lists a thread's attachments, or saves one numbered attachment; -o selects the output file or directory.",
+			run:         runAttachment,
+		},
+		{
+			name:        "status",
+			description: "show configured account status",
+			usage:       "mailbox status [--text|--json]",
+			help:        "Reports configured account authentication routes, Gmail profiles, and read-cache state.",
+			run:         runStatus,
+		},
+		{
+			name:        "send",
+			description: "compose, reply, or forward mail (dry-run by default)",
+			usage:       "mailbox send [options]",
+			help:        sendCommandHelp(),
+			run:         runSend,
+		},
 	}
+}
+
+func sendCommandHelp() string {
+	var output strings.Builder
+	output.WriteString("Compose:\n")
+	output.WriteString("  mailbox send --to a@x [--cc b@y] [--bcc c@z] --subject S --body TEXT      # compose\n")
+	output.WriteString("  mailbox send --reply=<thread-id>  --body TEXT [--message=<id>] [--to ...] # reply\n")
+	output.WriteString("  mailbox send --forward=<thread-id> --to a@x --body TEXT [--message=<id>]  # forward\n\n")
+	output.WriteString("A dry-run is the default: resolve the envelope first. " + sendWorkflow + " Reply and forward previews select the newest message unless --message selects one; --send requires --message so it pins the exact message within the named thread.\n\n")
+	output.WriteString("Refusal rules:\n")
+	for _, rule := range send.RuleDocs() {
+		fmt.Fprintf(&output, "  %s (%s): %s\n", rule.Rule, rule.Code, rule.Doc)
+	}
+	return strings.TrimSuffix(output.String(), "\n")
 }
 
 func commandByName(name string) (commandSpec, bool) {
@@ -57,17 +156,22 @@ func commandByName(name string) (commandSpec, bool) {
 
 // PrintHelp writes the public command and configuration summary.
 func PrintHelp(output io.Writer) {
-	fmt.Fprintln(output, "usage: mailbox [--account NAME] [--json] <command> [options]")
+	fmt.Fprintln(output, "usage: mailbox [--account NAME] [--json] [--text] <command> [options]")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "global flags:")
 	fmt.Fprintln(output, "  --account NAME   account name from config")
-	fmt.Fprintln(output, "  --json           machine-readable output")
+	fmt.Fprintf(output, "  --json           %s\n", jsonFlagHelp)
+	fmt.Fprintf(output, "  --text           %s\n", textFlagHelp)
 	fmt.Fprintln(output, "  --help, -h       show this help")
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "commands:")
 	for _, command := range commandSpecs() {
 		fmt.Fprintf(output, "  %-12s %s\n", command.name, command.description)
 	}
+	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, "output formats: "+outputFormats)
+	fmt.Fprintln(output, "")
+	fmt.Fprintln(output, idSemantics)
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "configuration: $XDG_CONFIG_HOME/mailbox/config.toml (or ~/.config/mailbox/config.toml); MAILBOX_CONFIG overrides")
 }
@@ -78,6 +182,7 @@ func PrintHelp(output io.Writer) {
 type TopLevelFlags struct {
 	Account string
 	JSON    bool
+	Text    bool
 	Help    bool
 }
 
@@ -88,12 +193,13 @@ func ParseTopLevel(args []string) (TopLevelFlags, []string, error) {
 	flags.SetOutput(io.Discard)
 	account := flags.String("account", "", "account name from config")
 	jsonOutput := flags.Bool("json", false, "machine output")
+	textOutput := flags.Bool("text", false, "human output")
 	help := flags.Bool("help", false, "show help")
 	shortHelp := flags.Bool("h", false, "show help")
 	if err := flags.Parse(args); err != nil {
 		return TopLevelFlags{}, nil, err
 	}
-	return TopLevelFlags{Account: *account, JSON: *jsonOutput, Help: *help || *shortHelp}, flags.Args(), nil
+	return TopLevelFlags{Account: *account, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp}, flags.Args(), nil
 }
 
 // Run executes a one-shot command. args excludes the program name.
@@ -110,7 +216,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return failUsage(stderr, nil)
 	}
 
-	cc := &cmdCtx{accountFlag: global.Account, json: global.JSON, stdout: stdout, stderr: stderr, rawArgs: args}
+	cc := &cmdCtx{accountFlag: global.Account, json: global.JSON, text: global.Text, stdout: stdout, stderr: stderr, stdin: os.Stdin, rawArgs: args}
 	if rest[0] == "__mint" {
 		return runMint(cc, rest[1:])
 	}
@@ -124,35 +230,67 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		usage(stderr)
 		return 2
 	}
-	cfg, err := auth.LoadConfig()
-	if err != nil {
-		fmt.Fprintf(stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
-		return 1
-	}
-	cc.cfg = cfg
 	return command.run(cc, rest[1:])
 }
 
-func (cc *cmdCtx) flags(name string) (*flag.FlagSet, *string, *bool) {
+type commonFlags struct {
+	fs         *flag.FlagSet
+	account    *string
+	json, text *bool
+	help       *bool
+}
+
+func (cc *cmdCtx) flags(name string) commonFlags {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	account := fs.String("account", cc.accountFlag, "account name from config")
 	jsonOutput := fs.Bool("json", cc.json, "machine output")
-	return fs, account, jsonOutput
+	textOutput := fs.Bool("text", cc.text, "human output")
+	help := false
+	fs.BoolVar(&help, "help", false, "show help")
+	fs.BoolVar(&help, "h", false, "show help")
+	return commonFlags{fs: fs, account: account, json: jsonOutput, text: textOutput, help: &help}
 }
 
-func (cc *cmdCtx) parse(fs *flag.FlagSet, account *string, jsonOutput *bool, args []string) ([]string, *cmdCtx, int) {
-	pos, err := parseInterspersed(fs, args)
+func (cc *cmdCtx) parse(cf commonFlags, args []string) (pos []string, next *cmdCtx, done bool, code int) {
+	pos, err := parseInterspersed(cf.fs, args)
 	if err != nil {
-		return nil, nil, failUsage(cc.stderr, err)
+		return nil, nil, false, failUsage(cc.stderr, err)
 	}
-	next := *cc
-	next.accountFlag = *account
-	next.json = *jsonOutput
-	return pos, &next, 0
+	copy := *cc
+	copy.accountFlag = *cf.account
+	copy.json = *cf.json
+	copy.text = *cf.text
+	next = &copy
+	if *cf.help {
+		if command, ok := commandByName(cf.fs.Name()); ok {
+			printCommandHelp(next.stdout, command)
+		}
+		return pos, next, true, 0
+	}
+	return pos, next, false, 0
+}
+
+func printCommandHelp(output io.Writer, spec commandSpec) {
+	fmt.Fprintf(output, "usage: %s\n\n%s\n", spec.usage, spec.help)
+}
+
+func (cc *cmdCtx) loadConfig() error {
+	if cc.cfg != nil {
+		return nil
+	}
+	cfg, err := auth.LoadConfig()
+	if err != nil {
+		return err
+	}
+	cc.cfg = cfg
+	return nil
 }
 
 func (cc *cmdCtx) start() (string, *auth.Source, *gmail.Client, int) {
+	if err := cc.loadConfig(); err != nil {
+		return "", nil, nil, cc.runtimeError("", nil, err)
+	}
 	acct, err := cc.cfg.ResolveAccount(cc.accountFlag)
 	if err != nil {
 		return "", nil, nil, cc.runtimeError("", nil, err)
@@ -164,6 +302,9 @@ func (cc *cmdCtx) start() (string, *auth.Source, *gmail.Client, int) {
 }
 
 func (cc *cmdCtx) startWrite() (string, *auth.Source, *gmail.Client, int) {
+	if err := cc.loadConfig(); err != nil {
+		return "", nil, nil, cc.runtimeError("", nil, err)
+	}
 	acct, err := cc.cfg.ResolveAccount(cc.accountFlag)
 	if err != nil {
 		return "", nil, nil, cc.runtimeError("", nil, err)
@@ -178,20 +319,41 @@ func (cc *cmdCtx) startWrite() (string, *auth.Source, *gmail.Client, int) {
 	return acct.Name, source, client, 0
 }
 
+func (cc *cmdCtx) startSend() (string, *auth.Source, *gmail.Client, int) {
+	if err := cc.loadConfig(); err != nil {
+		return "", nil, nil, cc.runtimeError("", nil, err)
+	}
+	acct, err := cc.cfg.ResolveAccount(cc.accountFlag)
+	if err != nil {
+		return "", nil, nil, cc.runtimeError("", nil, err)
+	}
+	cc.acct = acct
+	source := auth.NewSource(cc.cfg, acct)
+	if _, err := source.SendToken(context.Background(), auth.BatchAcquirer(cc.cfg, acct, auth.ClassSend)); err != nil {
+		return "", nil, nil, cc.sendRuntimeError(acct.Name, source, err)
+	}
+	client := gmail.NewClient(gmail.ClientConfig{
+		Read:    source.ReadCredentials(auth.BatchAcquirer(cc.cfg, acct, auth.ClassRead)),
+		Send:    source.SendCredentials(),
+		Account: acct.Name,
+	})
+	return acct.Name, source, client, 0
+}
+
 func (cc *cmdCtx) runtimeError(account string, source *auth.Source, err error) int {
-	return cc.runtimeErrorForScope(account, source, err, false)
+	return cc.runtimeErrorForClass(account, source, err, auth.ClassRead)
 }
 
 func (cc *cmdCtx) writeRuntimeError(account string, source *auth.Source, err error) int {
-	return cc.runtimeErrorForScope(account, source, err, true)
+	return cc.runtimeErrorForClass(account, source, err, auth.ClassWrite)
 }
 
-func (cc *cmdCtx) runtimeErrorForScope(_ string, source *auth.Source, err error, write bool) int {
+func (cc *cmdCtx) sendRuntimeError(account string, source *auth.Source, err error) int {
+	return cc.runtimeErrorForClass(account, source, err, auth.ClassSend)
+}
+
+func (cc *cmdCtx) runtimeErrorForClass(_ string, source *auth.Source, err error, class auth.Class) int {
 	if source != nil {
-		class := auth.ClassRead
-		if write {
-			class = auth.ClassWrite
-		}
 		cc.emitCredentialDiagnostic(source, class)
 	}
 	var credentialError *auth.NeedsCredentialError
@@ -200,15 +362,21 @@ func (cc *cmdCtx) runtimeErrorForScope(_ string, source *auth.Source, err error,
 	}
 	fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
 	if source != nil && gmail.IsInsufficientScope(err) {
-		class, route, scope := auth.ClassRead, source.LastRoute(), "gmail.readonly"
-		if write {
-			class, route, scope = auth.ClassWrite, source.WriteRoute(), "gmail.modify"
+		route, scope := source.LastRoute(), "gmail.readonly"
+		switch class {
+		case auth.ClassWrite:
+			route, scope = source.WriteRoute(), "gmail.modify"
+		case auth.ClassSend:
+			route, scope = source.SendRoute(), "gmail.send"
 		}
 		var typed *gmail.ErrInsufficientScope
 		if errors.As(err, &typed) {
 			scope = typed.Scope
-			if scope == "gmail.modify" {
+			switch scope {
+			case "gmail.modify":
 				class, route = auth.ClassWrite, source.WriteRoute()
+			case "gmail.send":
+				class, route = auth.ClassSend, source.SendRoute()
 			}
 		}
 		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ScopeHint(source.Account(), class, route, scope))
@@ -216,25 +384,27 @@ func (cc *cmdCtx) runtimeErrorForScope(_ string, source *auth.Source, err error,
 	return 1
 }
 
+type errorEnvelope struct {
+	Error struct {
+		Code      string `json:"code"`
+		Account   string `json:"account"`
+		ConfigKey string `json:"config_key"`
+		Config    string `json:"config"`
+	} `json:"error"`
+}
+
 func (cc *cmdCtx) needsCredential(err *auth.NeedsCredentialError) int {
-	if !cc.json {
+	if cc.format() == FormatText {
 		fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
 		return 1
 	}
-	output := struct {
-		Error struct {
-			Code      string `json:"code"`
-			Account   string `json:"account"`
-			ConfigKey string `json:"config_key"`
-			Config    string `json:"config"`
-		} `json:"error"`
-	}{}
+	output := errorEnvelope{}
 	output.Error.Code = "needs_" + string(err.Class) + "_credential"
 	output.Error.Account = err.Account
 	output.Error.ConfigKey = err.ConfigKey
 	output.Error.Config = err.ConfigPath
-	if writeErr := writeJSON(cc.stdout, output); writeErr != nil {
-		fmt.Fprintf(cc.stderr, "mailbox: write credential error JSON: %v\n", writeErr)
+	if writeErr := cc.writeMachine(output); writeErr != nil {
+		fmt.Fprintf(cc.stderr, "mailbox: write credential error output: %v\n", writeErr)
 	}
 	return 1
 }
@@ -257,6 +427,18 @@ func (cc *cmdCtx) retryWrite(source *auth.Source, action func() error) error {
 	}
 	source.InvalidateWrite()
 	if _, err = source.WriteToken(context.Background(), auth.BatchAcquirer(cc.cfg, cc.acct, auth.ClassWrite)); err != nil {
+		return err
+	}
+	return action()
+}
+
+func (cc *cmdCtx) retrySend(source *auth.Source, action func() error) error {
+	err := action()
+	if !errors.Is(err, auth.ErrExpiredSendToken) {
+		return err
+	}
+	source.InvalidateSend()
+	if _, err = source.SendToken(context.Background(), auth.BatchAcquirer(cc.cfg, cc.acct, auth.ClassSend)); err != nil {
 		return err
 	}
 	return action()

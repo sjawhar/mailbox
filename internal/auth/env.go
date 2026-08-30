@@ -21,21 +21,14 @@ func ScrubbedEnviron(cfg *Config) []string {
 	return scrubbedEnviron(cfg, os.Environ())
 }
 
-// CredentialChildEnviron returns the restricted environment for an account's
-// credential command, restoring only its safe configured passthrough values
-// and incrementing the credential recursion depth.
-func CredentialChildEnviron(cfg *Config, acct *AccountConfig) []string {
+// CredentialChildEnviron returns the restricted environment for a requested
+// credential class, restoring only its account's shared and class-private safe
+// configured passthrough values and incrementing the credential recursion depth.
+func CredentialChildEnviron(cfg *Config, acct *AccountConfig, class Class) []string {
 	parent := os.Environ()
-	child := scrubbedEnviron(cfg, parent)
-
-	for _, name := range acct.Passthrough {
-		if _, forbidden := credentialPassthroughDeny[name]; forbidden || isConfiguredCredentialEnvironment(cfg, name) {
-			continue
-		}
-		if value, ok := environmentValue(parent, name); ok {
-			child = setEnvironmentValue(child, name, value)
-		}
-	}
+	child := withoutCredentialPassthrough(scrubbedEnviron(cfg, parent), cfg)
+	child = restoreCredentialPassthrough(child, parent, cfg, acct.Passthrough)
+	child = restoreCredentialPassthrough(child, parent, cfg, credentialPassthroughForClass(acct, class))
 
 	depth, err := credentialDepth(parent)
 	if err != nil {
@@ -91,10 +84,71 @@ func isConfiguredCredentialEnvironment(cfg *Config, name string) bool {
 		return false
 	}
 	for _, acct := range cfg.Accounts {
-		for _, source := range []*CredentialSource{acct.Read, acct.Write} {
+		for _, source := range []*CredentialSource{acct.Read, acct.Write, acct.Send} {
 			if source != nil && source.Kind == SourceEnv && source.EnvVar == name {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func withoutCredentialPassthrough(env []string, cfg *Config) []string {
+	if cfg == nil {
+		return env
+	}
+	kept := env[:0]
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if isConfiguredCredentialPassthrough(cfg, name) {
+			continue
+		}
+		kept = append(kept, kv)
+	}
+	return kept
+}
+
+func restoreCredentialPassthrough(child, parent []string, cfg *Config, names []string) []string {
+	for _, name := range names {
+		if _, forbidden := credentialPassthroughDeny[name]; forbidden || isConfiguredCredentialEnvironment(cfg, name) {
+			continue
+		}
+		if value, ok := environmentValue(parent, name); ok {
+			child = setEnvironmentValue(child, name, value)
+		}
+	}
+	return child
+}
+
+func credentialPassthroughForClass(account *AccountConfig, class Class) []string {
+	switch class {
+	case ClassRead:
+		return account.ReadPassthrough
+	case ClassWrite:
+		return account.WritePassthrough
+	case ClassSend:
+		return account.SendPassthrough
+	default:
+		return nil
+	}
+}
+
+func isConfiguredCredentialPassthrough(cfg *Config, name string) bool {
+	for _, account := range cfg.Accounts {
+		if containsName(account.Passthrough, name) ||
+			containsName(account.ReadPassthrough, name) ||
+			containsName(account.WritePassthrough, name) ||
+			containsName(account.SendPassthrough, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsName(names []string, name string) bool {
+	for _, candidate := range names {
+		if candidate == name {
+			return true
 		}
 	}
 	return false

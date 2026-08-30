@@ -8,10 +8,17 @@ import (
 	"github.com/sjawhar/mailbox/internal/render"
 )
 
+type openPayload struct {
+	Account   string `json:"account"`
+	ThreadID  string `json:"threadId"`
+	MessageID string `json:"messageId"`
+	File      string `json:"file"`
+}
+
 func runOpen(cc *cmdCtx, args []string) int {
-	fs, accountFlag, jsonOutput := cc.flags("open")
-	pos, next, code := cc.parse(fs, accountFlag, jsonOutput, args)
-	if code != 0 {
+	cf := cc.flags("open")
+	pos, next, done, code := cc.parse(cf, args)
+	if done || code != 0 {
 		return code
 	}
 	if err := requireArity(pos, 1, 1, "open"); err != nil {
@@ -38,14 +45,9 @@ func runOpen(cc *cmdCtx, args []string) int {
 		return next.runtimeError(account, source, fmt.Errorf("open HTML file: %w", err))
 	}
 	fmt.Fprintf(next.stderr, "handed to opener: %s\n", path)
-	if next.json {
-		output := struct {
-			Account   string `json:"account"`
-			ThreadID  string `json:"threadId"`
-			MessageID string `json:"messageId"`
-			File      string `json:"file"`
-		}{Account: account, ThreadID: threadID, MessageID: messageID, File: path}
-		if err := writeJSON(next.stdout, output); err != nil {
+	if next.format() != FormatText {
+		output := openPayload{Account: account, ThreadID: threadID, MessageID: messageID, File: path}
+		if err := next.writeMachine(output); err != nil {
 			return next.runtimeError(account, source, wrapError("write JSON", err))
 		}
 	}

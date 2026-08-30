@@ -30,6 +30,7 @@ type authorizedUser struct {
 type refreshResponse struct {
 	AccessToken string `json:"access_token"`
 	ExpiresIn   int64  `json:"expires_in"`
+	Scope       string `json:"scope"`
 }
 
 type refreshError struct {
@@ -54,10 +55,10 @@ func tokenURL() (string, error) {
 	}
 }
 
-func refreshAccessToken(ctx context.Context, sourceName, rawJSON string) (accessToken string, expiry time.Time, err error) {
+func refreshAccessToken(ctx context.Context, sourceName, rawJSON string) (accessToken string, scope string, expiry time.Time, err error) {
 	var credential authorizedUser
 	if err := json.Unmarshal([]byte(rawJSON), &credential); err != nil {
-		return "", time.Time{}, fmt.Errorf("parse authorized_user JSON from %s: %w", safeForTerminal(sourceName), err)
+		return "", "", time.Time{}, fmt.Errorf("parse authorized_user JSON from %s: %w", safeForTerminal(sourceName), err)
 	}
 	for _, field := range []struct {
 		name, value string
@@ -67,13 +68,13 @@ func refreshAccessToken(ctx context.Context, sourceName, rawJSON string) (access
 		{name: "refresh_token", value: credential.RefreshToken},
 	} {
 		if field.value == "" {
-			return "", time.Time{}, fmt.Errorf("authorized_user JSON from %s is missing non-empty %s", safeForTerminal(sourceName), field.name)
+			return "", "", time.Time{}, fmt.Errorf("authorized_user JSON from %s is missing non-empty %s", safeForTerminal(sourceName), field.name)
 		}
 	}
 
 	endpoint, err := tokenURL()
 	if err != nil {
-		return "", time.Time{}, err
+		return "", "", time.Time{}, err
 	}
 	form := url.Values{
 		"client_id":     {credential.ClientID},
@@ -83,20 +84,20 @@ func refreshAccessToken(ctx context.Context, sourceName, rawJSON string) (access
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("oauth refresh for %s: create request: %w", safeForTerminal(sourceName), err)
+		return "", "", time.Time{}, fmt.Errorf("oauth refresh for %s: create request: %w", safeForTerminal(sourceName), err)
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	response, err := tokenHTTPClient.Do(request)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("oauth refresh for %s: %w", safeForTerminal(sourceName), err)
+		return "", "", time.Time{}, fmt.Errorf("oauth refresh for %s: %w", safeForTerminal(sourceName), err)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
 		var failure refreshError
 		if err := json.NewDecoder(response.Body).Decode(&failure); err != nil {
-			return "", time.Time{}, fmt.Errorf("oauth refresh for %s failed: %s: decode error response: %w", safeForTerminal(sourceName), response.Status, err)
+			return "", "", time.Time{}, fmt.Errorf("oauth refresh for %s failed: %s: decode error response: %w", safeForTerminal(sourceName), response.Status, err)
 		}
 		message := failure.Error
 		if message == "" {
@@ -105,18 +106,18 @@ func refreshAccessToken(ctx context.Context, sourceName, rawJSON string) (access
 		if message == "" {
 			message = "empty error response"
 		}
-		return "", time.Time{}, fmt.Errorf("oauth refresh for %s failed: %s %s", safeForTerminal(sourceName), response.Status, message)
+		return "", "", time.Time{}, fmt.Errorf("oauth refresh for %s failed: %s %s", safeForTerminal(sourceName), response.Status, message)
 	}
 
 	var refreshed refreshResponse
 	if err := json.NewDecoder(response.Body).Decode(&refreshed); err != nil {
-		return "", time.Time{}, fmt.Errorf("oauth refresh for %s: decode response: %w", safeForTerminal(sourceName), err)
+		return "", "", time.Time{}, fmt.Errorf("oauth refresh for %s: decode response: %w", safeForTerminal(sourceName), err)
 	}
 	if refreshed.AccessToken == "" {
-		return "", time.Time{}, fmt.Errorf("oauth refresh for %s returned an empty access_token", safeForTerminal(sourceName))
+		return "", "", time.Time{}, fmt.Errorf("oauth refresh for %s returned an empty access_token", safeForTerminal(sourceName))
 	}
 	if refreshed.ExpiresIn <= 0 {
-		return "", time.Time{}, fmt.Errorf("oauth refresh for %s returned invalid expires_in %s", safeForTerminal(sourceName), strconv.FormatInt(refreshed.ExpiresIn, 10))
+		return "", "", time.Time{}, fmt.Errorf("oauth refresh for %s returned invalid expires_in %s", safeForTerminal(sourceName), strconv.FormatInt(refreshed.ExpiresIn, 10))
 	}
-	return refreshed.AccessToken, time.Now().Add(time.Duration(refreshed.ExpiresIn) * time.Second), nil
+	return refreshed.AccessToken, refreshed.Scope, time.Now().Add(time.Duration(refreshed.ExpiresIn) * time.Second), nil
 }

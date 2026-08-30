@@ -47,6 +47,7 @@ type Class string
 const (
 	ClassRead  Class = "read"
 	ClassWrite Class = "write"
+	ClassSend  Class = "send"
 )
 
 type SourceKind string
@@ -74,10 +75,14 @@ type CredentialSource struct {
 }
 
 type AccountConfig struct {
-	Name        string
-	Read        *CredentialSource
-	Write       *CredentialSource
-	Passthrough []string
+	Name             string
+	Read             *CredentialSource
+	Write            *CredentialSource
+	Send             *CredentialSource
+	Passthrough      []string
+	ReadPassthrough  []string
+	WritePassthrough []string
+	SendPassthrough  []string
 }
 
 type Config struct {
@@ -91,14 +96,21 @@ type Config struct {
 }
 
 type rawAccount struct {
-	ReadCredentialEnv  *string   `toml:"read_credential_env"`
-	ReadCredentialCmd  *[]string `toml:"read_credential_cmd"`
-	ReadInteractive    *bool     `toml:"read_interactive"`
-	WriteCredentialEnv *string   `toml:"write_credential_env"`
-	WriteCredentialCmd *[]string `toml:"write_credential_cmd"`
-	WriteInteractive   *bool     `toml:"write_interactive"`
-	WriteLabel         *string   `toml:"write_label"`
-	Passthrough        []string  `toml:"credential_env_passthrough"`
+	ReadCredentialEnv          *string   `toml:"read_credential_env"`
+	ReadCredentialCmd          *[]string `toml:"read_credential_cmd"`
+	ReadInteractive            *bool     `toml:"read_interactive"`
+	ReadCredentialPassthrough  []string  `toml:"read_credential_env_passthrough"`
+	WriteCredentialEnv         *string   `toml:"write_credential_env"`
+	WriteCredentialCmd         *[]string `toml:"write_credential_cmd"`
+	WriteInteractive           *bool     `toml:"write_interactive"`
+	WriteLabel                 *string   `toml:"write_label"`
+	WriteCredentialPassthrough []string  `toml:"write_credential_env_passthrough"`
+	SendCredentialEnv          *string   `toml:"send_credential_env"`
+	SendCredentialCmd          *[]string `toml:"send_credential_cmd"`
+	SendInteractive            *bool     `toml:"send_interactive"`
+	SendLabel                  *string   `toml:"send_label"`
+	SendCredentialPassthrough  []string  `toml:"send_credential_env_passthrough"`
+	Passthrough                []string  `toml:"credential_env_passthrough"`
 }
 
 type rawConfig struct {
@@ -256,7 +268,7 @@ func compileConfig(configPath string, raw rawConfig, keys []toml.Key) (*Config, 
 
 	declaredVars := make(map[string]string)
 	for _, account := range accounts {
-		for _, source := range []*CredentialSource{account.Read, account.Write} {
+		for _, source := range []*CredentialSource{account.Read, account.Write, account.Send} {
 			if source == nil || source.Kind != SourceEnv {
 				continue
 			}
@@ -266,14 +278,20 @@ func compileConfig(configPath string, raw rawConfig, keys []toml.Key) (*Config, 
 			declaredVars[source.EnvVar] = source.ConfigKey
 		}
 	}
+	declaredPassthrough := make(map[string]credentialPassthroughDeclaration)
 	for _, account := range accounts {
-		passthroughKey := fmt.Sprintf("accounts.%s.credential_env_passthrough", account.Name)
-		for _, variable := range account.Passthrough {
-			if _, denied := credentialPassthroughDeny[variable]; denied {
-				return nil, configError(configPath, "%s must not name %s", passthroughKey, variable)
-			}
-			if declaration, declared := declaredVars[variable]; declared {
-				return nil, configError(configPath, "%s names %s, declared by %s", passthroughKey, variable, declaration)
+		for _, declaration := range credentialPassthroughDeclarations(account) {
+			for _, variable := range declaration.variables {
+				if _, denied := credentialPassthroughDeny[variable]; denied {
+					return nil, configError(configPath, "%s must not name %s", declaration.key, variable)
+				}
+				if source, declared := declaredVars[variable]; declared {
+					return nil, configError(configPath, "%s names %s, declared by %s", declaration.key, variable, source)
+				}
+				if previous, declared := declaredPassthrough[variable]; declared && previous.class != declaration.class {
+					return nil, configError(configPath, "%s names %s, already named by %s (ambiguous credential environment passthrough custody)", declaration.key, variable, previous.key)
+				}
+				declaredPassthrough[variable] = declaration
 			}
 		}
 	}
@@ -346,19 +364,66 @@ func compileAccount(configPath, name string, raw rawAccount) (*AccountConfig, er
 		return nil, configError(configPath, "accounts.%s.write_label requires a write credential source", name)
 	}
 
-	passthroughKey := fmt.Sprintf("accounts.%s.credential_env_passthrough", name)
-	for _, variable := range raw.Passthrough {
-		if !envVarNamePattern.MatchString(variable) {
-			return nil, configError(configPath, "%s: invalid environment variable name %q", passthroughKey, variable)
-		}
+	send, err := compileCredentialSource(configPath, name, ClassSend, raw.SendCredentialEnv, raw.SendCredentialCmd, raw.SendInteractive, raw.SendLabel)
+	if err != nil {
+		return nil, err
+	}
+	if raw.SendLabel != nil && send == nil {
+		return nil, configError(configPath, "accounts.%s.send_label requires a send credential source", name)
+	}
+
+	if err := validateCredentialPassthrough(configPath, name, ClassRead, raw.ReadCredentialPassthrough); err != nil {
+		return nil, err
+	}
+	if err := validateCredentialPassthrough(configPath, name, ClassWrite, raw.WriteCredentialPassthrough); err != nil {
+		return nil, err
+	}
+	if err := validateCredentialPassthrough(configPath, name, ClassSend, raw.SendCredentialPassthrough); err != nil {
+		return nil, err
+	}
+	if err := validateCredentialPassthrough(configPath, name, "", raw.Passthrough); err != nil {
+		return nil, err
 	}
 
 	return &AccountConfig{
-		Name:        name,
-		Read:        read,
-		Write:       write,
-		Passthrough: raw.Passthrough,
+		Name:             name,
+		Read:             read,
+		Write:            write,
+		Send:             send,
+		Passthrough:      raw.Passthrough,
+		ReadPassthrough:  raw.ReadCredentialPassthrough,
+		WritePassthrough: raw.WriteCredentialPassthrough,
+		SendPassthrough:  raw.SendCredentialPassthrough,
 	}, nil
+}
+
+type credentialPassthroughDeclaration struct {
+	key       string
+	class     Class
+	variables []string
+}
+
+func credentialPassthroughDeclarations(account *AccountConfig) []credentialPassthroughDeclaration {
+	prefix := fmt.Sprintf("accounts.%s", account.Name)
+	return []credentialPassthroughDeclaration{
+		{key: prefix + ".credential_env_passthrough", variables: account.Passthrough},
+		{key: prefix + ".read_credential_env_passthrough", class: ClassRead, variables: account.ReadPassthrough},
+		{key: prefix + ".write_credential_env_passthrough", class: ClassWrite, variables: account.WritePassthrough},
+		{key: prefix + ".send_credential_env_passthrough", class: ClassSend, variables: account.SendPassthrough},
+	}
+}
+
+func validateCredentialPassthrough(configPath, accountName string, class Class, variables []string) error {
+	key := fmt.Sprintf("accounts.%s.credential_env_passthrough", accountName)
+	if class != "" {
+		key = fmt.Sprintf("accounts.%s.%s_credential_env_passthrough", accountName, class)
+	}
+	for _, variable := range variables {
+		if !envVarNamePattern.MatchString(variable) {
+			return configError(configPath, "%s: invalid environment variable name %q", key, variable)
+		}
+	}
+	return nil
 }
 
 func compileCredentialSource(configPath, accountName string, class Class, environment *string, command *[]string, interactive *bool, label *string) (*CredentialSource, error) {
@@ -401,7 +466,7 @@ func compileCredentialSource(configPath, accountName string, class Class, enviro
 		return nil, configError(configPath, "%s: resolve argv0 %q: %v", commandKey, argv[0], err)
 	}
 
-	interactiveValue := class == ClassWrite
+	interactiveValue := class != ClassRead
 	if interactive != nil {
 		interactiveValue = *interactive
 	}
@@ -492,6 +557,9 @@ type NeedsCredentialError struct {
 
 func (e *NeedsCredentialError) Error() string {
 	if e.Reason == ReasonNoConfig {
+		if e.Class == ClassSend {
+			return fmt.Sprintf("account %q has no usable send credential: %s — create %s with accounts.%s.send_credential_env or accounts.%s.send_credential_cmd (see README, Configuration)", safeForTerminal(e.Account), e.Reason, safeForTerminal(e.ConfigPath), safeForTerminal(e.Account), safeForTerminal(e.Account))
+		}
 		return fmt.Sprintf("account %q has no usable %s credential: %s — create %s (see README, Configuration) or set MAILBOX_TOKEN", safeForTerminal(e.Account), e.Class, e.Reason, safeForTerminal(e.ConfigPath))
 	}
 	return fmt.Sprintf("account %q has no usable %s credential: %s — %s (config: %s)", safeForTerminal(e.Account), e.Class, e.Reason, safeForTerminal(e.ConfigKey), safeForTerminal(e.ConfigPath))

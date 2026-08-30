@@ -10,11 +10,16 @@ import (
 	"golang.org/x/term"
 )
 
+type readPayload struct {
+	Account string `json:"account"`
+	*render.RenderedThread
+}
+
 func runRead(cc *cmdCtx, args []string) int {
-	fs, accountFlag, jsonOutput := cc.flags("read")
-	full := fs.Bool("full", false, "keep quoted history")
-	pos, next, code := cc.parse(fs, accountFlag, jsonOutput, args)
-	if code != 0 {
+	cf := cc.flags("read")
+	full := cf.fs.Bool("full", false, "keep quoted history")
+	pos, next, done, code := cc.parse(cf, args)
+	if done || code != 0 {
 		return code
 	}
 	if err := requireArity(pos, 1, 1, "read"); err != nil {
@@ -37,16 +42,8 @@ func runRead(cc *cmdCtx, args []string) int {
 	if err != nil {
 		return next.runtimeError(account, source, err)
 	}
-	if next.json {
-		normalizeRenderedThread(rendered)
-		output := struct {
-			Account string `json:"account"`
-			*render.RenderedThread
-		}{Account: string(account), RenderedThread: rendered}
-		if err := writeJSON(next.stdout, output); err != nil {
-			return next.runtimeError(account, source, wrapError("write JSON", err))
-		}
-	} else {
+	switch next.format() {
+	case FormatText:
 		markdown := rendered.Markdown()
 		if !isTerminal(next.stdout) {
 			if _, err := io.WriteString(next.stdout, markdown); err != nil {
@@ -60,6 +57,12 @@ func runRead(cc *cmdCtx, args []string) int {
 			if _, err := io.WriteString(next.stdout, pretty); err != nil {
 				return next.runtimeError(account, source, wrapError("write terminal output", err))
 			}
+		}
+	default:
+		normalizeRenderedThread(rendered)
+		output := readPayload{Account: string(account), RenderedThread: rendered}
+		if err := next.writeMachine(output); err != nil {
+			return next.runtimeError(account, source, wrapError("write JSON", err))
 		}
 	}
 	next.emitCredentialDiagnostic(source, auth.ClassRead)

@@ -48,7 +48,7 @@ func TestRefreshRefusesRedirectsFromLoopbackTokenEndpoint(t *testing.T) {
 	t.Cleanup(redirector.Close)
 	t.Setenv("MAILBOX_TOKEN_URL", redirector.URL)
 
-	_, _, err := refreshAccessToken(context.Background(), "accounts.work.read_credential_env", oauthJSON())
+	_, _, _, err := refreshAccessToken(context.Background(), "accounts.work.read_credential_env", oauthJSON())
 	if err == nil {
 		t.Fatal("refresh followed a redirect from the loopback endpoint")
 	}
@@ -141,5 +141,22 @@ func TestScopeHintNamesOnlyConfigMetadata(t *testing.T) {
 		if strings.Contains(hint, forbidden) {
 			t.Fatalf("ScopeHint leaked command argument %q in %q", forbidden, hint)
 		}
+	}
+}
+
+// This fails if no-config send guidance recommends the read/write-only caller
+// override instead of the class-specific credential sources.
+func TestNoConfigSendCredentialGuidanceNamesOnlySendSources(t *testing.T) {
+	cfg := noConfig("/tmp/mailbox/config.toml")
+	acct := cfg.Accounts[0]
+	got := credentialError(cfg, acct, ClassSend, nil, ReasonNoSource).Error()
+
+	for _, want := range []string{"send_credential_env", "send_credential_cmd"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("send no-config guidance = %q, want %q", got, want)
+		}
+	}
+	if strings.Contains(got, "MAILBOX_TOKEN") {
+		t.Fatalf("send no-config guidance = %q, must not recommend MAILBOX_TOKEN", got)
 	}
 }

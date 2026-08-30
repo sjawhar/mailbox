@@ -94,7 +94,7 @@ func TestBatchWriteRefusesInteractiveConfiguredCommand(t *testing.T) {
 	t.Setenv("MAILBOX_CONFIG", config)
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"archive", "thread"}, &stdout, &stderr)
+	code := Run([]string{"archive", "thread", "--text"}, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "accounts.work.write_credential_cmd") || !strings.Contains(stderr.String(), config) {
 		t.Fatalf("archive = %d, %q", code, stderr.String())
 	}
@@ -108,7 +108,7 @@ func TestBatchWriteNoSourceNamesWriteConfigKey(t *testing.T) {
 	config := writeCredentialConfig(t, dir, "")
 	t.Setenv("MAILBOX_CONFIG", config)
 	var stdout, stderr bytes.Buffer
-	code := Run([]string{"archive", "thread"}, &stdout, &stderr)
+	code := Run([]string{"archive", "thread", "--text"}, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "accounts.work.write_credential_cmd") || !strings.Contains(stderr.String(), config) {
 		t.Fatalf("archive = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
 	}
@@ -483,7 +483,7 @@ func TestNoConfigTokenOnlyMode(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	t.Setenv("MAILBOX_TOKEN", "")
-	if code := Run([]string{"inbox"}, &stdout, &stderr); code != 1 ||
+	if code := Run([]string{"inbox", "--text"}, &stdout, &stderr); code != 1 ||
 		!strings.Contains(stderr.String(), filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "mailbox", "config.toml")) ||
 		!strings.Contains(stderr.String(), "README") {
 		t.Fatalf("no-config inbox = (%d, %q, %q)", code, stdout.String(), stderr.String())
@@ -638,7 +638,7 @@ read_interactive = true
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"status"}, &stdout, &stderr); code != 0 {
+	if code := Run([]string{"status", "--text"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("pinned text status exit = %d, stderr=%q", code, stderr.String())
 	}
 	if got := strings.Count(stdout.String(), "MAILBOX_TOKEN pins one identity for all accounts"); got != 1 {

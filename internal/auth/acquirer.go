@@ -102,11 +102,11 @@ func acquireEnv(ctx context.Context, cfg *Config, acct *AccountConfig, src *Cred
 		return Acquired{}, credentialError(cfg, acct, src.Class, src, ReasonEnvUnset)
 	}
 	if raw[0] == '{' {
-		accessToken, expiry, err := refreshAccessToken(ctx, src.ConfigKey, raw)
+		accessToken, scope, expiry, err := refreshAccessToken(ctx, src.ConfigKey, raw)
 		if err != nil {
 			return Acquired{}, err
 		}
-		return Acquired{Token: Token{AccessToken: accessToken, Route: RouteEnv, Expiry: expiry}}, nil
+		return Acquired{Token: Token{AccessToken: accessToken, Route: RouteEnv, Expiry: expiry, Scope: scope}}, nil
 	}
 	token, err := parseBareCredential([]byte(raw), RouteEnv)
 	if err != nil {
