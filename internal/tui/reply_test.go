@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -12,33 +13,35 @@ import (
 	"github.com/sjawhar/mailbox/internal/send"
 )
 
-func TestReplyOpensWithDerivedRecipientsReadOnly(t *testing.T) {
+func TestReplyOpensEditorWithDerivedRecipients(t *testing.T) {
+	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+	t.Setenv("VISUAL", "true")
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
 	model.ctx.self = "me@example.test"
 	model.view = threadView
 	model.thread = threadModel{thread: thread}
 
-	model, _ = update(t, model, key(keyReply))
+	model, command := update(t, model, key(keyReply))
 
-	if model.view != replyView {
-		t.Fatalf("view = %v, want replyView", model.view)
+	if command == nil || model.composeState.draftPath == "" {
+		t.Fatalf("r must create a draft and return the exec command, state=%#v", model.composeState)
 	}
 	if model.reply.target == nil || model.reply.target.ID != "target-message" {
 		t.Fatalf("pinned target = %#v, want newest target-message", model.reply.target)
 	}
-	if !model.reply.body.Focused() {
-		t.Fatal("reply body is not focused")
+	content, err := os.ReadFile(model.composeState.draftPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	view := model.View()
 	for _, want := range []string{
 		"to  sender@example.test  Sender  (From)",
 		"cc  colleague@example.test  Colleague  (To)",
 		"cc  copied@example.test  Copied  (CC)",
 		"subject: Re: target subject",
 	} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("reply view missing %q:\n%s", want, view)
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("draft missing %q:\n%s", want, content)
 		}
 	}
 }
@@ -47,9 +50,7 @@ func TestReplyConfirmRendersSharedEnvelope(t *testing.T) {
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
 	model.ctx.self = "me@example.test"
-	openReply(t, &model, thread)
-	model.reply.body.SetValue("Rendered body")
-	model = proceedToConfirm(t, model)
+	model = confirmWithBody(t, model, "Rendered body")
 
 	var want strings.Builder
 	send.RenderText(&want, model.account, model.reply.envelope, 0)
@@ -69,6 +70,8 @@ func TestReplySanitizesRemoteEnvelopeText(t *testing.T) {
 	}
 }
 func TestReplyFetchesSelfBeforeResolving(t *testing.T) {
+	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+	t.Setenv("VISUAL", "true")
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
 	api.profile = &gmail.Profile{EmailAddress: "me@example.test"}
@@ -81,8 +84,8 @@ func TestReplyFetchesSelfBeforeResolving(t *testing.T) {
 	}
 	model, _ = update(t, model, runCmd(t, command))
 
-	if api.profileCalls != 1 || model.ctx.self != "me@example.test" || model.view != replyView {
-		t.Fatalf("profile calls:%d self:%q view:%v", api.profileCalls, model.ctx.self, model.view)
+	if api.profileCalls != 1 || model.ctx.self != "me@example.test" || model.composeState.draftPath == "" {
+		t.Fatalf("profile calls:%d self:%q draft=%q", api.profileCalls, model.ctx.self, model.composeState.draftPath)
 	}
 }
 
@@ -90,10 +93,7 @@ func TestReplyPinsMessageAtOpenTime(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
 	model.ctx.self = "me@example.test"
-	openReply(t, &model, thread)
-	model.reply.body.SetValue("Pinned reply body")
-
-	model = proceedToConfirm(t, model)
+	model = confirmWithBody(t, model, "Pinned reply body")
 	thread.Messages = append(thread.Messages, replyMessage(
 		"newer-message", thread.ID, 3,
 		"Other <other@example.test>", "Me <me@example.test>", "", "newer subject", "<newer@example.test>", "",
@@ -120,7 +120,10 @@ func TestReplyPinsMessageAtOpenTime(t *testing.T) {
 	}
 }
 
-func TestReplyRefusalBlocksConfirm(t *testing.T) {
+func TestReplyRefusalPreventsDraftCreation(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("MAILBOX_CACHE_DIR", cacheDir)
+	t.Setenv("VISUAL", "true")
 	selfOnly := replyThread()
 	selfOnly.Messages[1] = replyMessage(
 		"target-message", selfOnly.ID, 2,
@@ -135,18 +138,19 @@ func TestReplyRefusalBlocksConfirm(t *testing.T) {
 	if model.view != threadView || !strings.Contains(model.status, "R2") {
 		t.Fatalf("R2 reply state = view:%v status:%q", model.view, model.status)
 	}
-
-	thread := replyThread()
-	model, _ = newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
-	openReply(t, &model, thread)
-	model, _ = update(t, model, ctrlS())
-	if model.view != replyView || !strings.Contains(model.status, "R5") {
-		t.Fatalf("R5 reply state = view:%v status:%q", model.view, model.status)
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("R2 refusal created draft data: %v", entries)
 	}
 }
 
-func TestReplyDivergentReplyToRefusedInTUI(t *testing.T) {
+func TestReplyDivergentReplyToRefusalPreventsDraftCreation(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("MAILBOX_CACHE_DIR", cacheDir)
+	t.Setenv("VISUAL", "true")
 	thread := replyThread()
 	thread.Messages[1] = replyMessage(
 		"target-message", thread.ID, 2,
@@ -161,6 +165,13 @@ func TestReplyDivergentReplyToRefusedInTUI(t *testing.T) {
 
 	if model.view != threadView || !strings.Contains(model.status, "needs_explicit_recipient") {
 		t.Fatalf("R6 reply state = view:%v status:%q", model.view, model.status)
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("R6 refusal created draft data: %v", entries)
 	}
 }
 
@@ -184,9 +195,7 @@ func TestConfirmSendRunsThroughClassSendUnlock(t *testing.T) {
 		}
 		return "", nil
 	}
-	openReply(t, &model, thread)
-	model.reply.body.SetValue("Confirm body")
-	model = proceedToConfirm(t, model)
+	model = confirmWithBody(t, model, "Confirm body")
 
 	model, fence := update(t, model, key(keyConfirmSend))
 	if !model.unlocking || model.unlockClass != auth.ClassSend {
@@ -221,19 +230,10 @@ func TestEscAbandonsWithoutTransmit(t *testing.T) {
 		unlockCalls++
 		return "", nil
 	}
-	openReply(t, &model, thread)
-
+	model = confirmWithBody(t, model, "Draft remains")
 	model, _ = update(t, model, key("esc"))
-	if model.view != threadView || model.reply.target != nil {
-		t.Fatalf("escape from reply = view:%v reply:%#v", model.view, model.reply)
-	}
-
-	openReply(t, &model, thread)
-	model.reply.body.SetValue("Draft remains")
-	model = proceedToConfirm(t, model)
-	model, _ = update(t, model, key("esc"))
-	if model.view != replyView || model.reply.body.Value() != "Draft remains" {
-		t.Fatalf("escape from confirm = view:%v body:%q", model.view, model.reply.body.Value())
+	if model.view != threadView || model.pendingSend != nil {
+		t.Fatalf("escape from confirm = view:%v pending:%#v", model.view, model.pendingSend)
 	}
 	if len(api.sendCalls) != 0 || unlockCalls != 0 {
 		t.Fatalf("escape activity = sends:%d unlocks:%d", len(api.sendCalls), unlockCalls)
@@ -244,9 +244,7 @@ func TestEscAfterConfirmAbandonsPendingSend(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
 	model.ctx.self = "me@example.test"
-	openReply(t, &model, thread)
-	model.reply.body.SetValue("Abandon body")
-	model = proceedToConfirm(t, model)
+	model = confirmWithBody(t, model, "Abandon body")
 
 	model, fence := update(t, model, key(keyConfirmSend))
 	request := model.currentRequest(unlockOperation)
@@ -254,7 +252,7 @@ func TestEscAfterConfirmAbandonsPendingSend(t *testing.T) {
 	model.unlockCancel = func() { cancellations++ }
 
 	model, _ = update(t, model, key("esc"))
-	if model.view != replyView || model.unlocking || model.pendingSend != nil {
+	if model.view != threadView || model.unlocking || model.pendingSend != nil {
 		t.Fatalf("escape state = view:%v unlocking:%t pending:%#v", model.view, model.unlocking, model.pendingSend)
 	}
 	if cancellations != 1 {
@@ -282,9 +280,7 @@ func TestMidflightAbandonNeverTransmits(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
 	model.ctx.self = "me@example.test"
-	openReply(t, &model, thread)
-	model.reply.body.SetValue("Abandon body")
-	model = proceedToConfirm(t, model)
+	model = confirmWithBody(t, model, "Abandon body")
 	model, _ = update(t, model, key(keyConfirmSend))
 	request := model.currentRequest(unlockOperation)
 	cancellations := 0
@@ -324,9 +320,7 @@ func TestSendExpiryRetriesOnce(t *testing.T) {
 		return "", nil
 	}
 	api.sendErrs = []error{auth.ErrExpiredSendToken, nil}
-	openReply(t, &model, thread)
-	model.reply.body.SetValue("Retry body")
-	model = proceedToConfirm(t, model)
+	model = confirmWithBody(t, model, "Retry body")
 
 	model, retryFence := sendUntilResult(t, model)
 	if !model.unlocking || model.unlockClass != auth.ClassSend || invalidations != 1 || model.pendingSend == nil || !model.pendingSend.retried {
@@ -341,9 +335,7 @@ func TestSendExpiryRetriesOnce(t *testing.T) {
 	model.ctx.self = "me@example.test"
 	model.ctx.invalidateSend = func() { invalidations++ }
 	api.sendErrs = []error{auth.ErrExpiredSendToken, auth.ErrExpiredSendToken}
-	openReply(t, &model, api.threads[0])
-	model.reply.body.SetValue("Second expiry")
-	model = proceedToConfirm(t, model)
+	model = confirmWithBody(t, model, "Second expiry")
 	model, retryFence = sendUntilResult(t, model)
 	model, _ = resolveUnlockForSend(t, model, retryFence)
 	if !model.statusError || !strings.Contains(model.status, "send token expired") || model.pendingSend != nil {
@@ -359,9 +351,7 @@ func TestTUISendSurfacesBroadScopeWarning(t *testing.T) {
 	model.ctx.sendScope = func() string {
 		return "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly"
 	}
-	openReply(t, &model, thread)
-	model.reply.body.SetValue("Broad scope")
-	model = finishConfirmedSend(t, proceedToConfirm(t, model))
+	model = finishConfirmedSend(t, confirmWithBody(t, model, "Broad scope"))
 	if !strings.Contains(model.status, "accounts.work.send_credential_cmd") {
 		t.Fatalf("broad scope status = %q", model.status)
 	}
@@ -371,9 +361,7 @@ func TestTUISendSurfacesBroadScopeWarning(t *testing.T) {
 	model.ctx.self = "me@example.test"
 	model.ctx.acct.Send = &auth.CredentialSource{Class: auth.ClassSend, ConfigKey: "accounts.work.send_credential_cmd"}
 	model.ctx.sendScope = func() string { return "https://www.googleapis.com/auth/gmail.send" }
-	openReply(t, &model, thread)
-	model.reply.body.SetValue("Exact scope")
-	model = finishConfirmedSend(t, proceedToConfirm(t, model))
+	model = finishConfirmedSend(t, confirmWithBody(t, model, "Exact scope"))
 	if strings.Contains(model.status, "granted scope exceeds") {
 		t.Fatalf("exact scope unexpectedly warned: %q", model.status)
 	}
@@ -396,9 +384,7 @@ func TestTUISendScopeFailureNamesSendCredentialConfig(t *testing.T) {
 			Reason: "insufficientPermissions",
 		},
 	}
-	openReply(t, &model, thread)
-	model.reply.body.SetValue("Scope test")
-	model = finishConfirmedSend(t, proceedToConfirm(t, model))
+	model = finishConfirmedSend(t, confirmWithBody(t, model, "Scope test"))
 
 	if !model.statusError || !strings.Contains(model.status, "accounts.work.send_credential_cmd") {
 		t.Fatalf("send scope status = %q", model.status)
@@ -408,29 +394,31 @@ func TestTUISendScopeFailureNamesSendCredentialConfig(t *testing.T) {
 	}
 }
 
-func openReply(t *testing.T, model *app, thread *gmail.Thread) {
+func confirmWithBody(t *testing.T, model app, body string) app {
 	t.Helper()
-	model.view = threadView
-	model.thread = threadModel{thread: thread}
-	var command tea.Cmd
-	*model, command = update(t, *model, key(keyReply))
-	if command != nil {
-		// The cursor blink is irrelevant to opening; the model is already focused.
+	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+	t.Setenv("VISUAL", "true")
+	if model.thread.thread == nil {
+		if len(model.list.rows) == 0 {
+			t.Fatal("confirmWithBody requires a replyable thread")
+		}
+		model.view = threadView
+		model.thread = threadModel{thread: model.list.rows[0]}
 	}
-	if model.view != replyView {
-		t.Fatalf("opening reply left view %v with status %q", model.view, model.status)
+	model, _ = update(t, model, key(keyReply))
+	if model.composeState.draftPath == "" {
+		t.Fatalf("reply did not create a draft: status=%q", model.status)
 	}
-}
-
-func proceedToConfirm(t *testing.T, model app) app {
-	t.Helper()
-	var command tea.Cmd
-	model, command = update(t, model, ctrlS())
-	if command != nil {
-		// Textarea cursor commands are not part of the confirmation transition.
+	raw, err := os.ReadFile(model.composeState.draftPath)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(model.composeState.draftPath, append(raw, []byte(body)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model, _ = update(t, model, editorDoneMsg{request: model.currentRequest(composeOperation)})
 	if model.view != replyConfirmView {
-		t.Fatalf("confirm view = %v, want replyConfirmView; status %q", model.view, model.status)
+		t.Fatalf("confirmWithBody landed on %v, want replyConfirmView (status %q)", model.view, model.status)
 	}
 	return model
 }
@@ -458,8 +446,6 @@ func resolveUnlockForSend(t *testing.T, model app, fence tea.Cmd) (app, tea.Cmd)
 	model, sendCommand := update(t, model, runCmd(t, acquire))
 	return update(t, model, runCmd(t, sendCommand))
 }
-
-func ctrlS() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyCtrlS} }
 
 func replyThread() *gmail.Thread {
 	threadID := "thread-reply"

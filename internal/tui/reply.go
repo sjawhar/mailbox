@@ -4,7 +4,6 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
@@ -18,7 +17,6 @@ type replyModel struct {
 	threadID string
 	target   *gmail.Message
 	envelope *send.Envelope
-	body     textarea.Model
 }
 
 type pendingSend struct {
@@ -28,6 +26,9 @@ type pendingSend struct {
 }
 
 func (m app) openReply() (tea.Model, tea.Cmd) {
+	if m.editorBlocked() {
+		return m, nil
+	}
 	if m.thread.thread == nil {
 		m.surfaceError(errNoReplyTarget)
 		return m, nil
@@ -48,21 +49,11 @@ func (m app) openReply() (tea.Model, tea.Cmd) {
 		m.surfaceReplyRefusal(refusal)
 		return m, nil
 	}
-
-	body := textarea.New()
-	body.Prompt = ""
-	body.Placeholder = "Reply body"
-	body.CharLimit = 0
-	m.reply = replyModel{
+	return m.startEditor(envelope, composeState{
+		mode:     send.ModeReply,
 		threadID: m.thread.thread.ID,
 		target:   target,
-		envelope: envelope,
-		body:     body,
-	}
-	m.resizeReply()
-	m.view = replyView
-	m.clearStatus()
-	return m, m.reply.body.Focus()
+	})
 }
 
 func (m app) deriveReply(target *gmail.Message, threadID string) (*send.Envelope, *send.Refusal) {
@@ -105,31 +96,12 @@ func replyTargetHeaders(target *gmail.Message) *send.TargetHeaders {
 	}
 }
 
-func (m *app) resizeReply() {
-	if m.reply.target == nil {
-		return
-	}
-	m.reply.body.SetWidth(max(20, m.layout.readerWidth))
-	m.reply.body.SetHeight(max(3, min(8, m.layout.readerHeight/3)))
-}
-
 func (m *app) surfaceReplyRefusal(refusal *send.Refusal) {
 	var output strings.Builder
 	send.RenderRefusalText(&output, refusal)
 	line, _, _ := strings.Cut(output.String(), "\n")
 	m.status = render.SanitizeTerminal(line)
 	m.statusError = true
-}
-
-func (m app) replyScreen() string {
-	return strings.Join([]string{
-		titleStyle.Render("Reply"),
-		replyEnvelopeText(m.account, m.reply.envelope),
-		"Body:",
-		m.reply.body.View(),
-		helpStyle.Render("ctrl+s confirm · esc back"),
-		m.statusView(),
-	}, "\n")
 }
 
 func (m app) replyConfirmScreen() string {
@@ -147,37 +119,19 @@ func replyEnvelopeText(account string, envelope *send.Envelope) string {
 	return render.SanitizeTerminal(output.String())
 }
 
-func (m app) updateReplyKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch message.String() {
-	case "esc":
-		m.reply = replyModel{}
-		m.view = threadView
-		m.clearStatus()
-		return m, nil
-	case keyReplyProceed:
-		envelope, refusal := m.resolveReply(m.reply.target, m.reply.threadID, m.reply.body.Value())
-		if refusal != nil {
-			m.surfaceReplyRefusal(refusal)
-			return m, nil
-		}
-		m.reply.envelope = envelope
-		m.view = replyConfirmView
-		m.clearStatus()
-		return m, nil
-	default:
-		var command tea.Cmd
-		m.reply.body, command = m.reply.body.Update(message)
-		return m, command
-	}
-}
-
 func (m app) updateReplyConfirmKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "esc":
 		if m.unlocking && m.unlockClass == auth.ClassSend && m.pendingSend != nil {
 			m.abandonUnlock()
 		}
-		m.view = replyView
+		if m.reply.envelope != nil && m.reply.envelope.Mode == send.ModeCompose {
+			m.view = listView
+		} else {
+			m.view = threadView
+		}
+		m.reply = replyModel{}
+		m.composeState = composeState{}
 		m.clearStatus()
 		return m, nil
 	case keyConfirmSend:

@@ -121,7 +121,8 @@ const (
 	labelPickerView
 	threadView
 	attachmentPickerView
-	replyView
+	composeToView
+	composeSubjectView
 	replyConfirmView
 )
 
@@ -140,16 +141,20 @@ type app struct {
 	contexts map[string]*accountCtx
 	ctx      *accountCtx
 
-	view        viewState
-	list        inboxModel
-	thread      threadModel
-	reply       replyModel
-	preview     previewModel
-	search      textinput.Model
-	label       textinput.Model
-	labelCursor int
-	viewport    viewport.Model
-	spinner     spinner.Model
+	view           viewState
+	list           inboxModel
+	thread         threadModel
+	reply          replyModel
+	composeState   composeState
+	composeOrigin  viewState
+	preview        previewModel
+	search         textinput.Model
+	label          textinput.Model
+	composeTo      textinput.Model
+	composeSubject textinput.Model
+	labelCursor    int
+	viewport       viewport.Model
+	spinner        spinner.Model
 
 	status       string
 	statusError  bool
@@ -179,24 +184,29 @@ func newApp(account *accountCtx) app {
 	label := textinput.New()
 	label.Prompt = labelPrompt
 	label.Placeholder = "type to filter"
+	composeTo := newComposeInput("To: ", "recipient@example.test")
+	composeSubject := newComposeInput("Subject: ", "Message subject")
 	layout := newLayoutMetrics(defaultTerminalWidth, defaultTerminalHeight)
 	search.Width = layout.searchInputWidth
 	label.Width = layout.labelInputWidth
-
+	composeTo.Width = layout.searchInputWidth
+	composeSubject.Width = layout.searchInputWidth
 	model := app{
-		cfg:      account.cfg,
-		account:  account.account,
-		contexts: map[string]*accountCtx{account.account: account},
-		ctx:      account,
-		view:     listView,
-		list:     newInboxModel(),
-		preview:  newPreviewModel(),
-		search:   search,
-		label:    label,
-		viewport: viewport.New(layout.readerWidth, defaultViewportHeight),
-		spinner:  spinner.New(),
-		layout:   layout,
-		pinned:   os.Getenv("MAILBOX_TOKEN") != "",
+		cfg:            account.cfg,
+		account:        account.account,
+		contexts:       map[string]*accountCtx{account.account: account},
+		ctx:            account,
+		view:           listView,
+		list:           newInboxModel(),
+		preview:        newPreviewModel(),
+		search:         search,
+		label:          label,
+		composeTo:      composeTo,
+		composeSubject: composeSubject,
+		viewport:       viewport.New(layout.readerWidth, defaultViewportHeight),
+		spinner:        spinner.New(),
+		layout:         layout,
+		pinned:         os.Getenv("MAILBOX_TOKEN") != "",
 	}
 	model.generations[listOperation] = 1
 	model.status = model.readCommandStatus()
@@ -384,6 +394,8 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.ctx.labelNameByID = labelNames(m.ctx.labels)
 		m.clearListingStatus()
 		return m, nil
+	case editorDoneMsg:
+		return m.finishEditor(message)
 	case profileMsg:
 		if m.discardAsync(message) {
 			return m, nil
@@ -398,6 +410,7 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.loading = false
 		m.pendingSend = nil
 		m.reply = replyModel{}
+		m.composeState = composeState{}
 		m.status = "sent — thread updated"
 		m.statusError = false
 		m.appendStatusNote(auth.SendScopeWarning(m.ctx.sendScope(), m.credentialConfigKey(auth.ClassSend)))
@@ -516,8 +529,10 @@ func (m app) View() string {
 		return m.threadView()
 	case attachmentPickerView:
 		return m.attachmentPickerView()
-	case replyView:
-		return m.replyScreen()
+	case composeToView:
+		return m.composeToScreen()
+	case composeSubjectView:
+		return m.composeSubjectScreen()
 	case replyConfirmView:
 		return m.replyConfirmScreen()
 	default:
@@ -529,9 +544,10 @@ func (m *app) setSize(width, height int) {
 	m.layout = newLayoutMetrics(width, height)
 	m.search.Width = m.layout.searchInputWidth
 	m.label.Width = m.layout.labelInputWidth
+	m.composeTo.Width = m.layout.searchInputWidth
+	m.composeSubject.Width = m.layout.searchInputWidth
 	m.viewport.Width = m.layout.readerWidth
 	m.viewport.Height = m.layout.readerHeight
-	m.resizeReply()
 }
 
 func (m *app) clearStatus() {
@@ -713,8 +729,10 @@ func (m app) updateKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateThreadKey(message)
 	case attachmentPickerView:
 		return m.updateAttachmentKey(message)
-	case replyView:
-		return m.updateReplyKey(message)
+	case composeToView:
+		return m.updateComposeToKey(message)
+	case composeSubjectView:
+		return m.updateComposeSubjectKey(message)
 	case replyConfirmView:
 		return m.updateReplyConfirmKey(message)
 	default:

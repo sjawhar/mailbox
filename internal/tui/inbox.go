@@ -331,6 +331,8 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(focus, labels, m.spinnerCmd())
 		}
 		return m, focus
+	case keyCompose:
+		return m.startCompose()
 	case keySearch:
 		m.view = searchView
 		m.search.SetValue("")

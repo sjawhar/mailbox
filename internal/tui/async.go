@@ -13,6 +13,7 @@ const (
 	profileOperation
 	sendOperation
 	unlockOperation
+	composeOperation
 	asyncOperationCount
 )
 

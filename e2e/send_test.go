@@ -240,14 +240,12 @@ func TestTUIReplyFenceAndEscapeDoNotTransmitEarly(t *testing.T) {
 	binary := buildMailbox(t)
 	t.Run("send captures attribution before helper spawn", func(t *testing.T) {
 		fixture := newSendFixture(t, true)
+		useTUIEditor(t, fixture, "hello from tui")
 		session := startSendTUI(t, binary, fixture)
 		session.SendEnter()
 		session.WaitFor("r reply", 15*time.Second)
 		session.SendKeys("r")
-		session.WaitFor("to  a@example.test", 5*time.Second)
-		session.SendKeys("hello from tui")
-		session.SendCtrl("s")
-		session.WaitFor("Re: PTY smoke", 5*time.Second)
+		session.WaitFor("Confirm send", 5*time.Second)
 		session.SendKeys("y")
 		attribution := "waiting for hardware key touch; approve only this request — work send access via " + fixture.helper
 		session.WaitFor(attribution, 5*time.Second)
@@ -260,13 +258,14 @@ func TestTUIReplyFenceAndEscapeDoNotTransmitEarly(t *testing.T) {
 		session.WaitFor("PTY smoke", 5*time.Second)
 	})
 
-	t.Run("escape abandons reply without a helper spawn", func(t *testing.T) {
+	t.Run("escape abandons editor-composed reply without a helper spawn", func(t *testing.T) {
 		fixture := newSendFixture(t, true)
+		useTUIEditor(t, fixture, "draft to abandon")
 		session := startSendTUI(t, binary, fixture)
 		session.SendEnter()
 		session.WaitFor("r reply", 15*time.Second)
 		session.SendKeys("r")
-		session.WaitFor("Body:", 5*time.Second)
+		session.WaitFor("Confirm send", 5*time.Second)
 		session.SendKeys("esc")
 		session.WaitFor("r reply", 5*time.Second)
 		assertNoSpawns(t, fixture.spawnFile)
@@ -395,6 +394,15 @@ func startSendTUI(t *testing.T, binary string, fixture *sendFixture) *tmuxSessio
 	session.WaitFor("Mailbox — work inbox", 15*time.Second)
 	session.WaitFor("PTY smoke", 15*time.Second)
 	return session
+}
+
+func useTUIEditor(t *testing.T, fixture *sendFixture, body string) {
+	t.Helper()
+	editor := filepath.Join(fixture.stubs, "tui-editor")
+	writeExecutable(t, editor, fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' %q >> "$1"
+`, body))
+	fixture.env["EDITOR"] = filepath.Base(editor)
 }
 
 func assertNoCanaryOnDisk(t *testing.T, canary string, roots ...string) {
