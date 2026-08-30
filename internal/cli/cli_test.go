@@ -1495,6 +1495,82 @@ func TestInvalidGlobalFlagRemainsUsageError(t *testing.T) {
 	}
 }
 
+func TestUsageErrorsEmitMachineEnvelope(t *testing.T) {
+	cases := []struct {
+		args    []string
+		message string
+	}{
+		{[]string{"archive"}, "archive requires"},
+		{[]string{"send", "--reply", "t1", "--body", "x", "--send"}, "--send requires --message"},
+		{[]string{"mark", "sideways", "t1"}, "mark mode must be read or unread"},
+		{[]string{"definitely-not-a-command"}, "unknown command"},
+	}
+	for _, c := range cases {
+		var stdout, stderr bytes.Buffer
+		code := Run(c.args, &stdout, &stderr)
+		if code != 2 {
+			t.Fatalf("Run(%v) = %d, want 2", c.args, code)
+		}
+		doc, err := toontest.Decode(strings.TrimSuffix(stdout.String(), "\n"))
+		if err != nil {
+			t.Fatalf("Run(%v) stdout %q is not TOON: %v", c.args, stdout.String(), err)
+		}
+		errObj := toonField(t, doc, "error")
+		if got := toonString(t, errObj, "code"); got != "usage" {
+			t.Fatalf("error.code = %q, want usage", got)
+		}
+		if got := toonString(t, errObj, "message"); !strings.Contains(got, c.message) {
+			t.Fatalf("error.message = %q, want containing %q", got, c.message)
+		}
+		if !strings.Contains(stderr.String(), "usage:") {
+			t.Fatalf("stderr usage dump must remain: %q", stderr.String())
+		}
+	}
+}
+
+func TestUsageErrorJSONAndTextModes(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--json", "archive"}, &stdout, &stderr); code != 2 {
+		t.Fatal("exit must stay 2")
+	}
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil || payload.Error.Code != "usage" {
+		t.Fatalf("JSON usage envelope = %q (%v)", stdout.String(), err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"--text", "archive"}, &stdout, &stderr); code != 2 || stdout.Len() != 0 {
+		t.Fatalf("text mode must keep stdout empty, got %q", stdout.String())
+	}
+}
+
+func TestUsageErrorHonorsFlagsParsedBeforeFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--json", "--definitely-unknown"}, &stdout, &stderr); code != 2 {
+		t.Fatal("exit must stay 2")
+	}
+	if !json.Valid(stdout.Bytes()) || !strings.Contains(stdout.String(), `"usage"`) {
+		t.Fatalf("top-level --json parse failure must emit strict JSON, got %q", stdout.String())
+	}
+	stdout.Reset()
+	if code := Run([]string{"--text", "--definitely-unknown"}, &stdout, &stderr); code != 2 || stdout.Len() != 0 {
+		t.Fatalf("top-level --text parse failure must keep stdout empty, got %q", stdout.String())
+	}
+	stdout.Reset()
+	if code := Run([]string{"archive", "--json", "--definitely-unknown"}, &stdout, &stderr); code != 2 || !json.Valid(stdout.Bytes()) {
+		t.Fatalf("command --json parse failure must emit strict JSON, got %q", stdout.String())
+	}
+	stdout.Reset()
+	if code := Run([]string{"archive", "--text", "--definitely-unknown"}, &stdout, &stderr); code != 2 || stdout.Len() != 0 {
+		t.Fatalf("command --text parse failure must keep stdout empty, got %q", stdout.String())
+	}
+}
+
 func googleError(status int, reason string) map[string]any {
 	return map[string]any{"error": map[string]any{"code": status, "message": "scope denied", "errors": []map[string]string{{"reason": reason}}}}
 }

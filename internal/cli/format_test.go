@@ -62,6 +62,7 @@ func TestToontestMirrorsMatchRealPayloads(t *testing.T) {
 		attachmentSavePayload{Account: "s1", File: "s2", Filename: "s3", Size: 7},
 		openPayload{Account: "s1", ThreadID: "s2", MessageID: "s3", File: "s1"},
 		errorEnvelopeSample("s1", "s2", "s3"),
+		usageErrorPayloadSample("s1", "s2"),
 	}
 	mirrors := toontest.Shapes("s1", "s2", "s3")
 	if len(real) != len(mirrors) {
@@ -185,6 +186,13 @@ func errorEnvelopeSample(s1, s2, s3 string) errorEnvelope {
 	output.Error.Account = s2
 	output.Error.ConfigKey = s3
 	output.Error.Config = s1
+	return output
+}
+
+func usageErrorPayloadSample(s1, s2 string) usageErrorPayload {
+	output := usageErrorPayload{}
+	output.Error.Code = s1
+	output.Error.Message = s2
 	return output
 }
 

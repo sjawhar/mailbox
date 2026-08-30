@@ -4,8 +4,9 @@ import "time"
 
 // Shapes returns one fully-populated instance per mailbox payload shape:
 // listing, read thread, status, action result, attachment list, attachment
-// save, open, and credential error envelope. These mirror internal/cli's
-// unexported JSON payloads; its contract test pins them field-for-field.
+// save, open, credential error envelope, and usage error envelope. These
+// mirror internal/cli's unexported JSON payloads; its contract test pins them
+// field-for-field.
 func Shapes(s1, s2, s3 string) []any {
 	return []any{
 		listingPayload{Account: s1, Filter: s2, Threads: []threadRow{{N: 1, ID: s2, Subject: s3, From: s1, Date: s2, Snippet: s3, Unread: true, Labels: []string{s1}}}},
@@ -45,6 +46,7 @@ func Shapes(s1, s2, s3 string) []any {
 		attachmentSavePayload{Account: s1, File: s2, Filename: s3, Size: 7},
 		openPayload{Account: s1, ThreadID: s2, MessageID: s3, File: s1},
 		errorEnvelope{Error: errorDetail{Code: s1, Account: s2, ConfigKey: s3, Config: s1}},
+		usageErrorPayload{Error: usageErrorDetail{Code: s1, Message: s2}},
 	}
 }
 
@@ -185,4 +187,13 @@ type errorDetail struct {
 	Account   string `json:"account"`
 	ConfigKey string `json:"config_key"`
 	Config    string `json:"config"`
+}
+
+type usageErrorPayload struct {
+	Error usageErrorDetail `json:"error"`
+}
+
+type usageErrorDetail struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }

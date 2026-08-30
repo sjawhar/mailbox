@@ -19,7 +19,7 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 	}
 	if next.filterFlag != "" {
 		if len(pos) > 0 {
-			return failUsage(cc.stderr, fmt.Errorf("--filter and thread ids are mutually exclusive"))
+			return next.failUsage(fmt.Errorf("--filter and thread ids are mutually exclusive"))
 		}
 		account, source, client, f, code := next.startBulkFilter()
 		if code != 0 {
@@ -31,7 +31,7 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 		return runBulkFilter(next, account, source, client, action, "trashed", f, nil, nil, true)
 	}
 	if err := requireArity(pos, 1, -1, action); err != nil {
-		return failUsage(cc.stderr, err)
+		return next.failUsage(err)
 	}
 	account, source, client, code := next.startWrite()
 	if code != 0 {
@@ -69,14 +69,14 @@ func runMark(cc *cmdCtx, args []string) int {
 	}
 	if next.filterFlag != "" {
 		if len(pos) > 1 {
-			return failUsage(cc.stderr, fmt.Errorf("--filter and thread ids are mutually exclusive"))
+			return next.failUsage(fmt.Errorf("--filter and thread ids are mutually exclusive"))
 		}
 		if err := requireArity(pos, 1, 1, "mark"); err != nil {
-			return failUsage(cc.stderr, err)
+			return next.failUsage(err)
 		}
 		mode := pos[0]
 		if mode != "read" && mode != "unread" {
-			return failUsage(cc.stderr, fmt.Errorf("mark mode must be read or unread"))
+			return next.failUsage(fmt.Errorf("mark mode must be read or unread"))
 		}
 		var add, remove []string
 		if mode == "read" {
@@ -91,11 +91,11 @@ func runMark(cc *cmdCtx, args []string) int {
 		return runBulkFilter(next, account, source, client, "mark", "marked "+mode, f, add, remove, false)
 	}
 	if err := requireArity(pos, 2, -1, "mark"); err != nil {
-		return failUsage(cc.stderr, err)
+		return next.failUsage(err)
 	}
 	mode := pos[0]
 	if mode != "read" && mode != "unread" {
-		return failUsage(cc.stderr, fmt.Errorf("mark mode must be read or unread"))
+		return next.failUsage(fmt.Errorf("mark mode must be read or unread"))
 	}
 	account, source, client, code := next.startWrite()
 	if code != 0 {
@@ -127,14 +127,14 @@ func runLabel(cc *cmdCtx, args []string) int {
 	}
 	if next.filterFlag != "" {
 		if len(pos) > 2 {
-			return failUsage(cc.stderr, fmt.Errorf("--filter and thread ids are mutually exclusive"))
+			return next.failUsage(fmt.Errorf("--filter and thread ids are mutually exclusive"))
 		}
 		if err := requireArity(pos, 2, 2, "label"); err != nil {
-			return failUsage(cc.stderr, err)
+			return next.failUsage(err)
 		}
 		mode := pos[0]
 		if mode != "add" && mode != "rm" {
-			return failUsage(cc.stderr, fmt.Errorf("label mode must be add or rm"))
+			return next.failUsage(fmt.Errorf("label mode must be add or rm"))
 		}
 		account, source, client, f, code := next.startBulkFilter()
 		if code != 0 {
@@ -157,11 +157,11 @@ func runLabel(cc *cmdCtx, args []string) int {
 		return runBulkFilter(next, account, source, client, "label", verb, f, add, remove, false)
 	}
 	if err := requireArity(pos, 3, -1, "label"); err != nil {
-		return failUsage(cc.stderr, err)
+		return next.failUsage(err)
 	}
 	mode := pos[0]
 	if mode != "add" && mode != "rm" {
-		return failUsage(cc.stderr, fmt.Errorf("label mode must be add or rm"))
+		return next.failUsage(fmt.Errorf("label mode must be add or rm"))
 	}
 	account, source, client, code := next.startWrite()
 	if code != 0 {

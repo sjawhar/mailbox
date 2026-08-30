@@ -202,7 +202,7 @@ func ParseTopLevel(args []string) (TopLevelFlags, []string, error) {
 	help := flags.Bool("help", false, "show help")
 	shortHelp := flags.Bool("h", false, "show help")
 	if err := flags.Parse(args); err != nil {
-		return TopLevelFlags{}, nil, err
+		return TopLevelFlags{Account: *account, Filter: *filter, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp}, nil, err
 	}
 	return TopLevelFlags{Account: *account, Filter: *filter, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp}, flags.Args(), nil
 }
@@ -210,18 +210,17 @@ func ParseTopLevel(args []string) (TopLevelFlags, []string, error) {
 // Run executes a one-shot command. args excludes the program name.
 func Run(args []string, stdout, stderr io.Writer) int {
 	global, rest, err := ParseTopLevel(args)
+	cc := &cmdCtx{accountFlag: global.Account, filterFlag: global.Filter, json: global.JSON, text: global.Text, stdout: stdout, stderr: stderr, stdin: os.Stdin, rawArgs: args}
 	if err != nil {
-		return failUsage(stderr, err)
+		return cc.failUsage(err)
 	}
 	if global.Help {
 		PrintHelp(stdout)
 		return 0
 	}
 	if len(rest) == 0 {
-		return failUsage(stderr, nil)
+		return cc.failUsage(nil)
 	}
-
-	cc := &cmdCtx{accountFlag: global.Account, filterFlag: global.Filter, json: global.JSON, text: global.Text, stdout: stdout, stderr: stderr, stdin: os.Stdin, rawArgs: args}
 	if rest[0] == "__mint" {
 		return runMint(cc, rest[1:])
 	}
@@ -231,9 +230,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	command, found := commandByName(rest[0])
 	if !found {
-		fmt.Fprintf(stderr, "mailbox: unknown command %q\n", rest[0])
-		usage(stderr)
-		return 2
+		return cc.failUsage(fmt.Errorf("unknown command %q", rest[0]))
 	}
 	return command.run(cc, rest[1:])
 }
@@ -262,7 +259,12 @@ func (cc *cmdCtx) flags(name string) commonFlags {
 func (cc *cmdCtx) parse(cf commonFlags, args []string) (pos []string, next *cmdCtx, done bool, code int) {
 	pos, err := parseInterspersed(cf.fs, args)
 	if err != nil {
-		return nil, nil, false, failUsage(cc.stderr, err)
+		failed := *cc
+		failed.accountFlag = *cf.account
+		failed.json = *cf.json
+		failed.text = *cf.text
+		failed.filterFlag = *cf.filter
+		return nil, nil, false, failed.failUsage(err)
 	}
 	copy := *cc
 	copy.accountFlag = *cf.account
@@ -271,7 +273,7 @@ func (cc *cmdCtx) parse(cf commonFlags, args []string) (pos []string, next *cmdC
 	copy.filterFlag = *cf.filter
 	next = &copy
 	if *cf.filter != "" && !filterCommands[cf.fs.Name()] {
-		return nil, nil, false, failUsage(cc.stderr, fmt.Errorf("--filter is not supported by %s", cf.fs.Name()))
+		return nil, nil, false, next.failUsage(fmt.Errorf("--filter is not supported by %s", cf.fs.Name()))
 	}
 	if *cf.help {
 		if command, ok := commandByName(cf.fs.Name()); ok {
@@ -413,6 +415,13 @@ type errorEnvelope struct {
 	} `json:"error"`
 }
 
+type usageErrorPayload struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
 func (cc *cmdCtx) needsCredential(err *auth.NeedsCredentialError) int {
 	if cc.format() == FormatText {
 		fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
@@ -464,11 +473,22 @@ func (cc *cmdCtx) retrySend(source *auth.Source, action func() error) error {
 	return action()
 }
 
-func failUsage(stderr io.Writer, err error) int {
+func (cc *cmdCtx) failUsage(err error) int {
 	if err != nil {
-		fmt.Fprintf(stderr, "mailbox: %v\n", err)
+		fmt.Fprintf(cc.stderr, "mailbox: %v\n", err)
 	}
-	usage(stderr)
+	usage(cc.stderr)
+	if cc.format() != FormatText {
+		payload := usageErrorPayload{}
+		payload.Error.Code = "usage"
+		payload.Error.Message = "missing or unknown command"
+		if err != nil {
+			payload.Error.Message = err.Error()
+		}
+		if writeErr := cc.writeMachine(payload); writeErr != nil {
+			fmt.Fprintf(cc.stderr, "mailbox: write usage error output: %v\n", writeErr)
+		}
+	}
 	return 2
 }
 

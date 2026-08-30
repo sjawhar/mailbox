@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/mailbox/internal/toon/toontest"
 )
 
 func TestMintSubcommandUsesEnvWithoutLoadingConfig(t *testing.T) {
@@ -35,8 +37,19 @@ func TestMintSubcommandUsesEnvWithoutLoadingConfig(t *testing.T) {
 func TestMintSubcommandRejectsMissingEnv(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"__mint"}, &stdout, &stderr)
-	if code != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "requires --env VAR") {
+	if code != 2 || !strings.Contains(stderr.String(), "requires --env VAR") {
 		t.Fatalf("result = %d, %q, %q", code, stdout.String(), stderr.String())
+	}
+	doc, err := toontest.Decode(strings.TrimSuffix(stdout.String(), "\n"))
+	if err != nil {
+		t.Fatalf("decode TOON usage envelope %q: %v", stdout.String(), err)
+	}
+	errObj := toonField(t, doc, "error")
+	if got := toonString(t, errObj, "code"); got != "usage" {
+		t.Fatalf("error.code = %q, want usage", got)
+	}
+	if got := toonString(t, errObj, "message"); !strings.Contains(got, "requires --env VAR") {
+		t.Fatalf("error.message = %q, want missing env refusal", got)
 	}
 }
 

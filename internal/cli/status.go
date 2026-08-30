@@ -19,7 +19,7 @@ func runStatus(cc *cmdCtx, args []string) int {
 		return code
 	}
 	if err := requireArity(pos, 0, 0, "status"); err != nil {
-		return failUsage(cc.stderr, err)
+		return next.failUsage(err)
 	}
 
 	if err := next.loadConfig(); err != nil {

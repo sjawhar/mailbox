@@ -795,8 +795,19 @@ func TestSendGrammar(t *testing.T) {
 			g := newGmailTestServer(t)
 			newSendRig(t, g, nonInteractiveSendSource())
 			code, stdout, stderr := runConfiguredSend(tc.args...)
-			if code != 2 || stdout != "" || !strings.Contains(stderr, tc.want) {
+			if code != 2 || !strings.Contains(stderr, tc.want) {
 				t.Fatalf("%s = %d, stdout=%q, stderr=%q", tc.name, code, stdout, stderr)
+			}
+			doc, err := toontest.Decode(strings.TrimSuffix(stdout, "\n"))
+			if err != nil {
+				t.Fatalf("decode TOON usage envelope %q: %v", stdout, err)
+			}
+			errObj := toonField(t, doc, "error")
+			if got := toonString(t, errObj, "code"); got != "usage" {
+				t.Fatalf("error.code = %q, want usage", got)
+			}
+			if got := toonString(t, errObj, "message"); !strings.Contains(got, tc.want) {
+				t.Fatalf("error.message = %q, want containing %q", got, tc.want)
 			}
 		})
 	}

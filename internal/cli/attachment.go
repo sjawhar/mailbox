@@ -18,7 +18,7 @@ func runAttachment(cc *cmdCtx, args []string) int {
 		return code
 	}
 	if err := requireArity(pos, 1, 2, "attachment"); err != nil {
-		return failUsage(cc.stderr, err)
+		return next.failUsage(err)
 	}
 	account, source, client, code := next.start()
 	if code != 0 {
@@ -41,7 +41,7 @@ func runAttachment(cc *cmdCtx, args []string) int {
 	}
 	n, err := strconv.Atoi(pos[1])
 	if err != nil || n < 1 {
-		return failUsage(next.stderr, fmt.Errorf("attachment number must be a positive integer"))
+		return next.failUsage(fmt.Errorf("attachment number must be a positive integer"))
 	}
 	if n > len(attachments) {
 		return next.runtimeError(account, source, fmt.Errorf("attachment %d out of range: thread has %d attachments", n, len(attachments)))

@@ -21,10 +21,10 @@ func runInbox(cc *cmdCtx, args []string) int {
 		return code
 	}
 	if err := requireArity(pos, 0, 0, "inbox"); err != nil {
-		return failUsage(cc.stderr, err)
+		return next.failUsage(err)
 	}
 	if *max < 1 || *max > 500 {
-		return failUsage(cc.stderr, fmt.Errorf("--max must be in range 1..500"))
+		return next.failUsage(fmt.Errorf("--max must be in range 1..500"))
 	}
 	labels := []string{"INBOX"}
 	if *unread {
@@ -41,10 +41,10 @@ func runSearch(cc *cmdCtx, args []string) int {
 		return code
 	}
 	if err := requireArity(pos, 1, -1, "search"); err != nil {
-		return failUsage(cc.stderr, err)
+		return next.failUsage(err)
 	}
 	if *max < 1 || *max > 500 {
-		return failUsage(cc.stderr, fmt.Errorf("--max must be in range 1..500"))
+		return next.failUsage(fmt.Errorf("--max must be in range 1..500"))
 	}
 	return runListing(next, gmail.ListOptions{Query: strings.Join(pos, " "), MaxResults: *max})
 }
