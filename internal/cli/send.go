@@ -62,10 +62,10 @@ func runSend(cc *cmdCtx, args []string) int {
 		return code
 	}
 	if err := requireArity(pos, 0, 0, "send"); err != nil {
-		return failUsage(cc.stderr, err)
+		return next.failUsage(err)
 	}
 	if replySet && forwardSet {
-		return failUsage(cc.stderr, fmt.Errorf("--reply and --forward are mutually exclusive"))
+		return next.failUsage(fmt.Errorf("--reply and --forward are mutually exclusive"))
 	}
 
 	mode, threadRef := send.ModeCompose, ""
@@ -76,22 +76,22 @@ func runSend(cc *cmdCtx, args []string) int {
 		mode, threadRef = send.ModeForward, forward
 	}
 	if mode == send.ModeCompose && !subjectSet {
-		return failUsage(cc.stderr, fmt.Errorf("compose requires --subject"))
+		return next.failUsage(fmt.Errorf("compose requires --subject"))
 	}
 	if mode != send.ModeCompose && subjectSet {
-		return failUsage(cc.stderr, fmt.Errorf("--subject is only valid for compose"))
+		return next.failUsage(fmt.Errorf("--subject is only valid for compose"))
 	}
 	if bodySet && bodyFile != "" {
-		return failUsage(cc.stderr, fmt.Errorf("--body and --body-file are mutually exclusive"))
+		return next.failUsage(fmt.Errorf("--body and --body-file are mutually exclusive"))
 	}
 	if !bodySet && bodyFile == "" {
-		return failUsage(cc.stderr, fmt.Errorf("send requires --body or --body-file"))
+		return next.failUsage(fmt.Errorf("send requires --body or --body-file"))
 	}
 	if mode == send.ModeCompose && messageSet {
-		return failUsage(cc.stderr, fmt.Errorf("--message is only valid with --reply or --forward"))
+		return next.failUsage(fmt.Errorf("--message is only valid with --reply or --forward"))
 	}
 	if *sendNow && mode != send.ModeCompose && (!messageSet || message == "") {
-		return failUsage(cc.stderr, fmt.Errorf("--send requires --message=<id> on reply/forward: run the dry-run first and copy the message id it prints (target pinning)"))
+		return next.failUsage(fmt.Errorf("--send requires --message=<id> on reply/forward: run the dry-run first and copy the message id it prints (target pinning)"))
 	}
 	switch {
 	case body == "-" && bodySet, bodyFile == "-":

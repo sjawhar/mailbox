@@ -26,6 +26,7 @@ type cmdCtx struct {
 	stdin       io.Reader
 	rawArgs     []string
 	cfg         *auth.Config
+	filterFlag  string
 	acct        *auth.AccountConfig
 }
 
@@ -54,15 +55,15 @@ func commandSpecs() []commandSpec {
 		{
 			name:        "inbox",
 			description: "list inbox threads",
-			usage:       "mailbox inbox [--unread] [--max N] [--text|--json]",
-			help:        "Lists inbox threads. It takes no positional arguments; --unread restricts results to unread threads and --max sets 1–500 rows (default 25).",
+			usage:       "mailbox inbox [--unread] [--max N] [--filter NAME] [--text|--json]",
+			help:        "Lists inbox threads. It takes no positional arguments; --unread restricts results to unread threads, --max sets 1–500 rows (default 25), and --filter restricts rows to a named config filter.",
 			run:         runInbox,
 		},
 		{
 			name:        "search",
 			description: "search threads",
-			usage:       "mailbox search [--max N] [--text|--json] <query...>",
-			help:        "Searches threads with one or more query terms; --max sets 1–500 rows (default 25). Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax).",
+			usage:       "mailbox search [--max N] [--filter NAME] [--text|--json] <query...>",
+			help:        "Searches threads with one or more query terms; --max sets 1–500 rows (default 25) and --filter restricts rows to a named config filter. Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax).",
 			run:         runSearch,
 		},
 		{
@@ -82,29 +83,29 @@ func commandSpecs() []commandSpec {
 		{
 			name:        "archive",
 			description: "archive threads",
-			usage:       "mailbox archive [--text|--json] <thread>...",
-			help:        "Removes the INBOX label from one or more threads.",
+			usage:       "mailbox archive [--filter NAME] [--text|--json] [<thread>...]",
+			help:        "Removes the INBOX label from one or more threads, or every inbox thread matching --filter.",
 			run:         func(cc *cmdCtx, args []string) int { return runBulk(cc, "archive", args) },
 		},
 		{
 			name:        "trash",
 			description: "move threads to trash",
-			usage:       "mailbox trash [--text|--json] <thread>...",
-			help:        "Moves one or more threads to Trash.",
+			usage:       "mailbox trash [--filter NAME] [--text|--json] [<thread>...]",
+			help:        "Moves one or more threads to Trash, or every inbox thread matching --filter.",
 			run:         func(cc *cmdCtx, args []string) int { return runBulk(cc, "trash", args) },
 		},
 		{
 			name:        "mark",
 			description: "mark threads read or unread",
-			usage:       "mailbox mark [--text|--json] <read|unread> <thread>...",
-			help:        "Marks one or more threads read or unread.",
+			usage:       "mailbox mark [--filter NAME] [--text|--json] <read|unread> [<thread>...]",
+			help:        "Marks one or more threads read or unread, or every inbox thread matching --filter.",
 			run:         runMark,
 		},
 		{
 			name:        "label",
 			description: "add or remove a label",
-			usage:       "mailbox label [--text|--json] <add|rm> <label> <thread>...",
-			help:        "Adds or removes one Gmail label on one or more threads.",
+			usage:       "mailbox label [--filter NAME] [--text|--json] <add|rm> <label> [<thread>...]",
+			help:        "Adds or removes one Gmail label on one or more threads, or every inbox thread matching --filter.",
 			run:         runLabel,
 		},
 		{
@@ -161,6 +162,7 @@ func PrintHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "global flags:")
 	fmt.Fprintln(output, "  --account NAME   account name from config")
+	fmt.Fprintln(output, "  --filter NAME    named filter from config")
 	fmt.Fprintf(output, "  --json           %s\n", jsonFlagHelp)
 	fmt.Fprintf(output, "  --text           %s\n", textFlagHelp)
 	fmt.Fprintln(output, "  --help, -h       show this help")
@@ -184,7 +186,9 @@ type TopLevelFlags struct {
 	Account string
 	JSON    bool
 	Text    bool
+	Filter  string
 	Help    bool
+	Version bool
 }
 
 // ParseTopLevel parses global flags and returns the remaining subcommand
@@ -195,29 +199,30 @@ func ParseTopLevel(args []string) (TopLevelFlags, []string, error) {
 	account := flags.String("account", "", "account name from config")
 	jsonOutput := flags.Bool("json", false, "machine output")
 	textOutput := flags.Bool("text", false, "human output")
+	filter := flags.String("filter", "", "named filter from config")
 	help := flags.Bool("help", false, "show help")
 	shortHelp := flags.Bool("h", false, "show help")
+	version := flags.Bool("version", false, "show version")
 	if err := flags.Parse(args); err != nil {
-		return TopLevelFlags{}, nil, err
+		return TopLevelFlags{Account: *account, Filter: *filter, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp, Version: *version}, nil, err
 	}
-	return TopLevelFlags{Account: *account, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp}, flags.Args(), nil
+	return TopLevelFlags{Account: *account, Filter: *filter, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp, Version: *version}, flags.Args(), nil
 }
 
 // Run executes a one-shot command. args excludes the program name.
 func Run(args []string, stdout, stderr io.Writer) int {
 	global, rest, err := ParseTopLevel(args)
+	cc := &cmdCtx{accountFlag: global.Account, filterFlag: global.Filter, json: global.JSON, text: global.Text, stdout: stdout, stderr: stderr, stdin: os.Stdin, rawArgs: args}
 	if err != nil {
-		return failUsage(stderr, err)
+		return cc.failUsage(err)
 	}
 	if global.Help {
 		PrintHelp(stdout)
 		return 0
 	}
 	if len(rest) == 0 {
-		return failUsage(stderr, nil)
+		return cc.failUsage(nil)
 	}
-
-	cc := &cmdCtx{accountFlag: global.Account, json: global.JSON, text: global.Text, stdout: stdout, stderr: stderr, stdin: os.Stdin, rawArgs: args}
 	if rest[0] == "__mint" {
 		return runMint(cc, rest[1:])
 	}
@@ -227,9 +232,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	command, found := commandByName(rest[0])
 	if !found {
-		fmt.Fprintf(stderr, "mailbox: unknown command %q\n", rest[0])
-		usage(stderr)
-		return 2
+		return cc.failUsage(fmt.Errorf("unknown command %q", rest[0]))
 	}
 	return command.run(cc, rest[1:])
 }
@@ -237,6 +240,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 type commonFlags struct {
 	fs         *flag.FlagSet
 	account    *string
+	filter     *string
 	json, text *bool
 	help       *bool
 }
@@ -246,23 +250,33 @@ func (cc *cmdCtx) flags(name string) commonFlags {
 	fs.SetOutput(io.Discard)
 	account := fs.String("account", cc.accountFlag, "account name from config")
 	jsonOutput := fs.Bool("json", cc.json, "machine output")
+	filter := fs.String("filter", cc.filterFlag, "named filter from config")
 	textOutput := fs.Bool("text", cc.text, "human output")
 	help := false
 	fs.BoolVar(&help, "help", false, "show help")
 	fs.BoolVar(&help, "h", false, "show help")
-	return commonFlags{fs: fs, account: account, json: jsonOutput, text: textOutput, help: &help}
+	return commonFlags{fs: fs, account: account, filter: filter, json: jsonOutput, text: textOutput, help: &help}
 }
 
 func (cc *cmdCtx) parse(cf commonFlags, args []string) (pos []string, next *cmdCtx, done bool, code int) {
 	pos, err := parseInterspersed(cf.fs, args)
 	if err != nil {
-		return nil, nil, false, failUsage(cc.stderr, err)
+		failed := *cc
+		failed.accountFlag = *cf.account
+		failed.json = *cf.json
+		failed.text = *cf.text
+		failed.filterFlag = *cf.filter
+		return nil, nil, false, failed.failUsage(err)
 	}
 	copy := *cc
 	copy.accountFlag = *cf.account
 	copy.json = *cf.json
 	copy.text = *cf.text
+	copy.filterFlag = *cf.filter
 	next = &copy
+	if *cf.filter != "" && !filterCommands[cf.fs.Name()] {
+		return nil, nil, false, next.failUsage(fmt.Errorf("--filter is not supported by %s", cf.fs.Name()))
+	}
 	if *cf.help {
 		if command, ok := commandByName(cf.fs.Name()); ok {
 			printCommandHelp(next.stdout, command)
@@ -270,6 +284,15 @@ func (cc *cmdCtx) parse(cf commonFlags, args []string) (pos []string, next *cmdC
 		return pos, next, true, 0
 	}
 	return pos, next, false, 0
+}
+
+var filterCommands = map[string]bool{
+	"inbox":   true,
+	"search":  true,
+	"archive": true,
+	"trash":   true,
+	"mark":    true,
+	"label":   true,
 }
 
 func printCommandHelp(output io.Writer, spec commandSpec) {
@@ -362,27 +385,32 @@ func (cc *cmdCtx) runtimeErrorForClass(_ string, source *auth.Source, err error,
 		return cc.needsCredential(credentialError)
 	}
 	fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
-	if source != nil && gmail.IsInsufficientScope(err) {
-		route, scope := source.LastRoute(), "gmail.readonly"
-		switch class {
-		case auth.ClassWrite:
-			route, scope = source.WriteRoute(), "gmail.modify"
-		case auth.ClassSend:
-			route, scope = source.SendRoute(), "gmail.send"
-		}
-		var typed *gmail.ErrInsufficientScope
-		if errors.As(err, &typed) {
-			scope = typed.Scope
-			switch scope {
-			case "gmail.modify":
-				class, route = auth.ClassWrite, source.WriteRoute()
-			case "gmail.send":
-				class, route = auth.ClassSend, source.SendRoute()
-			}
-		}
-		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ScopeHint(source.Account(), class, route, scope))
-	}
+	cc.emitScopeHint(source, err, class)
 	return 1
+}
+
+func (cc *cmdCtx) emitScopeHint(source *auth.Source, err error, class auth.Class) {
+	if source == nil || !gmail.IsInsufficientScope(err) {
+		return
+	}
+	route, scope := source.LastRoute(), "gmail.readonly"
+	switch class {
+	case auth.ClassWrite:
+		route, scope = source.WriteRoute(), "gmail.modify"
+	case auth.ClassSend:
+		route, scope = source.SendRoute(), "gmail.send"
+	}
+	var typed *gmail.ErrInsufficientScope
+	if errors.As(err, &typed) {
+		scope = typed.Scope
+		switch scope {
+		case "gmail.modify":
+			class, route = auth.ClassWrite, source.WriteRoute()
+		case "gmail.send":
+			class, route = auth.ClassSend, source.SendRoute()
+		}
+	}
+	fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ScopeHint(source.Account(), class, route, scope))
 }
 
 type errorEnvelope struct {
@@ -391,6 +419,13 @@ type errorEnvelope struct {
 		Account   string `json:"account"`
 		ConfigKey string `json:"config_key"`
 		Config    string `json:"config"`
+	} `json:"error"`
+}
+
+type usageErrorPayload struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
 	} `json:"error"`
 }
 
@@ -445,11 +480,22 @@ func (cc *cmdCtx) retrySend(source *auth.Source, action func() error) error {
 	return action()
 }
 
-func failUsage(stderr io.Writer, err error) int {
+func (cc *cmdCtx) failUsage(err error) int {
 	if err != nil {
-		fmt.Fprintf(stderr, "mailbox: %v\n", err)
+		fmt.Fprintf(cc.stderr, "mailbox: %v\n", err)
 	}
-	usage(stderr)
+	usage(cc.stderr)
+	if cc.format() != FormatText {
+		payload := usageErrorPayload{}
+		payload.Error.Code = "usage"
+		payload.Error.Message = "missing or unknown command"
+		if err != nil {
+			payload.Error.Message = err.Error()
+		}
+		if writeErr := cc.writeMachine(payload); writeErr != nil {
+			fmt.Fprintf(cc.stderr, "mailbox: write usage error output: %v\n", writeErr)
+		}
+	}
 	return 2
 }
 

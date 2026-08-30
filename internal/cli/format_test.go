@@ -53,14 +53,16 @@ func TestAgentEnvironmentPresenceNotValue(t *testing.T) {
 
 func TestToontestMirrorsMatchRealPayloads(t *testing.T) {
 	real := []any{
-		listingPayload{Account: "s1", Threads: []threadRow{{N: 1, ID: "s2", Subject: "s3", From: "s1", Date: "s2", Snippet: "s3", Unread: true, Labels: []string{"s1"}}}},
+		listingPayload{Account: "s1", Filter: "s2", Threads: []threadRow{{N: 1, ID: "s2", Subject: "s3", From: "s1", Date: "s2", Snippet: "s3", Unread: true, Labels: []string{"s1"}}}},
 		readPayloadSample("s1", "s2", "s3"),
 		statusSample("s1", "s2", "s3"),
 		actionPayload{Account: "s1", Action: "s2", ThreadIDs: []string{"s3"}, OK: true},
+		filterActionPayload{Account: "s1", Action: "s2", Filter: "s3", Matched: 1, Attempted: 1, Succeeded: []string{"s1"}, Failed: []filterActionFailure{{ID: "s2", Status: 7, Reason: "s3"}}, OK: true},
 		attachmentListSample("s1", "s2", "s3"),
 		attachmentSavePayload{Account: "s1", File: "s2", Filename: "s3", Size: 7},
 		openPayload{Account: "s1", ThreadID: "s2", MessageID: "s3", File: "s1"},
 		errorEnvelopeSample("s1", "s2", "s3"),
+		usageErrorPayloadSample("s1", "s2"),
 	}
 	mirrors := toontest.Shapes("s1", "s2", "s3")
 	if len(real) != len(mirrors) {
@@ -184,6 +186,13 @@ func errorEnvelopeSample(s1, s2, s3 string) errorEnvelope {
 	output.Error.Account = s2
 	output.Error.ConfigKey = s3
 	output.Error.Config = s1
+	return output
+}
+
+func usageErrorPayloadSample(s1, s2 string) usageErrorPayload {
+	output := usageErrorPayload{}
+	output.Error.Code = s1
+	output.Error.Message = s2
 	return output
 }
 

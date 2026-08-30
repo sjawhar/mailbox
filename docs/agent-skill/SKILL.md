@@ -11,25 +11,25 @@ Use `mailbox` for one-shot Gmail triage commands. Run `mailbox <command> --help`
 
 | Command | Usage | Description |
 | --- | --- | --- |
-| `inbox` | `mailbox inbox [--unread] [--max N] [--text\|--json]` | list inbox threads |
-| `search` | `mailbox search [--max N] [--text\|--json] <query...>` | search threads |
+| `inbox` | `mailbox inbox [--unread] [--max N] [--filter NAME] [--text\|--json]` | list inbox threads |
+| `search` | `mailbox search [--max N] [--filter NAME] [--text\|--json] <query...>` | search threads |
 | `read` | `mailbox read [--full] [--text\|--json] <thread>` | read a thread |
 | `open` | `mailbox open [--text\|--json] <thread>` | open thread HTML in a browser |
-| `archive` | `mailbox archive [--text\|--json] <thread>...` | archive threads |
-| `trash` | `mailbox trash [--text\|--json] <thread>...` | move threads to trash |
-| `mark` | `mailbox mark [--text\|--json] <read\|unread> <thread>...` | mark threads read or unread |
-| `label` | `mailbox label [--text\|--json] <add\|rm> <label> <thread>...` | add or remove a label |
+| `archive` | `mailbox archive [--filter NAME] [--text\|--json] [<thread>...]` | archive threads |
+| `trash` | `mailbox trash [--filter NAME] [--text\|--json] [<thread>...]` | move threads to trash |
+| `mark` | `mailbox mark [--filter NAME] [--text\|--json] <read\|unread> [<thread>...]` | mark threads read or unread |
+| `label` | `mailbox label [--filter NAME] [--text\|--json] <add\|rm> <label> [<thread>...]` | add or remove a label |
 | `attachment` | `mailbox attachment [-o PATH] [--text\|--json] <thread> [attachment]` | list or save attachments |
 | `status` | `mailbox status [--text\|--json]` | show configured account status |
 | `send` | `mailbox send [options]` | compose, reply, or forward mail (dry-run by default) |
 
 ### `inbox`
 
-Lists inbox threads. It takes no positional arguments; --unread restricts results to unread threads and --max sets 1–500 rows (default 25).
+Lists inbox threads. It takes no positional arguments; --unread restricts results to unread threads, --max sets 1–500 rows (default 25), and --filter restricts rows to a named config filter.
 
 ### `search`
 
-Searches threads with one or more query terms; --max sets 1–500 rows (default 25). Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax).
+Searches threads with one or more query terms; --max sets 1–500 rows (default 25) and --filter restricts rows to a named config filter. Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax).
 
 ### `read`
 
@@ -41,19 +41,19 @@ Renders the newest HTML message from one thread and hands it to the system brows
 
 ### `archive`
 
-Removes the INBOX label from one or more threads.
+Removes the INBOX label from one or more threads, or every inbox thread matching --filter.
 
 ### `trash`
 
-Moves one or more threads to Trash.
+Moves one or more threads to Trash, or every inbox thread matching --filter.
 
 ### `mark`
 
-Marks one or more threads read or unread.
+Marks one or more threads read or unread, or every inbox thread matching --filter.
 
 ### `label`
 
-Adds or removes one Gmail label on one or more threads.
+Adds or removes one Gmail label on one or more threads, or every inbox thread matching --filter.
 
 ### `attachment`
 

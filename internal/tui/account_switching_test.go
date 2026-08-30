@@ -22,7 +22,7 @@ func TestSwitchAccountUsesConfiguredDeclarationOrder(t *testing.T) {
 
 func TestSwitchAccountDiscardsPriorRequests(t *testing.T) {
 	model, api := newTestApp(testThreads(1))
-	stale := listThreadsCmd(model.currentRequest(listOperation), "")
+	stale := listThreadsCmd(model.currentRequest(listOperation), "", nil)
 	model = switchToPersonal(t, model, &fakeAPI{threads: testThreads(1), attachments: make(map[string][]byte)})
 	message := runCmd(t, stale)
 	model, _ = update(t, model, message)

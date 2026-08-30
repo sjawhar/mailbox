@@ -15,17 +15,23 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sjawhar/mailbox/internal/auth"
+	"github.com/sjawhar/mailbox/internal/filter"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/render"
 )
 
 // Run starts the interactive TUI on the configured account and blocks until quit.
-func Run(cfg *auth.Config, initial *auth.AccountConfig) error {
+func Run(cfg *auth.Config, initial *auth.AccountConfig, startFilter string) error {
+	filterIndex, err := startFilterIndex(cfg, startFilter)
+	if err != nil {
+		return err
+	}
 	account, err := newAccountCtx(cfg, initial)
 	if err != nil {
 		return err
 	}
 	model := newApp(account)
+	model.filterIndex = filterIndex
 	model.loading = true
 	_, err = tea.NewProgram(model, tea.WithAltScreen()).Run()
 	return err
@@ -115,17 +121,19 @@ const (
 	labelPickerView
 	threadView
 	attachmentPickerView
-	replyView
+	composeToView
+	composeSubjectView
 	replyConfirmView
 )
 
 type pendingAction struct {
-	action  string
-	ids     []string
-	add     []string
-	remove  []string
-	advance bool
-	retried bool
+	action            string
+	ids               []string
+	add               []string
+	remove            []string
+	advance           bool
+	retried           bool
+	listingGeneration uint64
 }
 
 type app struct {
@@ -134,21 +142,27 @@ type app struct {
 	contexts map[string]*accountCtx
 	ctx      *accountCtx
 
-	view        viewState
-	list        inboxModel
-	thread      threadModel
-	reply       replyModel
-	preview     previewModel
-	search      textinput.Model
-	label       textinput.Model
-	labelCursor int
-	viewport    viewport.Model
-	spinner     spinner.Model
+	view           viewState
+	list           inboxModel
+	thread         threadModel
+	reply          replyModel
+	composeState   composeState
+	composeOrigin  viewState
+	preview        previewModel
+	search         textinput.Model
+	label          textinput.Model
+	composeTo      textinput.Model
+	composeSubject textinput.Model
+	labelCursor    int
+	viewport       viewport.Model
+	spinner        spinner.Model
 
 	status       string
 	statusError  bool
 	statusNote   string
 	loading      bool
+	listLoaded   bool
+	filterIndex  int
 	layout       layoutMetrics
 	pending      *pendingAction
 	pendingSend  *pendingSend
@@ -171,24 +185,29 @@ func newApp(account *accountCtx) app {
 	label := textinput.New()
 	label.Prompt = labelPrompt
 	label.Placeholder = "type to filter"
+	composeTo := newComposeInput("To: ", "recipient@example.test")
+	composeSubject := newComposeInput("Subject: ", "Message subject")
 	layout := newLayoutMetrics(defaultTerminalWidth, defaultTerminalHeight)
 	search.Width = layout.searchInputWidth
 	label.Width = layout.labelInputWidth
-
+	composeTo.Width = layout.searchInputWidth
+	composeSubject.Width = layout.searchInputWidth
 	model := app{
-		cfg:      account.cfg,
-		account:  account.account,
-		contexts: map[string]*accountCtx{account.account: account},
-		ctx:      account,
-		view:     listView,
-		list:     newInboxModel(),
-		preview:  newPreviewModel(),
-		search:   search,
-		label:    label,
-		viewport: viewport.New(layout.readerWidth, defaultViewportHeight),
-		spinner:  spinner.New(),
-		layout:   layout,
-		pinned:   os.Getenv("MAILBOX_TOKEN") != "",
+		cfg:            account.cfg,
+		account:        account.account,
+		contexts:       map[string]*accountCtx{account.account: account},
+		ctx:            account,
+		view:           listView,
+		list:           newInboxModel(),
+		preview:        newPreviewModel(),
+		search:         search,
+		label:          label,
+		composeTo:      composeTo,
+		composeSubject: composeSubject,
+		viewport:       viewport.New(layout.readerWidth, defaultViewportHeight),
+		spinner:        spinner.New(),
+		layout:         layout,
+		pinned:         os.Getenv("MAILBOX_TOKEN") != "",
 	}
 	model.generations[listOperation] = 1
 	model.status = model.readCommandStatus()
@@ -215,7 +234,43 @@ func (m app) firstReadCommand() tea.Cmd {
 }
 
 func (m app) listReadCommand() tea.Cmd {
-	return m.loadingCmd(listThreadsCmd(m.currentRequest(listOperation), m.list.query))
+	return m.loadingCmd(listThreadsCmd(m.currentRequest(listOperation), m.list.query, m.activeFilter()))
+}
+
+func (m app) activeFilter() *filter.Filter {
+	if m.filterIndex == 0 {
+		return nil
+	}
+	return m.cfg.Filters[m.filterIndex-1]
+}
+
+func (m app) activeFilterName() string {
+	if active := m.activeFilter(); active != nil {
+		return active.Name
+	}
+	return ""
+}
+
+func startFilterIndex(cfg *auth.Config, name string) (int, error) {
+	if name == "" {
+		return 0, nil
+	}
+	for i, active := range cfg.Filters {
+		if active.Name == name {
+			return i + 1, nil
+		}
+	}
+	if names := cfg.FilterNames(); len(names) > 0 {
+		return 0, fmt.Errorf("unknown filter %q; defined filters: %s", name, strings.Join(names, ", "))
+	}
+	return 0, fmt.Errorf("unknown filter %q; no filters are defined (config: %s)", name, cfg.DisplayPath())
+}
+
+func (m *app) beginListing() asyncRequest {
+	m.list.clearSelection()
+	m.listLoaded = false
+	m.beginRequest(threadOperation)
+	return m.beginRequest(listOperation)
 }
 
 func (m app) loadingCmd(command tea.Cmd) tea.Cmd {
@@ -269,6 +324,7 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 			m.loading = false
 		}
 		m.list.setRows(message.threads)
+		m.listLoaded = true
 		m.preview.requestedID = ""
 		m.preview.content = ""
 		m.preview.err = ""
@@ -282,12 +338,12 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		command := m.requestPreview()
 		return m, command
 	case threadMsg:
-		if m.discardAsync(message) {
+		if m.discardAsync(message) || !m.threadRequestFromCurrentListing(message.request) {
 			return m, nil
 		}
 		m.loading = false
 		m.view = threadView
-		m.thread = threadModel{thread: message.thread}
+		m.thread = threadModel{thread: message.thread, listingGeneration: message.request.listingGeneration}
 		if err := m.renderCurrentThread(); err != nil {
 			m.surfaceError(err)
 		}
@@ -340,6 +396,8 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.ctx.labelNameByID = labelNames(m.ctx.labels)
 		m.clearListingStatus()
 		return m, nil
+	case editorDoneMsg:
+		return m.finishEditor(message)
 	case profileMsg:
 		if m.discardAsync(message) {
 			return m, nil
@@ -354,6 +412,7 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.loading = false
 		m.pendingSend = nil
 		m.reply = replyModel{}
+		m.composeState = composeState{}
 		m.status = "sent — thread updated"
 		m.statusError = false
 		m.appendStatusNote(auth.SendScopeWarning(m.ctx.sendScope(), m.credentialConfigKey(auth.ClassSend)))
@@ -447,10 +506,19 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 			m.surfaceError(message.err)
 			return m, nil
 		}
-		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pending.retried {
-			m.pending.retried = true
-			m.ctx.invalidateWrite()
-			return m.startClassUnlock(auth.ClassWrite)
+		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) {
+			if m.pending.listingGeneration != m.generations[listOperation] {
+				m.loading = false
+				m.pending = nil
+				m.status = "write retry canceled — listing changed"
+				m.statusError = false
+				return m, nil
+			}
+			if !m.pending.retried {
+				m.pending.retried = true
+				m.ctx.invalidateWrite()
+				return m.startClassUnlock(auth.ClassWrite)
+			}
 		}
 		m.loading = false
 		m.pending = nil
@@ -462,6 +530,10 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		return m, nil
 	}
 }
+
+func (m app) threadRequestFromCurrentListing(request asyncRequest) bool {
+	return m.listLoaded && request.listingGeneration == m.generations[listOperation]
+}
 func (m app) View() string {
 	switch m.view {
 	case searchView:
@@ -472,8 +544,10 @@ func (m app) View() string {
 		return m.threadView()
 	case attachmentPickerView:
 		return m.attachmentPickerView()
-	case replyView:
-		return m.replyScreen()
+	case composeToView:
+		return m.composeToScreen()
+	case composeSubjectView:
+		return m.composeSubjectScreen()
 	case replyConfirmView:
 		return m.replyConfirmScreen()
 	default:
@@ -485,9 +559,10 @@ func (m *app) setSize(width, height int) {
 	m.layout = newLayoutMetrics(width, height)
 	m.search.Width = m.layout.searchInputWidth
 	m.label.Width = m.layout.labelInputWidth
+	m.composeTo.Width = m.layout.searchInputWidth
+	m.composeSubject.Width = m.layout.searchInputWidth
 	m.viewport.Width = m.layout.readerWidth
 	m.viewport.Height = m.layout.readerHeight
-	m.resizeReply()
 }
 
 func (m *app) clearStatus() {
@@ -669,8 +744,10 @@ func (m app) updateKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateThreadKey(message)
 	case attachmentPickerView:
 		return m.updateAttachmentKey(message)
-	case replyView:
-		return m.updateReplyKey(message)
+	case composeToView:
+		return m.updateComposeToKey(message)
+	case composeSubjectView:
+		return m.updateComposeSubjectKey(message)
 	case replyConfirmView:
 		return m.updateReplyConfirmKey(message)
 	default:
@@ -715,11 +792,14 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 		}
 		m.contexts[target.Name] = account
 	}
+	pendingWrite := m.pending != nil
+
 	m.account = target.Name
 	m.ctx = account
 	m.invalidateRequests()
 	m.view = listView
 	m.list = newInboxModel()
+	m.listLoaded = false
 	m.preview = newPreviewModel()
 	m.thread = threadModel{}
 	m.reply = replyModel{}
@@ -728,6 +808,9 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	m.loading = true
 	m.clearStatus()
 	m.status = m.readCommandStatus()
+	if pendingWrite {
+		m.appendStatusNote("write action continues in previous account")
+	}
 	return m, m.firstReadCommand()
 }
 

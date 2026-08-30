@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sjawhar/mailbox/internal/auth"
+	"github.com/sjawhar/mailbox/internal/filter"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/render"
 )
@@ -123,7 +124,7 @@ func (message openedMsg) requestRef() asyncRequest { return message.request }
 
 var openURL = render.OpenURL
 
-func listThreadsCmd(request asyncRequest, query string) tea.Cmd {
+func listThreadsCmd(request asyncRequest, query string, f *filter.Filter) tea.Cmd {
 	return func() tea.Msg {
 		opts := gmail.ListOptions{Query: query, MaxResults: 50}
 		if query == "" {
@@ -144,6 +145,7 @@ func listThreadsCmd(request asyncRequest, query string) tea.Cmd {
 		if query == "" {
 			threads = gmail.FilterThreadsWithLabel(threads, "INBOX")
 		}
+		threads = filter.FilterThreads(f, threads)
 		return threadsMsg{request: request, threads: threads}
 	}
 }

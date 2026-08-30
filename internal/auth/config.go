@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/sjawhar/mailbox/internal/filter"
 )
 
 const (
@@ -90,6 +92,7 @@ type Config struct {
 	DefaultPath       string
 	DefaultAccount    string
 	Accounts          []*AccountConfig
+	Filters           []*filter.Filter
 	ScrubEnv          []string
 	ScrubEnvPatterns  []string
 	CredentialTimeout time.Duration
@@ -114,11 +117,12 @@ type rawAccount struct {
 }
 
 type rawConfig struct {
-	DefaultAccount        *string               `toml:"default_account"`
-	ScrubEnv              []string              `toml:"scrub_env"`
-	ScrubEnvPatterns      []string              `toml:"scrub_env_patterns"`
-	CredentialTimeoutSecs *int                  `toml:"credential_timeout_secs"`
-	Accounts              map[string]rawAccount `toml:"accounts"`
+	DefaultAccount        *string                      `toml:"default_account"`
+	ScrubEnv              []string                     `toml:"scrub_env"`
+	ScrubEnvPatterns      []string                     `toml:"scrub_env_patterns"`
+	CredentialTimeoutSecs *int                         `toml:"credential_timeout_secs"`
+	Accounts              map[string]rawAccount        `toml:"accounts"`
+	Filters               map[string]map[string]string `toml:"filters"`
 }
 
 // LoadConfig loads the explicit or default mailbox configuration file.
@@ -245,7 +249,7 @@ func compileConfig(configPath string, raw rawConfig, keys []toml.Key) (*Config, 
 		timeout = time.Duration(*raw.CredentialTimeoutSecs) * time.Second
 	}
 
-	order := accountOrder(raw.Accounts, keys)
+	order := tableOrder(raw.Accounts, keys, "accounts")
 	accounts := make([]*AccountConfig, 0, len(order))
 	seenNames := make(map[string]string, len(order))
 	for _, name := range order {
@@ -264,6 +268,15 @@ func compileConfig(configPath string, raw rawConfig, keys []toml.Key) (*Config, 
 			return nil, err
 		}
 		accounts = append(accounts, account)
+	}
+
+	filters := make([]*filter.Filter, 0, len(raw.Filters))
+	for _, name := range tableOrder(raw.Filters, keys, "filters") {
+		compiled, err := filter.Compile(name, raw.Filters[name])
+		if err != nil {
+			return nil, configError(configPath, "%v", err)
+		}
+		filters = append(filters, compiled)
 	}
 
 	declaredVars := make(map[string]string)
@@ -310,21 +323,22 @@ func compileConfig(configPath string, raw rawConfig, keys []toml.Key) (*Config, 
 		Path:              configPath,
 		DefaultAccount:    defaultAccount,
 		Accounts:          accounts,
+		Filters:           filters,
 		ScrubEnv:          raw.ScrubEnv,
 		ScrubEnvPatterns:  raw.ScrubEnvPatterns,
 		CredentialTimeout: timeout,
 	}, nil
 }
 
-func accountOrder(accounts map[string]rawAccount, keys []toml.Key) []string {
-	order := make([]string, 0, len(accounts))
-	seen := make(map[string]struct{}, len(accounts))
+func tableOrder[V any](tables map[string]V, keys []toml.Key, parent string) []string {
+	order := make([]string, 0, len(tables))
+	seen := make(map[string]struct{}, len(tables))
 	for _, key := range keys {
-		if len(key) != 2 || key[0] != "accounts" {
+		if len(key) != 2 || key[0] != parent {
 			continue
 		}
 		name := key[1]
-		if _, exists := accounts[name]; !exists {
+		if _, exists := tables[name]; !exists {
 			continue
 		}
 		if _, duplicate := seen[name]; duplicate {
@@ -334,11 +348,11 @@ func accountOrder(accounts map[string]rawAccount, keys []toml.Key) []string {
 		order = append(order, name)
 	}
 
-	if len(order) == len(accounts) {
+	if len(order) == len(tables) {
 		return order
 	}
-	remaining := make([]string, 0, len(accounts)-len(order))
-	for name := range accounts {
+	remaining := make([]string, 0, len(tables)-len(order))
+	for name := range tables {
 		if _, found := seen[name]; !found {
 			remaining = append(remaining, name)
 		}
@@ -512,6 +526,32 @@ func (c *Config) AccountNames() []string {
 		names[i] = account.Name
 	}
 	return names
+}
+
+func (c *Config) Filter(name string) (*filter.Filter, bool) {
+	for _, f := range c.Filters {
+		if f.Name == name {
+			return f, true
+		}
+	}
+	return nil, false
+}
+
+func (c *Config) FilterNames() []string {
+	names := make([]string, len(c.Filters))
+	for i, f := range c.Filters {
+		names[i] = f.Name
+	}
+	return names
+}
+
+// DisplayPath names the config file for diagnostics: the loaded path, or
+// the default search location when no config file exists.
+func (c *Config) DisplayPath() string {
+	if c.Path != "" {
+		return c.Path
+	}
+	return c.DefaultPath
 }
 
 func (c *Config) ResolveAccount(flagValue string) (*AccountConfig, error) {

@@ -15,7 +15,7 @@ func TestCursorAndSelect(t *testing.T) {
 	rows := testThreads(3)
 	model, _ := newTestApp(rows)
 	model, _ = update(t, model, threadsMsg{request: model.currentRequest(listOperation), threads: rows})
-	for _, msg := range []tea.Msg{key("j"), key("j"), key(" "), key("k"), key(" ")} {
+	for _, msg := range []tea.Msg{key("j"), key("j"), key("v"), key(" "), key("k"), key(" ")} {
 		model, _ = update(t, model, msg)
 	}
 
@@ -166,7 +166,7 @@ func TestActAndAdvanceLastReturnsToList(t *testing.T) {
 	model.view = threadView
 	model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: rows[1]})
 
-	model, cmd := update(t, model, key("d"))
+	model, cmd := update(t, model, key("#"))
 	action := runCmd(t, cmd)
 	model, next := update(t, model, action)
 	if got, want := api.trashCalls[0], []string{rows[1].ID}; !reflect.DeepEqual(got, want) {
@@ -200,7 +200,7 @@ func TestPendingActionBlocksSecondWrite(t *testing.T) {
 
 	model, archive := update(t, model, key("e"))
 	pending := model.pending
-	model, second := update(t, model, key("d"))
+	model, second := update(t, model, key("#"))
 	if second != nil || model.pending != pending {
 		t.Fatalf("second action started while archive was pending: cmd=%v pending=%#v", second, model.pending)
 	}

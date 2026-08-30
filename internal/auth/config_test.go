@@ -388,3 +388,60 @@ send_credential_env = "SHARED_OAUTH_JSON"
 		t.Fatalf("shared env var across classes compiled: %v", err)
 	}
 }
+
+func TestLoadConfigCompilesFiltersInDeclarationOrder(t *testing.T) {
+	writeConfig(t, `default_account = "work"
+[accounts.work]
+read_credential_env = "WORK_TOKEN"
+
+[filters.zeta]
+from = "z@example\\.test"
+
+[filters.alpha]
+subject = "(?i)alpha"
+list = "dev\\.example"
+`)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := cfg.FilterNames()
+	if len(names) != 2 || names[0] != "zeta" || names[1] != "alpha" {
+		t.Fatalf("FilterNames() = %v, want declaration order [zeta alpha]", names)
+	}
+	if _, ok := cfg.Filter("alpha"); !ok {
+		t.Fatal("Filter(alpha) not found")
+	}
+	if _, ok := cfg.Filter("missing"); ok {
+		t.Fatal("Filter(missing) must not resolve")
+	}
+}
+
+func TestLoadConfigRejectsBadFilters(t *testing.T) {
+	cases := []struct{ body, want string }{
+		{"[filters.github]\nfrom = \"(unclosed\"", "filters.github.from: invalid regexp"},
+		{"[filters.github]\nsender = \"x\"", `filters.github: unknown field "sender"`},
+		{"[filters.BadName]\nfrom = \"x\"", "filters.BadName: invalid filter name"},
+		{"[filters.github]", "filters.github: at least one rule is required"},
+	}
+	for _, c := range cases {
+		t.Run(c.want, func(t *testing.T) {
+			writeConfig(t, "default_account = \"work\"\n[accounts.work]\nread_credential_env = \"WORK_TOKEN\"\n"+c.body)
+			_, err := LoadConfig()
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("LoadConfig(%q) error = %v, want containing %q", c.body, err, c.want)
+			}
+		})
+	}
+}
+
+func TestDisplayPathFallsBackToDefaultPath(t *testing.T) { // [G15]
+	loaded := &Config{Path: "/tmp/cfg/config.toml", DefaultPath: "/tmp/default/config.toml"}
+	if got := loaded.DisplayPath(); got != "/tmp/cfg/config.toml" {
+		t.Fatalf("DisplayPath() = %q, want the loaded path", got)
+	}
+	unloaded := &Config{DefaultPath: "/tmp/default/config.toml"} // the noConfig shape: Path empty
+	if got := unloaded.DisplayPath(); got != "/tmp/default/config.toml" {
+		t.Fatalf("DisplayPath() = %q, want the default path under noConfig", got)
+	}
+}

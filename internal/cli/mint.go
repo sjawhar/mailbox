@@ -17,13 +17,13 @@ func runMint(cc *cmdCtx, args []string) int {
 	envVar := fs.String("env", "", "")
 	pos, err := parseInterspersed(fs, args)
 	if err != nil {
-		return failUsage(cc.stderr, err)
+		return cc.failUsage(err)
 	}
 	if err := requireArity(pos, 0, 0, "__mint"); err != nil || *envVar == "" {
 		if err == nil {
 			err = fmt.Errorf("__mint requires --env VAR")
 		}
-		return failUsage(cc.stderr, err)
+		return cc.failUsage(err)
 	}
 	if err := auth.RunMintChild(context.Background(), *envVar, cc.stdout); err != nil {
 		fmt.Fprintf(cc.stderr, "mailbox __mint: %v\n", err)

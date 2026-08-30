@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -25,27 +26,41 @@ import (
 )
 
 type gmailTestServer struct {
-	t              *testing.T
-	server         *httptest.Server
-	listQuery      url.Values
-	batchRequests  []string
-	directRequests []string
-	labels         []map[string]any
-	profile        map[string]any
-	thread         map[string]any
-	listIDs        []string
-	attachment     []byte
-	metadata       map[string]map[string]any
-	messages       map[string]map[string]any
-	rawMessages    map[string][]byte
-	sentBodies     []map[string]any
-	sendStatus     int
-	readToken      string
-	rawMessageID   string
-	forbidden      bool
-	readForbidden  bool
-	readFailures   int
-	writeToken     string
+	t                  *testing.T
+	server             *httptest.Server
+	listQuery          url.Values
+	listCalls          int
+	batchRequests      []string
+	directRequests     []string
+	labels             []map[string]any
+	profile            map[string]any
+	thread             map[string]any
+	listPages          [][]string
+	listPageStatus     map[int]int
+	batchItemResponses map[string][]scriptedResponse
+	batchRequestStatus []int
+	batchCalls         int
+	batchWriteCalls    int
+	batchWriteIDs      [][]string
+	listIDs            []string
+	attachment         []byte
+	metadata           map[string]map[string]any
+	messages           map[string]map[string]any
+	rawMessages        map[string][]byte
+	sentBodies         []map[string]any
+	sendStatus         int
+	readToken          string
+	rawMessageID       string
+	forbidden          bool
+	readForbidden      bool
+	readFailures       int
+	writeToken         string
+}
+
+type scriptedResponse struct {
+	status     int
+	retryAfter string
+	reason     string
 }
 
 func newGmailTestServer(t *testing.T) *gmailTestServer {
@@ -86,12 +101,37 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.URL.Path == "/gmail/v1/users/me/threads" && r.Method == http.MethodGet:
+		g.listCalls++
 		g.listQuery = r.URL.Query()
-		threads := make([]map[string]any, len(g.listIDs))
-		for i, id := range g.listIDs {
+		page := 0
+		ids := g.listIDs
+		if g.listPages != nil {
+			if token := r.URL.Query().Get("pageToken"); token != "" {
+				var err error
+				page, err = strconv.Atoi(strings.TrimPrefix(token, "page-"))
+				if err != nil || token != fmt.Sprintf("page-%d", page) {
+					g.t.Fatalf("pageToken = %q, want page-N", token)
+				}
+			}
+			if page >= len(g.listPages) {
+				g.t.Fatalf("requested page %d, only %d fixture pages", page, len(g.listPages))
+			}
+			ids = g.listPages[page]
+		}
+		if status := g.listPageStatus[page]; status != 0 {
+			w.Header().Set("Retry-After", "0")
+			writeResponse(g.t, w, status, googleError(status, "rateLimitExceeded"))
+			return
+		}
+		threads := make([]map[string]any, len(ids))
+		for i, id := range ids {
 			threads[i] = map[string]any{"id": id, "snippet": "snippet " + id}
 		}
-		writeResponse(g.t, w, http.StatusOK, map[string]any{"threads": threads})
+		response := map[string]any{"threads": threads}
+		if g.listPages != nil && page+1 < len(g.listPages) {
+			response["nextPageToken"] = fmt.Sprintf("page-%d", page+1)
+		}
+		writeResponse(g.t, w, http.StatusOK, response)
 	case g.rawMessageID != "" && r.URL.Path == "/gmail/v1/users/me/messages/"+g.rawMessageID && r.Method == http.MethodGet:
 		if r.URL.Query().Get("format") != "minimal" {
 			g.t.Fatalf("raw message format = %q, want minimal", r.URL.Query().Get("format"))
@@ -179,6 +219,7 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
+	g.batchCalls++
 	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "multipart/mixed" {
 		g.t.Fatalf("batch content type = %q, parse error = %v", r.Header.Get("Content-Type"), err)
@@ -205,20 +246,60 @@ func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, req)
 	}
 
+	writeIDs := make([]string, 0, len(requests))
+	for _, request := range requests {
+		if request.Method == http.MethodPost {
+			writeIDs = append(writeIDs, batchThreadID(g.t, request.URL.Path))
+		}
+	}
+	if len(writeIDs) > 0 {
+		g.batchWriteCalls++
+		g.batchWriteIDs = append(g.batchWriteIDs, append([]string(nil), writeIDs...))
+		if len(g.batchRequestStatus) > 0 {
+			status := g.batchRequestStatus[0]
+			g.batchRequestStatus = g.batchRequestStatus[1:]
+			if status != 0 {
+				writeResponse(g.t, w, status, googleError(status, "authError"))
+				return
+			}
+		}
+	}
+
 	writer := multipart.NewWriter(w)
 	w.Header().Set("Content-Type", "multipart/mixed; boundary="+writer.Boundary())
 	for i, request := range requests {
 		status, body := http.StatusOK, `{}`
-		if strings.Contains(request.URL.RawQuery, "format=metadata") {
+		var responseHeaders string
+		if request.Method == http.MethodGet && strings.Contains(request.URL.RawQuery, "format=metadata") {
 			id := filepath.Base(request.URL.Path)
 			metadata := metadataThread(id)
 			if g.metadata != nil && g.metadata[id] != nil {
 				metadata = g.metadata[id]
 			}
 			body = string(mustJSON(g.t, metadata))
-		} else if g.forbidden {
-			status = http.StatusForbidden
-			body = string(mustJSON(g.t, googleError(http.StatusForbidden, "insufficientPermissions")))
+		} else if request.Method == http.MethodPost {
+			id := batchThreadID(g.t, request.URL.Path)
+			if script := g.batchItemResponses[id]; len(script) > 0 {
+				response := script[0]
+				g.batchItemResponses[id] = script[1:]
+				status = response.status
+				if status == 0 {
+					status = http.StatusOK
+				}
+				reason := response.reason
+				if reason == "" {
+					reason = "rateLimitExceeded"
+				}
+				if status != http.StatusOK {
+					body = string(mustJSON(g.t, googleError(status, reason)))
+				}
+				if response.retryAfter != "" {
+					responseHeaders = "Retry-After: " + response.retryAfter + "\r\n"
+				}
+			} else if g.forbidden {
+				status = http.StatusForbidden
+				body = string(mustJSON(g.t, googleError(http.StatusForbidden, "insufficientPermissions")))
+			}
 		}
 		header := textproto.MIMEHeader{}
 		header.Set("Content-Type", "application/http")
@@ -227,7 +308,7 @@ func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			g.t.Fatalf("create response part: %v", err)
 		}
-		if _, err := fmt.Fprintf(part, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n\r\n%s", status, http.StatusText(status), body); err != nil {
+		if _, err := fmt.Fprintf(part, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n%s\r\n%s", status, http.StatusText(status), responseHeaders, body); err != nil {
 			g.t.Fatalf("write response part: %v", err)
 		}
 	}
@@ -236,9 +317,28 @@ func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func batchThreadID(t *testing.T, path string) string {
+	t.Helper()
+	const prefix = "/gmail/v1/users/me/threads/"
+	id, found := strings.CutPrefix(path, prefix)
+	if !found {
+		t.Fatalf("batch mutation path = %q, want Gmail thread path", path)
+	}
+	id, _, found = strings.Cut(id, "/")
+	if !found || id == "" {
+		t.Fatalf("batch mutation path = %q, want thread id and action", path)
+	}
+	return id
+}
+
 func runCLI(t *testing.T, g *gmailTestServer, args ...string) (int, string, string) {
 	t.Helper()
-	setCLIConfig(t)
+	return runCLIWithConfig(t, g, "[accounts.work]\nread_credential_env = \"CLI_READ\"\n", args...)
+}
+
+func runCLIWithConfig(t *testing.T, g *gmailTestServer, config string, args ...string) (int, string, string) {
+	t.Helper()
+	setCLIConfigContents(t, config)
 	t.Setenv("MAILBOX_GMAIL_BASE_URL", g.server.URL)
 	t.Setenv("MAILBOX_TOKEN", "test-token")
 	if os.Getenv("MAILBOX_CACHE_DIR") == "" {
@@ -251,15 +351,25 @@ func runCLI(t *testing.T, g *gmailTestServer, args ...string) (int, string, stri
 
 func setCLIConfig(t *testing.T) {
 	t.Helper()
+	setCLIConfigContents(t, "[accounts.work]\nread_credential_env = \"CLI_READ\"\n")
+}
+
+func setCLIConfigContents(t *testing.T, contents string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.toml")
-	if err := os.WriteFile(path, []byte("[accounts.work]\nread_credential_env = \"CLI_READ\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("MAILBOX_CONFIG", path)
 }
 func runJSON(t *testing.T, g *gmailTestServer, args ...string) (int, map[string]any, string) {
 	t.Helper()
-	code, stdout, stderr := runCLI(t, g, args...)
+	return runJSONWithConfig(t, g, "[accounts.work]\nread_credential_env = \"CLI_READ\"\n", args...)
+}
+
+func runJSONWithConfig(t *testing.T, g *gmailTestServer, config string, args ...string) (int, map[string]any, string) {
+	t.Helper()
+	code, stdout, stderr := runCLIWithConfig(t, g, config, args...)
 	var value map[string]any
 	decoder := json.NewDecoder(strings.NewReader(stdout))
 	if err := decoder.Decode(&value); err != nil {
@@ -329,6 +439,107 @@ func TestInboxJSON(t *testing.T) {
 	}
 	if id, err := refs.Resolve("work", "2"); err != nil || id != "t2" {
 		t.Fatalf("second written ref = (%q, %v), want t2", id, err)
+	}
+}
+
+func TestInboxFilterKeepsMatchesAndNumbersRefs(t *testing.T) {
+	g := newGmailTestServer(t)
+	matching := metadataThread("t1")
+	matching["messages"].([]map[string]any)[0]["payload"].(map[string]any)["headers"].([]map[string]string)[0]["value"] = "GitHub <notifications@github.com>"
+	nonMatching := metadataThread("t2")
+	nonMatching["messages"].([]map[string]any)[0]["payload"].(map[string]any)["headers"].([]map[string]string)[0]["value"] = "Human <human@example.test>"
+	g.metadata = map[string]map[string]any{"t1": matching, "t2": nonMatching}
+
+	config := "[accounts.work]\nread_credential_env = \"CLI_READ\"\n\n[filters.github]\nfrom = \"notifications@github\\\\.com\"\n"
+	code, value, stderr := runJSONWithConfig(t, g, config, "inbox", "--filter", "github", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("inbox --filter = (%d, %q), want success", code, stderr)
+	}
+	if got := value["filter"]; got != "github" {
+		t.Fatalf("payload filter = %#v, want github", got)
+	}
+	threads, ok := value["threads"].([]any)
+	if !ok || len(threads) != 1 {
+		t.Fatalf("filtered threads = %#v, want one row", value["threads"])
+	}
+	row := threads[0].(map[string]any)
+	if got := row["id"]; got != "t1" {
+		t.Fatalf("filtered thread ID = %#v, want t1", got)
+	}
+	if got := row["n"]; got != float64(1) {
+		t.Fatalf("filtered thread number = %#v, want 1", got)
+	}
+	if id, err := refs.Resolve("work", "1"); err != nil || id != "t1" {
+		t.Fatalf("first filtered ref = (%q, %v), want t1", id, err)
+	}
+	if _, err := refs.Resolve("work", "2"); err == nil {
+		t.Fatal("filtered-out thread remained addressable by a numbered reference")
+	}
+}
+
+func TestInboxFilterUnknownNameIsHardError(t *testing.T) {
+	g := newGmailTestServer(t)
+	config := "[accounts.work]\nread_credential_env = \"CLI_READ\"\n\n[filters.github]\nfrom = \"notifications@github\\\\.com\"\n\n[filters.hiring]\nsubject = \"(?i)red.?team\"\n"
+	code, _, stderr := runCLIWithConfig(t, g, config, "inbox", "--filter", "nope")
+	if code != 1 || !strings.Contains(stderr, `unknown filter "nope"; defined filters: github, hiring`) {
+		t.Fatalf("inbox unknown filter = (%d, %q), want hard error with defined names", code, stderr)
+	}
+	if g.listCalls != 0 {
+		t.Fatalf("unknown filter listed threads %d time(s), want no API call", g.listCalls)
+	}
+}
+
+func TestInboxFilterUnknownWithNoConfigNamesDefaultPath(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	previous, wasSet := os.LookupEnv("MAILBOX_CONFIG")
+	if err := os.Unsetenv("MAILBOX_CONFIG"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("MAILBOX_CONFIG", previous)
+			return
+		}
+		_ = os.Unsetenv("MAILBOX_CONFIG")
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"inbox", "--filter", "nope"}, &stdout, &stderr)
+	want := "no filters are defined (config: " + filepath.Join(configHome, "mailbox", "config.toml") + ")"
+	if code != 1 || !strings.Contains(stderr.String(), want) {
+		t.Fatalf("inbox unknown no-config filter = (%d, %q), want %q", code, stderr.String(), want)
+	}
+}
+
+func TestFilterFlagRefusedOnUnsupportedCommands(t *testing.T) {
+	for _, args := range [][]string{
+		{"read", "--filter", "github", "1"},
+		{"open", "--filter", "github", "1"},
+		{"attachment", "--filter", "github", "1"},
+		{"status", "--filter", "github"},
+		{"send", "--filter", "github"},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Run(args, &stdout, &stderr)
+			if code != 2 || !strings.Contains(stderr.String(), "--filter is not supported by "+args[0]) {
+				t.Fatalf("Run(%q) = (%d, %q), want usage refusal", args, code, stderr.String())
+			}
+		})
+	}
+}
+
+func TestInboxFilterTextFormatNamesFilter(t *testing.T) {
+	g := newGmailTestServer(t)
+	config := "[accounts.work]\nread_credential_env = \"CLI_READ\"\n\n[filters.github]\nfrom = \"notifications@github\\\\.com\"\n"
+	code, stdout, stderr := runCLIWithConfig(t, g, config, "inbox", "--filter", "github", "--text")
+	if code != 0 || stderr != "" {
+		t.Fatalf("inbox --filter --text = (%d, %q), want success", code, stderr)
+	}
+	if first, _, _ := strings.Cut(stdout, "\n"); first != "filter: github" {
+		t.Fatalf("first text line = %q, want filter name", first)
 	}
 }
 
@@ -434,6 +645,31 @@ func TestSearchPassthrough(t *testing.T) {
 	}
 	if id, err := refs.Resolve("work", "1"); err != nil || id != "t1" {
 		t.Fatalf("written search ref = (%q, %v), want t1", id, err)
+	}
+}
+
+func TestSearchFilterKeepsMatches(t *testing.T) {
+	g := newGmailTestServer(t)
+	matching := metadataThread("t1")
+	matching["messages"].([]map[string]any)[0]["payload"].(map[string]any)["headers"].([]map[string]string)[0]["value"] = "GitHub <notifications@github.com>"
+	nonMatching := metadataThread("t2")
+	nonMatching["messages"].([]map[string]any)[0]["payload"].(map[string]any)["headers"].([]map[string]string)[0]["value"] = "Human <human@example.test>"
+	g.metadata = map[string]map[string]any{"t1": matching, "t2": nonMatching}
+
+	config := "[accounts.work]\nread_credential_env = \"CLI_READ\"\n\n[filters.github]\nfrom = \"notifications@github\\\\.com\"\n"
+	code, value, stderr := runJSONWithConfig(t, g, config, "search", "is:unread", "--filter", "github", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("search --filter = (%d, %q), want success", code, stderr)
+	}
+	if got := g.listQuery.Get("q"); got != "is:unread" {
+		t.Fatalf("search query = %q, want is:unread", got)
+	}
+	if got := value["filter"]; got != "github" {
+		t.Fatalf("payload filter = %#v, want github", got)
+	}
+	threads, ok := value["threads"].([]any)
+	if !ok || len(threads) != 1 || threads[0].(map[string]any)["id"] != "t1" {
+		t.Fatalf("filtered search threads = %#v, want only t1", value["threads"])
 	}
 }
 
@@ -741,6 +977,21 @@ func TestArchiveMultiple(t *testing.T) {
 	}
 }
 
+func TestArchiveDuplicateExplicitIDsWritesItsReportedSelection(t *testing.T) {
+	g := newGmailTestServer(t)
+	code, value, stderr := runJSON(t, g, "archive", "t1", "t1", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("archive duplicate ids = (%d, %#v, %q), want success", code, value, stderr)
+	}
+	ids, ok := value["threadIds"].([]any)
+	if !ok || len(ids) != 2 || ids[0] != "t1" || ids[1] != "t1" {
+		t.Fatalf("reported thread ids = %#v, want [t1 t1]", value["threadIds"])
+	}
+	if len(g.batchWriteIDs) != 1 || strings.Join(g.batchWriteIDs[0], ",") != "t1,t1" {
+		t.Fatalf("Gmail write ids = %#v, want [[t1 t1]] to match the reported selection", g.batchWriteIDs)
+	}
+}
+
 func TestTrashHumanOutput(t *testing.T) {
 	g := newGmailTestServer(t)
 	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
@@ -1008,6 +1259,28 @@ func TestFlagBeforeSubcommand(t *testing.T) {
 	}
 }
 
+func TestFilterBeforeSubcommand(t *testing.T) {
+	g := newGmailTestServer(t)
+	matching := metadataThread("t1")
+	matching["messages"].([]map[string]any)[0]["payload"].(map[string]any)["headers"].([]map[string]string)[0]["value"] = "GitHub <notifications@github.com>"
+	nonMatching := metadataThread("t2")
+	nonMatching["messages"].([]map[string]any)[0]["payload"].(map[string]any)["headers"].([]map[string]string)[0]["value"] = "Human <human@example.test>"
+	g.metadata = map[string]map[string]any{"t1": matching, "t2": nonMatching}
+
+	config := "[accounts.work]\nread_credential_env = \"CLI_READ\"\n\n[filters.github]\nfrom = \"notifications@github\\\\.com\"\n"
+	code, value, stderr := runJSONWithConfig(t, g, config, "--filter", "github", "inbox", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("leading filter = (%d, %q), want success", code, stderr)
+	}
+	if got := value["filter"]; got != "github" {
+		t.Fatalf("leading filter payload = %#v, want github", got)
+	}
+	threads, ok := value["threads"].([]any)
+	if !ok || len(threads) != 1 || threads[0].(map[string]any)["id"] != "t1" {
+		t.Fatalf("leading filter threads = %#v, want only t1", value["threads"])
+	}
+}
+
 func TestJSONStdoutPurity(t *testing.T) {
 	g := newGmailTestServer(t)
 	code, stdout, _ := runCLI(t, g, "--json", "status")
@@ -1096,6 +1369,9 @@ func TestHelpListsEveryPublicCommand(t *testing.T) {
 		if !strings.Contains(stdout.String(), "XDG_CONFIG_HOME") {
 			t.Fatalf("help for %q omitted config location: %q", args, stdout.String())
 		}
+		if !strings.Contains(stdout.String(), "--filter NAME") {
+			t.Fatalf("help for %q omitted filter flag: %q", args, stdout.String())
+		}
 	}
 }
 
@@ -1113,10 +1389,25 @@ func TestCommandHelpDocumentsReadSearchAndSend(t *testing.T) {
 		}
 	}
 
+	inboxHelp := commandHelp(t, "inbox")
+	for _, want := range []string{
+		"usage: mailbox inbox [--unread] [--max N] [--filter NAME] [--text|--json]",
+		"--filter restricts rows to a named config filter",
+	} {
+		if !strings.Contains(inboxHelp, want) {
+			t.Fatalf("inbox help = %q, want %q", inboxHelp, want)
+		}
+	}
+
 	searchHelp := commandHelp(t, "search")
-	wantOperators := "Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax)."
-	if !strings.Contains(searchHelp, wantOperators) {
-		t.Fatalf("search help = %q, want operator passthrough", searchHelp)
+	for _, want := range []string{
+		"usage: mailbox search [--max N] [--filter NAME] [--text|--json] <query...>",
+		"--filter restricts rows to a named config filter",
+		"Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax).",
+	} {
+		if !strings.Contains(searchHelp, want) {
+			t.Fatalf("search help = %q, want %q", searchHelp, want)
+		}
 	}
 
 	sendHelp := commandHelp(t, "send")
@@ -1216,6 +1507,82 @@ func TestInvalidGlobalFlagRemainsUsageError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := Run([]string{"--not-a-real-flag"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("invalid flag exit = %d, stdout=%q, stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestUsageErrorsEmitMachineEnvelope(t *testing.T) {
+	cases := []struct {
+		args    []string
+		message string
+	}{
+		{[]string{"archive"}, "archive requires"},
+		{[]string{"send", "--reply", "t1", "--body", "x", "--send"}, "--send requires --message"},
+		{[]string{"mark", "sideways", "t1"}, "mark mode must be read or unread"},
+		{[]string{"definitely-not-a-command"}, "unknown command"},
+	}
+	for _, c := range cases {
+		var stdout, stderr bytes.Buffer
+		code := Run(c.args, &stdout, &stderr)
+		if code != 2 {
+			t.Fatalf("Run(%v) = %d, want 2", c.args, code)
+		}
+		doc, err := toontest.Decode(strings.TrimSuffix(stdout.String(), "\n"))
+		if err != nil {
+			t.Fatalf("Run(%v) stdout %q is not TOON: %v", c.args, stdout.String(), err)
+		}
+		errObj := toonField(t, doc, "error")
+		if got := toonString(t, errObj, "code"); got != "usage" {
+			t.Fatalf("error.code = %q, want usage", got)
+		}
+		if got := toonString(t, errObj, "message"); !strings.Contains(got, c.message) {
+			t.Fatalf("error.message = %q, want containing %q", got, c.message)
+		}
+		if !strings.Contains(stderr.String(), "usage:") {
+			t.Fatalf("stderr usage dump must remain: %q", stderr.String())
+		}
+	}
+}
+
+func TestUsageErrorJSONAndTextModes(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--json", "archive"}, &stdout, &stderr); code != 2 {
+		t.Fatal("exit must stay 2")
+	}
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil || payload.Error.Code != "usage" {
+		t.Fatalf("JSON usage envelope = %q (%v)", stdout.String(), err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"--text", "archive"}, &stdout, &stderr); code != 2 || stdout.Len() != 0 {
+		t.Fatalf("text mode must keep stdout empty, got %q", stdout.String())
+	}
+}
+
+func TestUsageErrorHonorsFlagsParsedBeforeFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--json", "--definitely-unknown"}, &stdout, &stderr); code != 2 {
+		t.Fatal("exit must stay 2")
+	}
+	if !json.Valid(stdout.Bytes()) || !strings.Contains(stdout.String(), `"usage"`) {
+		t.Fatalf("top-level --json parse failure must emit strict JSON, got %q", stdout.String())
+	}
+	stdout.Reset()
+	if code := Run([]string{"--text", "--definitely-unknown"}, &stdout, &stderr); code != 2 || stdout.Len() != 0 {
+		t.Fatalf("top-level --text parse failure must keep stdout empty, got %q", stdout.String())
+	}
+	stdout.Reset()
+	if code := Run([]string{"archive", "--json", "--definitely-unknown"}, &stdout, &stderr); code != 2 || !json.Valid(stdout.Bytes()) {
+		t.Fatalf("command --json parse failure must emit strict JSON, got %q", stdout.String())
+	}
+	stdout.Reset()
+	if code := Run([]string{"archive", "--text", "--definitely-unknown"}, &stdout, &stderr); code != 2 || stdout.Len() != 0 {
+		t.Fatalf("command --text parse failure must keep stdout empty, got %q", stdout.String())
 	}
 }
 

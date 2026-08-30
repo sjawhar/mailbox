@@ -181,6 +181,20 @@ func TestListThreads(t *testing.T) {
 	}
 }
 
+func TestListThreadsSendsPageToken(t *testing.T) {
+	var gotToken string
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.URL.Query().Get("pageToken")
+		fmt.Fprint(w, `{"threads":[],"nextPageToken":""}`)
+	}, "token")
+	if _, err := client.ListThreads(context.Background(), ListOptions{PageToken: "page-2", MaxResults: 500}); err != nil {
+		t.Fatal(err)
+	}
+	if gotToken != "page-2" {
+		t.Fatalf("pageToken = %q, want page-2", gotToken)
+	}
+}
+
 func TestGetThreadFull(t *testing.T) {
 	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		requireRequest(t, r, http.MethodGet, "/gmail/v1/users/me/threads/t1", "token")

@@ -34,21 +34,48 @@ Run `mailbox` without a subcommand in a terminal to open the interactive TUI. Fo
 
 | Command | Description |
 | --- | --- |
-| `mailbox inbox [--unread] [--max N]` | List inbox threads. `--unread` limits results to unread threads; `--max` defaults to 25 (range 1–500). |
-| `mailbox search <query> [--max N]` | Search with Gmail query syntax. |
+| `mailbox inbox [--unread] [--max N] [--filter NAME]` | List inbox threads. `--unread` limits results to unread threads; `--max` defaults to 25 (range 1–500). |
+| `mailbox search <query> [--max N] [--filter NAME]` | Search with Gmail query syntax. |
 | `mailbox read <ref> [--full]` | Render a thread newest first; `--full` retains quoted history. |
 | `mailbox open <ref>` | Open the newest HTML message in the system browser. |
-| `mailbox archive <ref>...` | Remove `INBOX` from one or more threads. |
-| `mailbox trash <ref>...` | Move one or more threads to Trash. |
-| `mailbox mark read\|unread <ref>...` | Mark one or more threads read or unread. |
-| `mailbox label add\|rm <name> <ref>...` | Add or remove a Gmail label. |
+| `mailbox archive (<ref>... \| --filter NAME)` | Remove `INBOX` from one or more threads, or every matching inbox thread. |
+| `mailbox trash (<ref>... \| --filter NAME)` | Move one or more threads to Trash, or every matching inbox thread. |
+| `mailbox mark read\|unread (<ref>... \| --filter NAME)` | Mark one or more threads read or unread. |
+| `mailbox label add\|rm <name> (<ref>... \| --filter NAME)` | Add or remove a Gmail label. |
 | `mailbox attachment <ref> [n] [-o path]` | List attachments, or download attachment `n`. |
 | `mailbox status` | Report the selected account's authentication route, Gmail profile, and cache state. |
 | `mailbox send [--to RECIPIENT] [--subject SUBJECT] [--reply THREAD] [--forward THREAD] --body BODY [--send]` | Preview a compose, reply, or forward envelope; add `--send` only to transmit it. |
 
 `inbox` and `search` assign numbered references for the selected account. A number resolves only against that account's most recent listing; every mailbox surface resolves identifiers to threads, and a raw message ID resolves to its parent thread. The one exception is `send --message`, which names a message within the thread. JSON listings expose the durable Gmail IDs, so automation should use IDs instead of numbered references.
 
+`--filter NAME` is available on `inbox`, `search`, `archive`, `trash`, `mark`, and `label`. On listings it keeps only matching threads and reports the active filter. On actions it replaces explicit references—combining a filter with references is a usage error—and traverses the **entire inbox** before changing every matching thread, not merely the first page. A zero-match action is successful and changes nothing.
+
 `--account NAME` selects a configured account and takes precedence over `MAILBOX_ACCOUNT`; when neither is set, mailbox uses `default_account`.
+
+## TUI
+
+Run `mailbox` in a terminal to open the split-pane TUI. Start in a named-filter view with `mailbox --filter github`; `f` then cycles none and each configured filter in declaration order, refetching the listing each time.
+
+| Key | Action |
+| --- | --- |
+| `v` | Enter select mode. Selected rows display a marker column. |
+| `space` | Toggle the current row while in select mode. |
+| `a` | Select all listed rows while in select mode. |
+| `esc` | Leave select mode and clear its selection. |
+| `f` | Cycle the active filter. |
+| `#` | Move the selection, or the cursor row when nothing is selected, to Trash. |
+| `r` | Reply in the system editor. |
+| `c` | Prompt for a recipient and subject, then compose in the system editor. |
+
+`d` is unbound. Other action keys use the selection when it is non-empty and otherwise use the cursor row.
+
+For `r` and `c`, mailbox selects `$VISUAL`, then `$EDITOR`, then `vi`. It parses that value as POSIX shell words (quoting and backslash escaping only) and executes the resulting argv directly, never through a shell. The editor opens a private draft with informational envelope metadata above this exact scissors line:
+
+```text
+# ------------------------ >8 ------------------------
+```
+
+Mailbox sends only the bytes after the first exact scissors line; edits above it do not alter the envelope. A missing line refuses the send, and a saved non-empty body returns to the existing confirmation screen.
 
 ## Output formats
 
@@ -71,6 +98,23 @@ TOON is the default for agents and pipes. `--json` is the stable opt-in for mach
   ]
 }
 ```
+
+Filtered listings add `"filter": "NAME"` to their machine output. Filter-driven bulk actions emit one receipt document containing `account`, `action`, `filter`, `matched`, `attempted`, `succeeded`, `failed`, and `ok`. A failed receipt includes its thread ID, HTTP status, and reason, so partial success is visible even when the command exits nonzero:
+
+```json
+{
+  "account": "work",
+  "action": "archive",
+  "filter": "github",
+  "matched": 2,
+  "attempted": 2,
+  "succeeded": ["thread-01"],
+  "failed": [{"id": "thread-02", "status": 403, "reason": "insufficientPermissions"}],
+  "ok": false
+}
+```
+
+Usage errors with a machine output format also emit one structured error document to standard output and retain exit status 2. With `--json`, the envelope has the form `{"error":{"code":"usage","message":"..."}}`; diagnostic help remains on standard error.
 
 ## Configuration
 
@@ -142,6 +186,20 @@ Without a configuration file, mailbox provides one implicit `default` account:
 read and write use it only with `MAILBOX_TOKEN`; send requires a configured
 `send_credential_env` or `send_credential_cmd`.
 
+### Filters
+
+Define named filters with TOML tables. This neutral filter keeps matching GitHub notifications:
+
+```toml
+[filters.github]
+from = "notifications@github\\.com"
+subject = "(?i)ci"
+```
+
+Each `[filters.NAME]` table needs at least one rule. Names match `[a-z0-9][a-z0-9-]*`, and rule fields are `from`, `to`, `cc`, `subject`, and `list` (`List-ID`). Rules use Go RE2 syntax and are compiled while configuration loads, so an invalid name, field, or expression is a configuration error.
+
+Rules in one filter must all match one message; a thread matches if any of its messages satisfies those rules. Matching uses decoded, unfolded header values. A value larger than 8 KiB does not match and is never truncated. Filter tables retain declaration order: that order controls `f` in the TUI and is the order used when listing configured filters. An undefined `--filter NAME` is a hard error that names the configured filters; it is never treated as an empty result.
+
 ## Authentication
 
 > **Breaking change in v0.4.0:** every use other than `MAILBOX_TOKEN` requires
@@ -191,6 +249,8 @@ writes nothing to disk, and does not load configuration.
 ## Send
 
 `mailbox send` is a dry run by default: it resolves and prints the envelope with the read credential, without touching the send credential. Add `--send` only after inspecting that preview.
+
+Every body source—`--body`, standard input, `--body-file`, and editor compose—is markdown. Mailbox sends it as `multipart/alternative`: a raw markdown `text/plain` leaf and a sanitized rendered `text/html` leaf. Raw HTML is omitted from the HTML leaf. Link and image destinations allow only `https`, `http`, `mailto`, and empty or fragment destinations; other schemes are removed before rendering.
 
 For replies and forwards, `--message` selects the message within the named thread. `--send` requires that pin so the inspected envelope and sent message cannot diverge; without `--message`, a preview selects the newest message.
 

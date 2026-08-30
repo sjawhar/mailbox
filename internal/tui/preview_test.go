@@ -43,8 +43,8 @@ func TestPreviewDebounceKeepsOnlyLatestCursorGeneration(t *testing.T) {
 func TestWideHelpIncludesSelectionBinding(t *testing.T) {
 	model, _ := newTestApp(testThreads(1))
 	model.setSize(160, model.layout.height)
-	if !strings.Contains(ansi.Strip(model.View()), "space select") {
-		t.Fatal("wide inbox help omits space selection")
+	if !strings.Contains(ansi.Strip(model.View()), "v select") {
+		t.Fatal("wide inbox help omits select-mode binding")
 	}
 }
 

@@ -100,6 +100,20 @@ func normalizeAttachments(attachments []render.Attachment) []render.Attachment {
 	return attachments
 }
 
+func normalizeStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+func normalizeFailures(values []filterActionFailure) []filterActionFailure {
+	if values == nil {
+		return []filterActionFailure{}
+	}
+	return values
+}
+
 func printThreads(output io.Writer, rows []threadRow, pretty bool) {
 	unreadStyle := lipgloss.NewStyle().Bold(true)
 	dateStyle := lipgloss.NewStyle().Faint(true)

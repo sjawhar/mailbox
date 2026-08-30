@@ -2,9 +2,14 @@ package e2e
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
+	"mime"
+	"mime/multipart"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -66,17 +71,6 @@ send_credential_env_passthrough = ["SEND_CANARY"]
 	assertFileSnapshotEqual(t, before, snapshotFiles(t, cache))
 }
 
-const goldenReplyMIME = "To: \"A\" <a@example.test>\r\n" +
-	"Cc: \"B\" <b@example.test>, \"C\" <c@example.test>\r\n" +
-	"Subject: Re: PTY smoke\r\n" +
-	"In-Reply-To: <m-t1@example.test>\r\n" +
-	"References: <m-t1@example.test>\r\n" +
-	"MIME-Version: 1.0\r\n" +
-	"Content-Type: text/plain; charset=UTF-8\r\n" +
-	"Content-Transfer-Encoding: base64\r\n" +
-	"\r\n" +
-	"aGk=\r\n"
-
 func TestCLISendCapturesGoldenMIMEAndKeepsCanaryOffDisk(t *testing.T) {
 	fixture := newSendFixture(t, false)
 
@@ -112,10 +106,63 @@ func TestCLISendCapturesGoldenMIMEAndKeepsCanaryOffDisk(t *testing.T) {
 	if captured.ThreadID != "t1" {
 		t.Fatalf("send threadId = %q, want t1", captured.ThreadID)
 	}
-	if !bytes.Equal(captured.Raw, []byte(goldenReplyMIME)) {
-		t.Fatalf("captured MIME:\n got: %q\nwant: %q", captured.Raw, goldenReplyMIME)
-	}
+	assertReplyMIME(t, captured.Raw)
 	assertNoCanaryOnDisk(t, sendCanary(), fixture.stubs, fixture.cache, filepath.Dir(buildMailbox(t)))
+}
+
+func assertReplyMIME(t *testing.T, raw []byte) {
+	t.Helper()
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("mail.ReadMessage() error = %v", err)
+	}
+	for name, want := range map[string]string{
+		"To":          `"A" <a@example.test>`,
+		"Cc":          `"B" <b@example.test>, "C" <c@example.test>`,
+		"Subject":     "Re: PTY smoke",
+		"In-Reply-To": "<m-t1@example.test>",
+		"References":  "<m-t1@example.test>",
+	} {
+		if got := message.Header.Get(name); got != want {
+			t.Fatalf("%s header = %q, want %q", name, got, want)
+		}
+	}
+	mediaType, params, err := mime.ParseMediaType(message.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/alternative" || params["boundary"] == "" {
+		t.Fatalf("Content-Type = %q (%v), want multipart/alternative with a boundary", message.Header.Get("Content-Type"), err)
+	}
+
+	parts := multipart.NewReader(message.Body, params["boundary"])
+	assertReplyAlternativePart(t, parts, "text/plain; charset=UTF-8", "hi")
+	assertReplyAlternativePart(t, parts, "text/html; charset=UTF-8", "<p>hi</p>\n")
+	if part, err := parts.NextPart(); err != io.EOF || part != nil {
+		t.Fatalf("NextPart() after alternative leaves = %v, %v; want EOF", part, err)
+	}
+}
+
+func assertReplyAlternativePart(t *testing.T, parts *multipart.Reader, wantType, wantBody string) {
+	t.Helper()
+	part, err := parts.NextPart()
+	if err != nil {
+		t.Fatalf("NextPart() error = %v", err)
+	}
+	if got := part.Header.Get("Content-Type"); got != wantType {
+		t.Fatalf("Content-Type = %q, want %q", got, wantType)
+	}
+	if got := part.Header.Get("Content-Transfer-Encoding"); got != "base64" {
+		t.Fatalf("Content-Transfer-Encoding = %q, want base64", got)
+	}
+	encoded, err := io.ReadAll(part)
+	if err != nil {
+		t.Fatalf("read MIME part: %v", err)
+	}
+	decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(encoded)))
+	if err != nil {
+		t.Fatalf("decode MIME part: %v", err)
+	}
+	if got := string(decoded); got != wantBody {
+		t.Fatalf("decoded MIME part = %q, want %q", got, wantBody)
+	}
 }
 
 func TestCLISendRejectsSelfOnlyReplyWithoutTouchingSendCustody(t *testing.T) {
@@ -184,9 +231,7 @@ func TestCLISendBatchInteractiveSourceTransmitsViaStub(t *testing.T) {
 		if captured.ThreadID != "t1" {
 			t.Fatalf("interactive batch threadId = %q, want t1", captured.ThreadID)
 		}
-		if !bytes.Equal(captured.Raw, []byte(goldenReplyMIME)) {
-			t.Fatalf("interactive batch captured MIME:\n got: %q\nwant: %q", captured.Raw, goldenReplyMIME)
-		}
+		assertReplyMIME(t, captured.Raw)
 	}
 	assertNoCanaryOnDisk(t, sendCanary(), fixture.stubs, fixture.cache, filepath.Dir(buildMailbox(t)))
 }
@@ -195,14 +240,12 @@ func TestTUIReplyFenceAndEscapeDoNotTransmitEarly(t *testing.T) {
 	binary := buildMailbox(t)
 	t.Run("send captures attribution before helper spawn", func(t *testing.T) {
 		fixture := newSendFixture(t, true)
+		useTUIEditor(t, fixture, "hello from tui")
 		session := startSendTUI(t, binary, fixture)
 		session.SendEnter()
 		session.WaitFor("r reply", 15*time.Second)
 		session.SendKeys("r")
-		session.WaitFor("to  a@example.test", 5*time.Second)
-		session.SendKeys("hello from tui")
-		session.SendCtrl("s")
-		session.WaitFor("Re: PTY smoke", 5*time.Second)
+		session.WaitFor("Confirm send", 5*time.Second)
 		session.SendKeys("y")
 		attribution := "waiting for hardware key touch; approve only this request — work send access via " + fixture.helper
 		session.WaitFor(attribution, 5*time.Second)
@@ -215,13 +258,14 @@ func TestTUIReplyFenceAndEscapeDoNotTransmitEarly(t *testing.T) {
 		session.WaitFor("PTY smoke", 5*time.Second)
 	})
 
-	t.Run("escape abandons reply without a helper spawn", func(t *testing.T) {
+	t.Run("escape abandons editor-composed reply without a helper spawn", func(t *testing.T) {
 		fixture := newSendFixture(t, true)
+		useTUIEditor(t, fixture, "draft to abandon")
 		session := startSendTUI(t, binary, fixture)
 		session.SendEnter()
 		session.WaitFor("r reply", 15*time.Second)
 		session.SendKeys("r")
-		session.WaitFor("Body:", 5*time.Second)
+		session.WaitFor("Confirm send", 5*time.Second)
 		session.SendKeys("esc")
 		session.WaitFor("r reply", 5*time.Second)
 		assertNoSpawns(t, fixture.spawnFile)
@@ -350,6 +394,15 @@ func startSendTUI(t *testing.T, binary string, fixture *sendFixture) *tmuxSessio
 	session.WaitFor("Mailbox — work inbox", 15*time.Second)
 	session.WaitFor("PTY smoke", 15*time.Second)
 	return session
+}
+
+func useTUIEditor(t *testing.T, fixture *sendFixture, body string) {
+	t.Helper()
+	editor := filepath.Join(fixture.stubs, "tui-editor")
+	writeExecutable(t, editor, fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' %q >> "$1"
+`, body))
+	fixture.env["EDITOR"] = filepath.Base(editor)
 }
 
 func assertNoCanaryOnDisk(t *testing.T, canary string, roots ...string) {

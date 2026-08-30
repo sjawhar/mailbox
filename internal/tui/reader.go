@@ -13,12 +13,13 @@ import (
 )
 
 type threadModel struct {
-	thread           *gmail.Thread
-	rendered         *render.RenderedThread
-	keepQuotes       bool
-	linkInput        string
-	attachments      []render.Attachment
-	attachmentCursor int
+	thread            *gmail.Thread
+	rendered          *render.RenderedThread
+	keepQuotes        bool
+	linkInput         string
+	attachments       []render.Attachment
+	attachmentCursor  int
+	listingGeneration uint64
 }
 
 func (m *app) renderCurrentThread() error {
@@ -155,10 +156,22 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case keyReply:
 		return m.openReply()
+	case keyCompose:
+		return m.startCompose()
 	case keyArchive:
+		if !m.threadActionsCurrent() {
+			return m, nil
+		}
 		return m.startAction("archive", []string{m.thread.thread.ID}, nil, []string{"INBOX"}, true)
 	case keyTrash:
+		if !m.threadActionsCurrent() {
+			return m, nil
+		}
 		return m.startAction("trash", []string{m.thread.thread.ID}, nil, nil, true)
+	case "d":
+		// Unbound as of v2.1 (# trashes). Consumed here so the key never
+		// reaches the viewport, whose default keymap scrolls on d.
+		return m, nil
 	case keyAttachments:
 		attachments, err := render.ThreadAttachments(m.thread.thread)
 		if err != nil {
@@ -196,8 +209,12 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, command
 }
 
+func (m app) threadActionsCurrent() bool {
+	return m.listLoaded && m.thread.thread != nil && m.thread.listingGeneration == m.generations[listOperation]
+}
+
 func (m app) threadView() string {
-	return titleStyle.Render("Thread") + "\n" + m.viewport.View() + "\n" + helpStyle.Render("r reply · n/p threads · j/k scroll · esc back") + "\n" + m.statusView()
+	return titleStyle.Render("Thread") + "\n" + m.viewport.View() + "\n" + helpStyle.Render("r reply · c compose · n/p threads · j/k scroll · esc back") + "\n" + m.statusView()
 }
 
 func (m app) attachmentPickerView() string {

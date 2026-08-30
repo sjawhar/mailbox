@@ -2,14 +2,18 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,16 +73,21 @@ type capturedSend struct {
 }
 
 type fakeGmail struct {
-	mu          sync.Mutex
-	readAuths   []string
-	writeAuths  []string
-	sendAuths   []string
-	sent        []capturedSend
-	threads     map[string]string
-	messages    map[string]string
-	rawMessages map[string][]byte
-	server      *httptest.Server
-	token       *httptest.Server
+	mu            sync.Mutex
+	readAuths     []string
+	writeAuths    []string
+	sendAuths     []string
+	sent          []capturedSend
+	batchRequests []string
+	modified      []string
+	trashed       []string
+	listPages     [][]string
+	listDelay     time.Duration
+	threads       map[string]string
+	messages      map[string]string
+	rawMessages   map[string][]byte
+	server        *httptest.Server
+	token         *httptest.Server
 }
 
 func newFakeGmail(t *testing.T) *fakeGmail {
@@ -86,16 +95,30 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	t1 := fakeMessage("t1", "PTY smoke", "A <a@example.test>", "B <b@example.test>", "C <c@example.test>", "A <a@example.test>")
 	t2 := fakeMessage("t2", "Second PTY smoke", "A <a@example.test>", "B <b@example.test>", "", "")
 	t3 := fakeMessage("t3", "self-only", "Self <work@example.test>", "Self <work@example.test>", "Self <work@example.test>", "")
+	githubHeaders := map[string]string{
+		"From":    "GitHub <notifications@github.com>",
+		"List-ID": "<ci.github.example>",
+		"To":      "Work <work@example.test>",
+	}
+	github := fakeMessageWithHeaders("t-gh", "GitHub notification", githubHeaders)
+	githubTwo := fakeMessageWithHeaders("t-gh-2", "GitHub notification two", githubHeaders)
+	githubThree := fakeMessageWithHeaders("t-gh-3", "GitHub notification three", githubHeaders)
 	g := &fakeGmail{
 		threads: map[string]string{
-			"t1": fakeThread("t1", t1),
-			"t2": fakeThread("t2", t2),
-			"t3": fakeThread("t3", t3),
+			"t1":     fakeThread("t1", t1),
+			"t2":     fakeThread("t2", t2),
+			"t3":     fakeThread("t3", t3),
+			"t-gh":   fakeThread("t-gh", github),
+			"t-gh-2": fakeThread("t-gh-2", githubTwo),
+			"t-gh-3": fakeThread("t-gh-3", githubThree),
 		},
 		messages: map[string]string{
-			"m-t1": t1,
-			"m-t2": t2,
-			"m-t3": t3,
+			"m-t1":     t1,
+			"m-t2":     t2,
+			"m-t3":     t3,
+			"m-t-gh":   github,
+			"m-t-gh-2": githubTwo,
+			"m-t-gh-3": githubThree,
 		},
 		rawMessages: map[string][]byte{
 			"m-t1": []byte("From: A <a@example.test>\r\nTo: B <b@example.test>\r\nSubject: PTY smoke\r\n\r\noriginal"),
@@ -104,10 +127,7 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 		},
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/gmail/v1/users/me/threads", func(w http.ResponseWriter, request *http.Request) {
-		g.recordReadAuth(request)
-		fmt.Fprint(w, `{"threads":[{"id":"t1","snippet":"hello"},{"id":"t2","snippet":"second"}]}`)
-	})
+	mux.HandleFunc("/gmail/v1/users/me/threads", g.serveThreadList)
 	mux.HandleFunc("/gmail/v1/users/me/labels", func(w http.ResponseWriter, request *http.Request) {
 		g.recordReadAuth(request)
 		fmt.Fprint(w, `{"labels":[]}`)
@@ -153,30 +173,8 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 		}
 		fmt.Fprint(w, message)
 	})
-	mux.HandleFunc("/gmail/v1/users/me/threads/", func(w http.ResponseWriter, request *http.Request) {
-		if strings.HasSuffix(request.URL.Path, "/modify") {
-			g.recordWriteAuth(request)
-			fmt.Fprint(w, `{}`)
-			return
-		}
-		g.recordReadAuth(request)
-		threadID := strings.TrimPrefix(request.URL.Path, "/gmail/v1/users/me/threads/")
-		thread, ok := g.threads[threadID]
-		if !ok {
-			http.NotFound(w, request)
-			return
-		}
-		fmt.Fprint(w, thread)
-	})
-	mux.HandleFunc("/batch/gmail/v1", func(w http.ResponseWriter, request *http.Request) {
-		g.recordReadAuth(request)
-		const boundary = "e2e-boundary"
-		w.Header().Set("Content-Type", "multipart/mixed; boundary="+boundary)
-		for index, threadID := range []string{"t1", "t2"} {
-			fmt.Fprintf(w, "--%s\r\nContent-Type: application/http\r\nContent-ID: <response-item%d>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n%s\r\n", boundary, index, g.threads[threadID])
-		}
-		fmt.Fprintf(w, "--%s--\r\n", boundary)
-	})
+	mux.HandleFunc("/gmail/v1/users/me/threads/", g.serveThread)
+	mux.HandleFunc("/batch/gmail/v1", g.serveBatch)
 	g.server = httptest.NewServer(mux)
 	t.Cleanup(g.server.Close)
 	g.token = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -186,38 +184,241 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	return g
 }
 
+func (g *fakeGmail) serveThreadList(w http.ResponseWriter, request *http.Request) {
+	g.recordReadAuth(request)
+	g.mu.Lock()
+	delay := g.listDelay
+	pages := append([][]string(nil), g.listPages...)
+	g.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	if pages == nil {
+		fmt.Fprint(w, `{"threads":[{"id":"t1","snippet":"hello"},{"id":"t2","snippet":"second"}]}`)
+		return
+	}
+
+	page := 0
+	if token := request.URL.Query().Get("pageToken"); token != "" {
+		const prefix = "page-"
+		if !strings.HasPrefix(token, prefix) {
+			http.Error(w, "unknown page token", http.StatusBadRequest)
+			return
+		}
+		parsed, err := strconv.Atoi(strings.TrimPrefix(token, prefix))
+		if err != nil || parsed < 1 {
+			http.Error(w, "unknown page token", http.StatusBadRequest)
+			return
+		}
+		page = parsed
+	}
+	if page >= len(pages) {
+		http.Error(w, "unknown page token", http.StatusBadRequest)
+		return
+	}
+
+	type listedThread struct {
+		ID      string `json:"id"`
+		Snippet string `json:"snippet"`
+	}
+	response := struct {
+		Threads       []listedThread `json:"threads"`
+		NextPageToken string         `json:"nextPageToken,omitempty"`
+	}{Threads: make([]listedThread, len(pages[page]))}
+	for index, id := range pages[page] {
+		response.Threads[index] = listedThread{ID: id, Snippet: "fixture " + id}
+	}
+	if page+1 < len(pages) {
+		response.NextPageToken = fmt.Sprintf("page-%d", page+1)
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		panic(err)
+	}
+}
+
+func (g *fakeGmail) serveThread(w http.ResponseWriter, request *http.Request) {
+	const prefix = "/gmail/v1/users/me/threads/"
+	threadPath := strings.TrimPrefix(request.URL.Path, prefix)
+	switch {
+	case strings.HasSuffix(threadPath, "/modify"):
+		g.recordModified(request, strings.TrimSuffix(threadPath, "/modify"))
+		fmt.Fprint(w, `{}`)
+	case strings.HasSuffix(threadPath, "/trash"):
+		g.recordTrashed(request, strings.TrimSuffix(threadPath, "/trash"))
+		fmt.Fprint(w, `{}`)
+	default:
+		g.recordReadAuth(request)
+		thread, ok := g.threads[threadPath]
+		if !ok {
+			http.NotFound(w, request)
+			return
+		}
+		fmt.Fprint(w, thread)
+	}
+}
+
+func (g *fakeGmail) serveBatch(w http.ResponseWriter, request *http.Request) {
+	mediaType, params, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/mixed" || params["boundary"] == "" {
+		http.Error(w, "invalid batch request", http.StatusBadRequest)
+		return
+	}
+	reader := multipart.NewReader(request.Body, params["boundary"])
+	var responses []batchHTTPResponse
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			http.Error(w, "invalid batch request", http.StatusBadRequest)
+			return
+		}
+		if part.Header.Get("Content-Type") != "application/http" {
+			http.Error(w, "invalid batch request part", http.StatusBadRequest)
+			return
+		}
+		inner, err := http.ReadRequest(bufio.NewReader(part))
+		if err != nil {
+			http.Error(w, "invalid batch HTTP request", http.StatusBadRequest)
+			return
+		}
+		if _, err := io.Copy(io.Discard, inner.Body); err != nil {
+			http.Error(w, "invalid batch HTTP request body", http.StatusBadRequest)
+			return
+		}
+		inner.Body.Close()
+		g.recordBatchRequest(inner)
+		responses = append(responses, g.batchResponse(request, inner))
+	}
+
+	writer := multipart.NewWriter(w)
+	w.Header().Set("Content-Type", "multipart/mixed; boundary="+writer.Boundary())
+	for index, response := range responses {
+		headers := textproto.MIMEHeader{}
+		headers.Set("Content-Type", "application/http")
+		headers.Set("Content-ID", fmt.Sprintf("<response-item%d>", index))
+		part, err := writer.CreatePart(headers)
+		if err != nil {
+			panic(err)
+		}
+		if _, err := fmt.Fprintf(part, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", response.status, http.StatusText(response.status), len(response.body), response.body); err != nil {
+			panic(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		panic(err)
+	}
+}
+
+type batchHTTPResponse struct {
+	status int
+	body   string
+}
+
+func (g *fakeGmail) batchResponse(outer, inner *http.Request) batchHTTPResponse {
+	const prefix = "/gmail/v1/users/me/threads/"
+	threadPath := strings.TrimPrefix(inner.URL.Path, prefix)
+	switch {
+	case inner.Method == http.MethodGet && strings.HasPrefix(inner.URL.Path, prefix):
+		g.recordReadAuth(outer)
+		thread, ok := g.threads[threadPath]
+		if !ok {
+			return batchHTTPResponse{status: http.StatusNotFound, body: `{"error":{"message":"not found"}}`}
+		}
+		return batchHTTPResponse{status: http.StatusOK, body: thread}
+	case inner.Method == http.MethodPost && strings.HasSuffix(threadPath, "/modify"):
+		g.recordModified(outer, strings.TrimSuffix(threadPath, "/modify"))
+		return batchHTTPResponse{status: http.StatusOK, body: `{}`}
+	case inner.Method == http.MethodPost && strings.HasSuffix(threadPath, "/trash"):
+		g.recordTrashed(outer, strings.TrimSuffix(threadPath, "/trash"))
+		return batchHTTPResponse{status: http.StatusOK, body: `{}`}
+	default:
+		return batchHTTPResponse{status: http.StatusNotFound, body: `{"error":{"message":"not found"}}`}
+	}
+}
+
 func fakeThread(id, message string) string {
 	return fmt.Sprintf(`{"id":%q,"messages":[%s]}`, id, message)
 }
 
 func fakeMessage(threadID, subject, from, to, carbonCopy, replyTo string) string {
-	body := base64.RawURLEncoding.EncodeToString([]byte("<p>hi</p>"))
-	headers := []struct {
-		Name  string `json:"name"`
-		Value string `json:"value"`
-	}{
-		{Name: "From", Value: from},
-		{Name: "To", Value: to},
-		{Name: "Subject", Value: subject},
-		{Name: "Message-ID", Value: "<m-" + threadID + "@example.test>"},
+	headers := map[string]string{
+		"From": from,
+		"To":   to,
 	}
 	if carbonCopy != "" {
-		headers = append(headers, struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		}{Name: "Cc", Value: carbonCopy})
+		headers["Cc"] = carbonCopy
 	}
 	if replyTo != "" {
-		headers = append(headers, struct {
+		headers["Reply-To"] = replyTo
+	}
+	return fakeMessageWithHeaders(threadID, subject, headers)
+}
+
+func fakeMessageWithHeaders(threadID, subject string, input map[string]string) string {
+	values := make(map[string]string, len(input)+2)
+	for name, value := range input {
+		values[name] = value
+	}
+	values["Subject"] = subject
+	values["Message-ID"] = "<m-" + threadID + "@example.test>"
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	headers := make([]struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}, len(names))
+	for index, name := range names {
+		headers[index] = struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`
-		}{Name: "Reply-To", Value: replyTo})
+		}{Name: name, Value: values[name]}
 	}
 	headerJSON, err := json.Marshal(headers)
 	if err != nil {
 		panic(err)
 	}
+	body := base64.RawURLEncoding.EncodeToString([]byte("<p>hi</p>"))
 	return fmt.Sprintf(`{"id":%q,"threadId":%q,"internalDate":"1788000000000","labelIds":["INBOX","UNREAD"],"payload":{"mimeType":"text/html","headers":%s,"body":{"data":%q}}}`, "m-"+threadID, threadID, headerJSON, body)
+}
+
+func (g *fakeGmail) setListPages(pages [][]string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.listPages = make([][]string, len(pages))
+	for index, page := range pages {
+		g.listPages[index] = append([]string(nil), page...)
+	}
+}
+
+func (g *fakeGmail) setListDelay(delay time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.listDelay = delay
+}
+
+func (g *fakeGmail) recordModified(request *http.Request, id string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.writeAuths = append(g.writeAuths, request.Header.Get("Authorization"))
+	g.modified = append(g.modified, id)
+}
+
+func (g *fakeGmail) recordTrashed(request *http.Request, id string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.writeAuths = append(g.writeAuths, request.Header.Get("Authorization"))
+	g.trashed = append(g.trashed, id)
+}
+
+func (g *fakeGmail) recordBatchRequest(request *http.Request) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.batchRequests = append(g.batchRequests, request.Method+" "+request.URL.RequestURI())
 }
 
 func (g *fakeGmail) recordReadAuth(request *http.Request) {
@@ -266,6 +467,24 @@ func (g *fakeGmail) recordedSends() []capturedSend {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return append([]capturedSend(nil), g.sent...)
+}
+
+func (g *fakeGmail) recordedBatchRequests() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.batchRequests...)
+}
+
+func (g *fakeGmail) recordedModified() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.modified...)
+}
+
+func (g *fakeGmail) recordedTrashed() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.trashed...)
 }
 
 type tmuxSession struct {
@@ -369,6 +588,26 @@ func (s *tmuxSession) WaitFor(text string, timeout time.Duration) string {
 		s.t.Fatalf("timed out waiting for %q; last pane:\n%s", text, pane)
 	}
 	return pane
+}
+
+func (s *tmuxSession) WaitForStable(text string, timeout time.Duration) string {
+	s.t.Helper()
+	const stableFor = 300 * time.Millisecond
+	deadline := time.Now().Add(timeout)
+	var previous, pane string
+	lastChange := time.Now()
+	for time.Now().Before(deadline) {
+		pane = s.Capture()
+		if pane != previous {
+			previous = pane
+			lastChange = time.Now()
+		} else if strings.Contains(pane, text) && time.Since(lastChange) >= stableFor {
+			return pane
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	s.t.Fatalf("timed out waiting for a stable pane containing %q; last pane:\n%s", text, s.Capture())
+	return ""
 }
 
 func (s *tmuxSession) Alive() bool {

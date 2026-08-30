@@ -13,13 +13,15 @@ const (
 	profileOperation
 	sendOperation
 	unlockOperation
+	composeOperation
 	asyncOperationCount
 )
 
 type asyncRequest struct {
-	ctx        *accountCtx
-	operation  asyncOperation
-	generation uint64
+	ctx               *accountCtx
+	operation         asyncOperation
+	generation        uint64
+	listingGeneration uint64
 }
 
 type asyncMessage interface {
@@ -39,9 +41,10 @@ func (m *app) invalidateRequests() {
 
 func (m app) currentRequest(operation asyncOperation) asyncRequest {
 	return asyncRequest{
-		ctx:        m.ctx,
-		operation:  operation,
-		generation: m.generations[operation],
+		ctx:               m.ctx,
+		operation:         operation,
+		generation:        m.generations[operation],
+		listingGeneration: m.generations[listOperation],
 	}
 }
 

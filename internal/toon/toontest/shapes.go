@@ -4,11 +4,12 @@ import "time"
 
 // Shapes returns one fully-populated instance per mailbox payload shape:
 // listing, read thread, status, action result, attachment list, attachment
-// save, open, and credential error envelope. These mirror internal/cli's
-// unexported JSON payloads; its contract test pins them field-for-field.
+// save, open, credential error envelope, and usage error envelope. These
+// mirror internal/cli's unexported JSON payloads; its contract test pins them
+// field-for-field.
 func Shapes(s1, s2, s3 string) []any {
 	return []any{
-		listingPayload{Account: s1, Threads: []threadRow{{N: 1, ID: s2, Subject: s3, From: s1, Date: s2, Snippet: s3, Unread: true, Labels: []string{s1}}}},
+		listingPayload{Account: s1, Filter: s2, Threads: []threadRow{{N: 1, ID: s2, Subject: s3, From: s1, Date: s2, Snippet: s3, Unread: true, Labels: []string{s1}}}},
 		readPayload{
 			Account:      s1,
 			ID:           s2,
@@ -40,15 +41,18 @@ func Shapes(s1, s2, s3 string) []any {
 			OK: true,
 		},
 		actionPayload{Account: s1, Action: s2, ThreadIDs: []string{s3}, OK: true},
+		filterActionPayload{Account: s1, Action: s2, Filter: s3, Matched: 1, Attempted: 1, Succeeded: []string{s1}, Failed: []filterActionFailure{{ID: s2, Status: 7, Reason: s3}}, OK: true},
 		attachmentListPayload{Account: s1, ThreadID: s2, Attachments: []attachment{{N: 1, Filename: s3, MimeType: s1, Size: 7}}},
 		attachmentSavePayload{Account: s1, File: s2, Filename: s3, Size: 7},
 		openPayload{Account: s1, ThreadID: s2, MessageID: s3, File: s1},
 		errorEnvelope{Error: errorDetail{Code: s1, Account: s2, ConfigKey: s3, Config: s1}},
+		usageErrorPayload{Error: usageErrorDetail{Code: s1, Message: s2}},
 	}
 }
 
 type listingPayload struct {
 	Account string      `json:"account"`
+	Filter  string      `json:"filter,omitempty"`
 	Threads []threadRow `json:"threads"`
 }
 
@@ -137,6 +141,23 @@ type actionPayload struct {
 	OK        bool     `json:"ok"`
 }
 
+type filterActionPayload struct {
+	Account   string                `json:"account"`
+	Action    string                `json:"action"`
+	Filter    string                `json:"filter"`
+	Matched   int                   `json:"matched"`
+	Attempted int                   `json:"attempted"`
+	Succeeded []string              `json:"succeeded"`
+	Failed    []filterActionFailure `json:"failed"`
+	OK        bool                  `json:"ok"`
+}
+
+type filterActionFailure struct {
+	ID     string `json:"id"`
+	Status int    `json:"status"`
+	Reason string `json:"reason"`
+}
+
 type attachmentListPayload struct {
 	Account     string       `json:"account"`
 	ThreadID    string       `json:"threadId"`
@@ -166,4 +187,13 @@ type errorDetail struct {
 	Account   string `json:"account"`
 	ConfigKey string `json:"config_key"`
 	Config    string `json:"config"`
+}
+
+type usageErrorPayload struct {
+	Error usageErrorDetail `json:"error"`
+}
+
+type usageErrorDetail struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }

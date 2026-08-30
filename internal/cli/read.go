@@ -23,7 +23,7 @@ func runRead(cc *cmdCtx, args []string) int {
 		return code
 	}
 	if err := requireArity(pos, 1, 1, "read"); err != nil {
-		return failUsage(cc.stderr, err)
+		return next.failUsage(err)
 	}
 	account, source, client, code := next.start()
 	if code != 0 {
