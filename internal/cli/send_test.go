@@ -318,18 +318,54 @@ func TestSendHappyPathPostsResolvedMIME(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env, refusal := send.Resolve(send.Request{Mode: send.ModeReply, Body: "x", Self: "user@example.com", Target: targetHeaders()})
-	if refusal != nil {
-		t.Fatalf("resolve expected MIME: %v", refusal)
-	}
-	env.ThreadID = "t1"
-	env.TargetMessageID = "m-t1"
-	wantRaw, err := send.BuildMIME(env, nil, "")
+	message, err := mail.ReadMessage(bytes.NewReader(gotRaw))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("parse sent MIME: %v", err)
 	}
-	if !bytes.Equal(gotRaw, wantRaw) {
-		t.Fatalf("sent MIME:\n got: %q\nwant: %q", gotRaw, wantRaw)
+	for name, want := range map[string]string{
+		"To":          `"Alice" <alice@example.test>`,
+		"Cc":          `"Bob" <bob@example.test>, "Carol" <carol@example.test>`,
+		"Subject":     "Re: Quarterly",
+		"In-Reply-To": "<orig-1@example.test>",
+		"References":  "<root@example.test> <orig-1@example.test>",
+	} {
+		if got := message.Header.Get(name); got != want {
+			t.Fatalf("%s header = %q, want %q", name, got, want)
+		}
+	}
+	mediaType, params, err := mime.ParseMediaType(message.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/alternative" || params["boundary"] == "" {
+		t.Fatalf("Content-Type = %q (%v), want multipart/alternative with a boundary", message.Header.Get("Content-Type"), err)
+	}
+	parts := multipart.NewReader(message.Body, params["boundary"])
+	for _, want := range []struct {
+		contentType string
+		body        string
+	}{
+		{"text/plain; charset=UTF-8", "x"},
+		{"text/html; charset=UTF-8", "<p>x</p>\n"},
+	} {
+		part, err := parts.NextPart()
+		if err != nil {
+			t.Fatalf("read alternative part: %v", err)
+		}
+		if part.Header.Get("Content-Type") != want.contentType || part.Header.Get("Content-Transfer-Encoding") != "base64" {
+			t.Fatalf("alternative part headers = %#v", part.Header)
+		}
+		encoded, err := io.ReadAll(part)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(encoded)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(decoded); got != want.body {
+			t.Fatalf("decoded alternative part = %q, want %q", got, want.body)
+		}
+	}
+	if part, err := parts.NextPart(); err != io.EOF || part != nil {
+		t.Fatalf("NextPart() after alternative leaves = %v, %v; want EOF", part, err)
 	}
 }
 

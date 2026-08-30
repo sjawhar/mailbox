@@ -24,15 +24,15 @@ func BuildMIME(env *Envelope, original []byte, boundary string) ([]byte, error) 
 		if original == nil {
 			return nil, errors.New("send: forward original is required")
 		}
-		return buildForwardMIME(env, original, boundary)
+		return buildForwardMIME(env, original, boundary, "")
 	}
 	if original != nil {
 		return nil, errors.New("send: original is only valid for forwards")
 	}
-	return buildTextMIME(env)
+	return buildAlternativeMIME(env, boundary)
 }
 
-func buildTextMIME(env *Envelope) ([]byte, error) {
+func buildAlternativeMIME(env *Envelope, boundary string) ([]byte, error) {
 	var out bytes.Buffer
 	if err := writeRecipientHeaders(&out, env); err != nil {
 		return nil, err
@@ -47,17 +47,58 @@ func buildTextMIME(env *Envelope) ([]byte, error) {
 		}
 	}
 	writeHeader(&out, "MIME-Version", "1.0")
-	writeHeader(&out, "Content-Type", "text/plain; charset=UTF-8")
-	writeHeader(&out, "Content-Transfer-Encoding", "base64")
-	out.WriteString("\r\n")
-	if err := writeBase64(&out, []byte(env.Body)); err != nil {
+	body, contentType, err := alternativeBody(env.Body, boundary)
+	if err != nil {
 		return nil, err
 	}
+	writeHeader(&out, "Content-Type", contentType)
 	out.WriteString("\r\n")
+	out.Write(body)
 	return out.Bytes(), nil
 }
 
-func buildForwardMIME(env *Envelope, original []byte, boundary string) ([]byte, error) {
+// alternativeBody renders markdown as the multipart/alternative pair shared
+// by compose, reply, and the forward comment part.
+func alternativeBody(markdown, boundary string) ([]byte, string, error) {
+	html, err := RenderHTML(markdown)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if boundary != "" {
+		if err := writer.SetBoundary(boundary); err != nil {
+			return nil, "", fmt.Errorf("send: multipart boundary: %w", err)
+		}
+	}
+	plainPart, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {"text/plain; charset=UTF-8"},
+		"Content-Transfer-Encoding": {"base64"},
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("send: create text/plain part: %w", err)
+	}
+	if err := writeBase64(plainPart, []byte(markdown)); err != nil {
+		return nil, "", fmt.Errorf("send: encode text/plain part: %w", err)
+	}
+	htmlPart, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {"text/html; charset=UTF-8"},
+		"Content-Transfer-Encoding": {"base64"},
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("send: create text/html part: %w", err)
+	}
+	if err := writeBase64(htmlPart, []byte(html)); err != nil {
+		return nil, "", fmt.Errorf("send: encode text/html part: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("send: close multipart alternative: %w", err)
+	}
+	return body.Bytes(), `multipart/alternative; boundary="` + writer.Boundary() + `"`, nil
+}
+
+func buildForwardMIME(env *Envelope, original []byte, boundary, alternativeBoundary string) ([]byte, error) {
 	var out bytes.Buffer
 	writer := multipart.NewWriter(&out)
 	if boundary != "" {
@@ -74,12 +115,16 @@ func buildForwardMIME(env *Envelope, original []byte, boundary string) ([]byte, 
 	writeHeader(&out, "Content-Type", `multipart/mixed; boundary="`+writer.Boundary()+`"`)
 	out.WriteString("\r\n")
 
-	bodyPart, err := writer.CreatePart(textPartHeader())
+	bodyContent, bodyContentType, err := alternativeBody(env.Body, alternativeBoundary)
 	if err != nil {
-		return nil, fmt.Errorf("send: create text MIME part: %w", err)
+		return nil, err
 	}
-	if err := writeBase64(bodyPart, []byte(env.Body)); err != nil {
-		return nil, fmt.Errorf("send: encode text MIME part: %w", err)
+	bodyPart, err := writer.CreatePart(textproto.MIMEHeader{"Content-Type": {bodyContentType}})
+	if err != nil {
+		return nil, fmt.Errorf("send: create alternative MIME part: %w", err)
+	}
+	if _, err := bodyPart.Write(bodyContent); err != nil {
+		return nil, fmt.Errorf("send: write alternative MIME part: %w", err)
 	}
 
 	originalPart, err := writer.CreatePart(originalPartHeader())
@@ -132,13 +177,6 @@ func writeHeader(out *bytes.Buffer, name, value string) {
 	out.WriteString(": ")
 	out.WriteString(value)
 	out.WriteString("\r\n")
-}
-
-func textPartHeader() textproto.MIMEHeader {
-	return textproto.MIMEHeader{
-		"Content-Type":              {"text/plain; charset=UTF-8"},
-		"Content-Transfer-Encoding": {"base64"},
-	}
 }
 
 func originalPartHeader() textproto.MIMEHeader {
