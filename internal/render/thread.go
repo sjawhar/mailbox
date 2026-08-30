@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"net/mail"
 	"net/url"
 	"sort"
 	"strings"
@@ -41,7 +42,7 @@ func RenderThread(thread *gmail.Thread, opts Options) (*RenderedThread, error) {
 	if len(messages) > 0 {
 		rendered.Subject = messages[len(messages)-1].Header("Subject")
 	}
-	seenParticipants := make(map[string]struct{})
+	participantIndex := make(map[string]int)
 	nextLinkN := 1
 	for index, message := range messages {
 		body, err := RenderBody(contents[index], opts, nextLinkN)
@@ -51,9 +52,16 @@ func RenderThread(thread *gmail.Thread, opts Options) (*RenderedThread, error) {
 		nextLinkN += len(body.Links)
 
 		from := message.Header("From")
-		if _, seen := seenParticipants[from]; !seen {
-			seenParticipants[from] = struct{}{}
+		key, hasName := participantKey(from)
+		if slot, seen := participantIndex[key]; !seen {
+			participantIndex[key] = len(rendered.Participants)
 			rendered.Participants = append(rendered.Participants, from)
+		} else if hasName {
+			if _, storedHasName := participantKey(rendered.Participants[slot]); !storedHasName {
+				// Same address seen under a richer spelling: keep the form
+				// with a display name so one participant renders once.
+				rendered.Participants[slot] = from
+			}
 		}
 		rendered.Messages = append(rendered.Messages, RenderedMessage{
 			ID:          message.ID,
@@ -191,4 +199,16 @@ func formatSize(size int64) string {
 	default:
 		return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
 	}
+}
+
+// participantKey canonicalizes a From header for participant deduplication:
+// the lowercased addr-spec when the header parses, the trimmed raw string
+// otherwise. The second return reports whether the spelling carries a
+// display name.
+func participantKey(from string) (string, bool) {
+	address, err := mail.ParseAddress(from)
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(from)), false
+	}
+	return strings.ToLower(address.Address), address.Name != ""
 }

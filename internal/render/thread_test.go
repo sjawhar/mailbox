@@ -214,3 +214,34 @@ func assertExactJSONKeys(t *testing.T, value map[string]json.RawMessage, want []
 		}
 	}
 }
+
+func TestParticipantsDeduplicateAcrossHeaderSpellings(t *testing.T) {
+	spellings := []string{
+		"Sami Jawhar <sami@example.test>",
+		"<sami@example.test>",
+		"sami@EXAMPLE.test",
+		"Ada <ada@example.test>",
+	}
+	thread := &gmail.Thread{ID: "thread-dedup"}
+	for index, from := range spellings {
+		message := loadFixture(t, "github_notification.json")
+		message.ID = message.ID + string(rune('a'+index))
+		message.ThreadID = "thread-dedup"
+		message.InternalDate = 1_787_655_600_000 + int64(len(spellings)-index)
+		for i, header := range message.Payload.Headers {
+			if header.Name == "From" {
+				message.Payload.Headers[i].Value = from
+			}
+		}
+		thread.Messages = append(thread.Messages, message)
+	}
+
+	rendered, err := RenderThread(thread, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Sami Jawhar <sami@example.test>", "Ada <ada@example.test>"}
+	if !reflect.DeepEqual(rendered.Participants, want) {
+		t.Fatalf("participants = %q, want one entry per addr-spec with the richest display form: %q", rendered.Participants, want)
+	}
+}
