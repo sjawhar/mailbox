@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/mailbox/internal/send"
 	"github.com/sjawhar/mailbox/internal/toon"
 	"github.com/sjawhar/mailbox/internal/toon/toontest"
 )
@@ -24,7 +25,38 @@ var adversarial = []string{
 // suites: the toontest mirrors of every CLI surface. T10 appends the exported
 // internal/send payload fixtures here.
 func allPayloadShapes(s1, s2, s3 string) []any {
-	return toontest.Shapes(s1, s2, s3)
+	shapes := toontest.Shapes(s1, s2, s3)
+	return append(shapes,
+		send.EnvelopePayload{
+			Account:   s1,
+			Mode:      s2,
+			ThreadID:  s3,
+			Message:   s1,
+			To:        []send.RecipientPayload{{Address: s1, Name: s2, Provenance: s3}},
+			Cc:        []send.RecipientPayload{{Address: s2, Name: s3, Provenance: s1}},
+			Bcc:       []send.RecipientPayload{{Address: s3, Name: s1, Provenance: s2}},
+			Subject:   s1,
+			BodyBytes: 7,
+			InReplyTo: s2,
+			References: []string{
+				s2,
+				s3,
+			},
+			Forward:  &send.ForwardPayload{OriginalBytes: 7, Disclosure: s3},
+			Sendable: true,
+			Sent:     &send.SentPayload{ID: s1, ThreadID: s2},
+			Scope:    s3,
+			Warning:  s1,
+		},
+		send.RefusalOf(s1, &send.Refusal{
+			Rule:    s2,
+			Code:    s3,
+			Message: s1,
+			ReplyTo: []send.Recipient{{Address: s1, Display: s2, Provenance: send.Provenance(s3)}},
+			From:    []send.Recipient{{Address: s3, Display: s1, Provenance: send.Provenance(s2)}},
+		}),
+		send.RefusalOf(s1, send.NotInThreadRefusal(s2, s3)),
+	)
 }
 
 func TestEncodeOracleRoundTripAllShapes(t *testing.T) {
