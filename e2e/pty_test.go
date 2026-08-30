@@ -155,14 +155,23 @@ func (g *fakeGmail) recordedWriteAuths() []string {
 }
 
 type tmuxSession struct {
-	t    *testing.T
-	tmux string
-	name string
+	t      *testing.T
+	tmux   string
+	socket string
+	name   string
+}
+
+// cmd runs tmux against a test-owned absolute socket path, keeping e2e
+// sessions off whatever server (and TMUX_TMPDIR) the developer's own
+// terminal happens to use — and letting env-scrubbed credential stubs
+// address the same server unambiguously.
+func (s *tmuxSession) cmd(args ...string) *exec.Cmd {
+	return exec.Command(s.tmux, append([]string{"-S", s.socket}, args...)...)
 }
 
 func newTmuxSession(t *testing.T, env map[string]string, args ...string) *tmuxSession {
 	t.Helper()
-	session := &tmuxSession{t: t, tmux: findTmux(t), name: fmt.Sprintf("mailbox-e2e-%d", time.Now().UnixNano())}
+	session := &tmuxSession{t: t, tmux: findTmux(t), socket: filepath.Join(t.TempDir(), "tmux.sock"), name: fmt.Sprintf("mailbox-e2e-%d", time.Now().UnixNano())}
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
@@ -172,16 +181,24 @@ func newTmuxSession(t *testing.T, env map[string]string, args ...string) *tmuxSe
 	for _, key := range keys {
 		words = append(words, key+"="+env[key])
 	}
+	// Session plumbing for credential stubs that capture their own pane (via
+	// credential_env_passthrough): the pane command runs under `env -i`, so
+	// tmux's own TMUX/TMUX_PANE never survive — name the target explicitly.
+	words = append(words,
+		"PTY_TMUX_BIN="+session.tmux,
+		"PTY_TMUX_SOCKET="+session.socket,
+		"PTY_TMUX_SESSION="+session.name,
+	)
 	words = append(words, args...)
 	quoted := make([]string, len(words))
 	for index, word := range words {
 		quoted[index] = shellQuote(word)
 	}
-	run := exec.Command(session.tmux, "new-session", "-d", "-s", session.name, "-x", "160", "-y", "45", strings.Join(quoted, " "))
+	run := session.cmd("new-session", "-d", "-s", session.name, "-x", "160", "-y", "45", strings.Join(quoted, " "))
 	if output, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("tmux new-session: %v: %s", err, output)
 	}
-	t.Cleanup(func() { _ = exec.Command(session.tmux, "kill-session", "-t", session.name).Run() })
+	t.Cleanup(func() { _ = session.cmd("kill-session", "-t", session.name).Run() })
 	return session
 }
 
@@ -189,14 +206,14 @@ func shellQuote(word string) string { return "'" + strings.ReplaceAll(word, "'",
 
 func (s *tmuxSession) SendKeys(keys string) {
 	s.t.Helper()
-	if output, err := exec.Command(s.tmux, "send-keys", "-l", "-t", s.name, keys).CombinedOutput(); err != nil {
+	if output, err := s.cmd("send-keys", "-l", "-t", s.name, keys).CombinedOutput(); err != nil {
 		s.t.Fatalf("tmux send-keys: %v: %s", err, output)
 	}
 }
 
 func (s *tmuxSession) Capture() string {
 	s.t.Helper()
-	output, err := exec.Command(s.tmux, "capture-pane", "-p", "-t", s.name).CombinedOutput()
+	output, err := s.cmd("capture-pane", "-p", "-t", s.name).CombinedOutput()
 	if err != nil {
 		s.t.Fatalf("tmux capture-pane: %v: %s", err, output)
 	}
@@ -228,7 +245,7 @@ func (s *tmuxSession) WaitFor(text string, timeout time.Duration) string {
 
 func (s *tmuxSession) Alive() bool {
 	s.t.Helper()
-	return exec.Command(s.tmux, "has-session", "-t", s.name).Run() == nil
+	return s.cmd("has-session", "-t", s.name).Run() == nil
 }
 
 func (s *tmuxSession) WaitForExit(timeout time.Duration) {
@@ -398,6 +415,22 @@ func assertNoSpawns(t *testing.T, path string) {
 	}
 }
 
+// assertSpawnPaneContains proves attribution-before-spawn without racing the
+// render fence: the credential stub captures its own pane as the FIRST thing it
+// does, so if the attribution line is in that capture, it was painted strictly
+// before the helper ran. Polling the pane from the test races the ~50ms fence
+// under load; this cannot.
+func assertSpawnPaneContains(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read spawn-time pane capture %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("attribution %q missing from spawn-time pane capture %s:\n%s", want, path, data)
+	}
+}
+
 func (g *fakeGmail) waitForWriteAuths(t *testing.T, count int, timeout time.Duration) []string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -420,8 +453,10 @@ func TestTUIUnlockFlowInRealPTY(t *testing.T) {
 	stubs := t.TempDir()
 	argvFile := filepath.Join(stubs, "approve-argv")
 	stdinFile := filepath.Join(stubs, "approve-stdin")
+	spawnPaneFile := filepath.Join(stubs, "approve-pane")
 	approve := filepath.Join(stubs, "approve-write")
 	writeExecutable(t, approve, fmt.Sprintf(`#!/bin/sh
+"$PTY_TMUX_BIN" -S "$PTY_TMUX_SOCKET" capture-pane -p -t "$PTY_TMUX_SESSION" > %q 2>&1
 printf '%%s\t' "$@" >> %q
 printf '\n' >> %q
 if [ -t 0 ]; then
@@ -434,7 +469,7 @@ sleep 2
 export PTY_MODIFY_OAUTH=%q
 export MAILBOX_TOKEN_URL="$STUB_TOKEN_URL"
 exec "$@"
-`, argvFile, argvFile, stdinFile, stdinFile, testAuthorizedUser))
+`, spawnPaneFile, argvFile, argvFile, stdinFile, stdinFile, testAuthorizedUser))
 
 	config := writeE2EConfig(t, stubs, fmt.Sprintf(`default_account = "work"
 [accounts.work]
@@ -442,7 +477,7 @@ read_credential_env = "PTY_READ_OAUTH"
 write_credential_cmd = ["approve-write", "--", %q, "__mint", "--env", "PTY_MODIFY_OAUTH"]
 write_interactive = true
 write_label = "PTY approval"
-credential_env_passthrough = ["STUB_TOKEN_URL"]
+credential_env_passthrough = ["STUB_TOKEN_URL", "PTY_TMUX_BIN", "PTY_TMUX_SOCKET", "PTY_TMUX_SESSION"]
 `, binary))
 	cache := t.TempDir()
 	env := map[string]string{
@@ -467,8 +502,8 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 	session.SendKeys("e")
 	attribution := "waiting for PTY approval; approve only this request — work write access via " + approve
 	session.WaitFor(attribution, 5*time.Second)
-	assertNoSpawns(t, argvFile)
 	session.WaitFor("archive completed", 15*time.Second)
+	assertSpawnPaneContains(t, spawnPaneFile, attribution)
 
 	lines := waitForFileLines(t, argvFile, time.Second)
 	if len(lines) != 1 {
@@ -543,14 +578,14 @@ write_label = "Q"
 
 func stopCredentialSession(session *tmuxSession, helper string) {
 	if session.Alive() {
-		_ = exec.Command(session.tmux, "send-keys", "-l", "-t", session.name, "q").Run()
-		_ = exec.Command(session.tmux, "send-keys", "-l", "-t", session.name, "q").Run()
+		_ = session.cmd("send-keys", "-l", "-t", session.name, "q").Run()
+		_ = session.cmd("send-keys", "-l", "-t", session.name, "q").Run()
 		deadline := time.Now().Add(time.Second)
 		for session.Alive() && time.Now().Before(deadline) {
 			time.Sleep(25 * time.Millisecond)
 		}
 		if session.Alive() {
-			_ = exec.Command(session.tmux, "kill-session", "-t", session.name).Run()
+			_ = session.cmd("kill-session", "-t", session.name).Run()
 		}
 	}
 	killCredentialProcessGroup(session.t, helper)
@@ -833,9 +868,11 @@ func TestTUIInteractiveReadUnlockInRealPTY(t *testing.T) {
 	stubs := t.TempDir()
 	readArgv := filepath.Join(stubs, "approve-read-argv")
 	writeArgv := filepath.Join(stubs, "approve-write-argv")
+	readPaneFile := filepath.Join(stubs, "approve-read-pane")
 	readApprove := filepath.Join(stubs, "approve-read")
 	writeApprove := filepath.Join(stubs, "approve-write")
 	writeExecutable(t, readApprove, fmt.Sprintf(`#!/bin/sh
+"$PTY_TMUX_BIN" -S "$PTY_TMUX_SOCKET" capture-pane -p -t "$PTY_TMUX_SESSION" > %q 2>&1
 printf '%%s\t' "$@" >> %q
 printf '\n' >> %q
 sleep 10
@@ -843,14 +880,14 @@ sleep 10
 export PTY_READ_OAUTH=%q
 export MAILBOX_TOKEN_URL="$STUB_TOKEN_URL"
 exec "$@"
-`, readArgv, readArgv, testAuthorizedUser))
+`, readPaneFile, readArgv, readArgv, testAuthorizedUser))
 	writeExecutable(t, writeApprove, fmt.Sprintf("#!/bin/sh\nprintf 'spawned\\n' >> %q\nexit 99\n", writeArgv))
 	config := writeE2EConfig(t, stubs, fmt.Sprintf(`default_account = "work"
 [accounts.work]
 read_credential_cmd = ["approve-read", "--", %q, "__mint", "--env", "PTY_READ_OAUTH"]
 read_interactive = true
 write_credential_cmd = ["approve-write"]
-credential_env_passthrough = ["STUB_TOKEN_URL"]
+credential_env_passthrough = ["STUB_TOKEN_URL", "PTY_TMUX_BIN", "PTY_TMUX_SOCKET", "PTY_TMUX_SESSION"]
 `, binary))
 	cache := t.TempDir()
 	session := newTmuxSession(t, map[string]string{
@@ -867,9 +904,9 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 	if !found || !strings.Contains(pane, filepath.Base(readApprove)) {
 		t.Fatalf("interactive-read attribution missing; helper spawns=%q; Gmail authorizations=%q; pane:\n%s", fileLines(t, readArgv), gmail.recordedReadAuths(), pane)
 	}
-	assertNoSpawns(t, readArgv)
 	assertNoSpawns(t, writeArgv)
 	session.WaitFor("PTY smoke", 15*time.Second)
+	assertSpawnPaneContains(t, readPaneFile, "work read access via")
 	readAuths := gmail.recordedReadAuths()
 	if len(readAuths) == 0 {
 		t.Fatal("interactive read unlock reached the inbox without a Gmail request")

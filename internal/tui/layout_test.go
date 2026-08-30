@@ -9,11 +9,17 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStandardViewsMatchCapturedBaseline(t *testing.T) {
 	t.Setenv("GLAMOUR_STYLE", "dark")
 
+	// Fixture InternalDates sit at epoch 1788000000000 (2026-08-29 UTC). The
+	// date column renders relative to "now" (today → clock time), so hashing
+	// against the real clock drifts at midnight. Pin the clock to the
+	// fixtures' day — the convention the sibling tests already use.
+	baselineNow := time.Date(2026, time.August, 29, 23, 59, 0, 0, time.Local)
 	rows := testThreads(2)
 	model, _ := newTestApp(rows)
 	labelRows := testThreads(1)
@@ -28,8 +34,8 @@ func TestStandardViewsMatchCapturedBaseline(t *testing.T) {
 	}
 
 	views := map[string]string{
-		"rows-standard": model.list.rowsView(80, nil, 6),
-		"rows-label":    labelModel.list.rowsView(80, map[string]string{"Label_7": "Project"}, 6),
+		"rows-standard": model.list.rowsViewAt(80, nil, 6, baselineNow),
+		"rows-label":    labelModel.list.rowsViewAt(80, map[string]string{"Label_7": "Project"}, 6, baselineNow),
 		"reader":        reader.viewport.View(),
 	}
 	baselineRawSHA256 := map[string]string{
