@@ -112,7 +112,12 @@ bad) printf '%s\n' 'short' ;;
 chatter) printf 'chatter\nnoise\n' ;;
 malformed) printf '%s\n' '{"access_token": broken' ;;
 diag) printf '%s\n' 'diagnostic.command.token-1234567890'; printf 'grant expires in 7d\033]52;c;steal\a\n' >&2 ;;
-oversize) i=0; while [ "$i" -lt 17000 ]; do printf x; i=$((i + 1)); done; printf completed > "${PROBE_COMPLETED_FILE:-/dev/null}" ;;
+# 96KiB of TOP-LEVEL builtin writes > capture cap (16KiB) + kernel pipe
+# buffer (64KiB). The cap-tripped copier closes its read end, so the shell
+# either blocks on the full pipe or dies of SIGPIPE mid-flood — it can never
+# reach the completion write. (A smaller flood fits the pipe buffer and can
+# finish before the trip; a pipeline moves the SIGPIPE to a child.)
+oversize) i=0; while [ "$i" -lt 96 ]; do printf '%01024d' 0; i=$((i + 1)); done; printf completed > "${PROBE_COMPLETED_FILE:-/dev/null}" ;;
 sleep) sleep 30 ;;
 descendant) (sleep 30 >&1 &) ;;
 *) echo "unknown stub mode" >&2; exit 64 ;;
