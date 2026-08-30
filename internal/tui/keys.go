@@ -5,6 +5,7 @@ const (
 	keyAttachments  = "a"
 	keyConfirmSend  = "y"
 	keyDown         = "j"
+	keyFilter       = "f"
 	keyLabel        = "l"
 	keyNext         = "n"
 	keyOpenHTML     = "o"
@@ -15,7 +16,9 @@ const (
 	keyReply        = "r"
 	keyReplyProceed = "ctrl+s"
 	keySearch       = "/"
-	keyTrash        = "d"
+	keySelect       = "v"
+	keySelectAll    = "a"
+	keyTrash        = "#"
 	keyUnread       = "u"
 	keyUp           = "k"
 )

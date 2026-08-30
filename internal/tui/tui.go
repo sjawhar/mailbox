@@ -149,6 +149,7 @@ type app struct {
 	statusError  bool
 	statusNote   string
 	loading      bool
+	listLoaded   bool
 	layout       layoutMetrics
 	pending      *pendingAction
 	pendingSend  *pendingSend
@@ -218,6 +219,12 @@ func (m app) listReadCommand() tea.Cmd {
 	return m.loadingCmd(listThreadsCmd(m.currentRequest(listOperation), m.list.query))
 }
 
+func (m *app) beginListing() asyncRequest {
+	m.list.clearSelection()
+	m.listLoaded = false
+	return m.beginRequest(listOperation)
+}
+
 func (m app) loadingCmd(command tea.Cmd) tea.Cmd {
 	return tea.Batch(command, m.spinnerCmd())
 }
@@ -269,6 +276,7 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 			m.loading = false
 		}
 		m.list.setRows(message.threads)
+		m.listLoaded = true
 		m.preview.requestedID = ""
 		m.preview.content = ""
 		m.preview.err = ""
@@ -720,6 +728,7 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	m.invalidateRequests()
 	m.view = listView
 	m.list = newInboxModel()
+	m.listLoaded = false
 	m.preview = newPreviewModel()
 	m.thread = threadModel{}
 	m.reply = replyModel{}

@@ -159,6 +159,10 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startAction("archive", []string{m.thread.thread.ID}, nil, []string{"INBOX"}, true)
 	case keyTrash:
 		return m.startAction("trash", []string{m.thread.thread.ID}, nil, nil, true)
+	case "d":
+		// Unbound as of v2.1 (# trashes). Consumed here so the key never
+		// reaches the viewport, whose default keymap scrolls on d.
+		return m, nil
 	case keyAttachments:
 		attachments, err := render.ThreadAttachments(m.thread.thread)
 		if err != nil {

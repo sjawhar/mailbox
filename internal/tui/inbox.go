@@ -13,11 +13,17 @@ import (
 )
 
 type inboxModel struct {
-	rows     []*gmail.Thread
-	cursor   int
-	selected map[string]struct{}
-	query    string
+	rows      []*gmail.Thread
+	cursor    int
+	selected  map[string]struct{}
+	selecting bool
+	query     string
 }
+
+const (
+	listHelp   = "j/k move · v select · e archive · # trash · u unread · l label · f filter · / search · tab account · enter read · R refresh · q quit"
+	selectHelp = "space toggle · a all · e archive · # trash · u unread · l label · esc done"
+)
 
 func newInboxModel() inboxModel {
 	return inboxModel{selected: make(map[string]struct{})}
@@ -26,7 +32,18 @@ func newInboxModel() inboxModel {
 func (m *inboxModel) setRows(rows []*gmail.Thread) {
 	m.rows = rows
 	m.cursor = 0
+	m.clearSelection()
+}
+
+func (m *inboxModel) clearSelection() {
+	m.selecting = false
 	m.selected = make(map[string]struct{})
+}
+
+func (m *inboxModel) selectAll() {
+	for _, row := range m.rows {
+		m.selected[row.ID] = struct{}{}
+	}
 }
 
 func (m *inboxModel) move(delta int) {
@@ -106,22 +123,30 @@ func (m *inboxModel) updateLabels(ids, add, remove []string) {
 }
 
 func (m inboxModel) View(account string, width, height int, labelNameByID map[string]string, envToken bool) string {
+	help := listHelp
+	if m.selecting {
+		help = selectHelp
+	}
 	lines := []string{
 		titleStyle.Render(m.title(account, envToken)),
-		helpStyle.Render("j/k move · space select · e archive · d trash · u unread · l label · / search · tab account · enter read · R refresh · q quit"),
+		helpStyle.Render(help),
 		m.rowsView(width, labelNameByID, height-3),
 	}
 	return strings.Join(lines, "\n")
 }
 
 func (m app) inboxView() string {
+	help := listHelp
+	if m.list.selecting {
+		help = selectHelp
+	}
 	if !m.previewEnabled() {
 		return m.list.View(m.account, m.layout.width, m.layout.height, m.ctx.labelNameByID, m.usesEnvToken()) + "\n" + m.statusView()
 	}
 	listPane := paneStyle.Width(m.layout.listPaneWidth).Height(m.layout.splitPaneHeight).Render(m.list.rowsView(m.layout.listContentWidth, m.ctx.labelNameByID, m.layout.splitContentHeight))
 	previewPane := paneStyle.Width(m.layout.previewPaneWidth).Height(m.layout.splitPaneHeight).Render(m.previewView(m.layout.previewContentWidth, m.layout.splitContentHeight))
 	return titleStyle.Render(m.list.title(m.account, m.usesEnvToken())) + "\n" +
-		helpStyle.Render("j/k move · space select · enter read · e archive · d trash · u unread · l label · / search · tab account · R refresh · q quit") + "\n" +
+		helpStyle.Render(help) + "\n" +
 		lipgloss.JoinHorizontal(lipgloss.Top, listPane, previewPane) + "\n" +
 		m.statusView()
 }
@@ -235,13 +260,38 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.list.move(-1)
 		command := m.requestPreview()
 		return m, command
+	case keySelect:
+		m.list.selecting = true
+		return m, nil
 	case " ":
-		m.list.toggleSelected()
+		if m.list.selecting {
+			m.list.toggleSelected()
+		}
+		return m, nil
+	case keySelectAll:
+		if m.list.selecting {
+			m.list.selectAll()
+		}
+		return m, nil
+	case "esc":
+		if m.list.selecting {
+			m.list.clearSelection()
+		}
+		return m, nil
 	case keyArchive:
+		if !m.listLoaded {
+			return m, nil
+		}
 		return m.startAction("archive", m.list.targetIDs(), nil, []string{"INBOX"}, false)
 	case keyTrash:
+		if !m.listLoaded {
+			return m, nil
+		}
 		return m.startAction("trash", m.list.targetIDs(), nil, nil, false)
 	case keyUnread:
+		if !m.listLoaded {
+			return m, nil
+		}
 		ids := m.list.targetIDs()
 		if len(ids) == 0 {
 			return m, nil
@@ -251,6 +301,9 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.startAction("mark", ids, []string{"UNREAD"}, nil, false)
 	case keyLabel:
+		if !m.listLoaded {
+			return m, nil
+		}
 		m.view = labelPickerView
 		m.label.SetValue("")
 		m.labelCursor = 0
@@ -276,7 +329,7 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadingCmd(getThreadCmd(request, m.list.rows[m.list.cursor].ID))
 	case keyRefresh:
 		m.loading = true
-		request := m.beginRequest(listOperation)
+		request := m.beginListing()
 		return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
 	case keyQuit:
 		if m.deflectUnlock() {

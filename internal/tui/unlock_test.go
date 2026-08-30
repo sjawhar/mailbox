@@ -48,6 +48,7 @@ func TestUnlockForceAbandonKillsProcessGroup(t *testing.T) {
 	ctx.api = &fakeAPI{threads: testThreads(1), attachments: make(map[string][]byte)}
 	model := newApp(ctx)
 	model.list.rows = testThreads(1)
+	model.listLoaded = true
 	model, fence := update(t, model, key("e"))
 	armed := runCmd(t, fence)
 	model, acquire := update(t, model, armed)
@@ -132,6 +133,7 @@ func newUnlockApp(rows int) (app, *fakeAPI, *unlockRecorder, *int) {
 	ctx.takeDiagnostic = func(auth.Class) string { return "" }
 	model := newApp(ctx)
 	model.list.rows = threads
+	model.listLoaded = true
 	return model, api, recorder, &invalidations
 }
 

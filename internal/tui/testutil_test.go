@@ -236,6 +236,7 @@ func newTestModel(api gmailAPI, account string) app {
 	acct, _ := cfg.Account(account)
 	model := newApp(testAccountCtx(cfg, acct, api))
 	model.list.rows = append([]*gmail.Thread(nil), testAPIThreads(api)...)
+	model.listLoaded = true
 	return model
 }
 

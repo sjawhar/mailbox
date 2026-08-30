@@ -18,7 +18,7 @@ func (m app) updateSearchKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.search.Blur()
 		m.view = listView
 		m.loading = true
-		request := m.beginRequest(listOperation)
+		request := m.beginListing()
 		return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
 	}
 	var command tea.Cmd
