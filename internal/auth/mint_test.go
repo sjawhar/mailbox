@@ -3,7 +3,9 @@ package auth
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -289,8 +291,8 @@ func TestTailBufferKeepsFinalSanitizedDiagnosticWithinCaps(t *testing.T) {
 
 func TestParseMintOutputRejectsUnknownOrTrailingContent(t *testing.T) {
 	cases := [][]byte{
-		[]byte(`{"access_token":"token","expiry":"2099-01-01T00:00:00Z","extra":true}`),
-		[]byte(`{"access_token":"token","expiry":"2099-01-01T00:00:00Z"}{}`),
+		[]byte(`{"access_token":"token","expiry":"2099-01-01T00:00:00Z","scope":"gmail.send","extra":true}`),
+		[]byte(`{"access_token":"token","expiry":"2099-01-01T00:00:00Z","scope":"gmail.send"}{}`),
 	}
 	for _, output := range cases {
 		if _, err := parseMintOutput(output); err == nil {
@@ -310,5 +312,60 @@ func TestParseMintOutputRejectsMissingOrInvalidTokenFields(t *testing.T) {
 		if _, err := parseMintOutput(output); err == nil {
 			t.Fatalf("parseMintOutput accepted %q", output)
 		}
+	}
+}
+
+func TestRunMintChildPreservesOptionalScope(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		response  string
+		wantScope string
+	}{
+		{
+			name:      "scope present",
+			response:  `{"access_token":"minted-token","expires_in":3600,"scope":"https://www.googleapis.com/auth/gmail.send"}`,
+			wantScope: "https://www.googleapis.com/auth/gmail.send",
+		},
+		{
+			name:     "scope absent",
+			response: `{"access_token":"minted-token","expires_in":3600}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MINT_OAUTH", oauthJSON())
+			t.Setenv("MAILBOX_TOKEN_URL", tokenServer(t, 200, tc.response))
+			var stdout bytes.Buffer
+			if err := RunMintChild(context.Background(), "MINT_OAUTH", &stdout); err != nil {
+				t.Fatal(err)
+			}
+
+			var output struct {
+				AccessToken string `json:"access_token"`
+				Expiry      string `json:"expiry"`
+				Scope       string `json:"scope,omitempty"`
+			}
+			decoder := json.NewDecoder(&stdout)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&output); err != nil {
+				t.Fatalf("decode strict mint output: %v", err)
+			}
+			var trailing json.RawMessage
+			if err := decoder.Decode(&trailing); err != io.EOF {
+				t.Fatalf("strict mint output has trailing content: %v", err)
+			}
+			if output.AccessToken != "minted-token" || output.Expiry == "" || output.Scope != tc.wantScope {
+				t.Fatalf("mint output = %+v, want scope %q", output, tc.wantScope)
+			}
+			if tc.wantScope == "" && strings.Contains(stdout.String(), `"scope"`) {
+				t.Fatalf("unscoped mint output included scope: %q", stdout.String())
+			}
+		})
+	}
+}
+
+func TestParseMintOutputAcceptsScope(t *testing.T) {
+	token, err := parseMintOutput([]byte(`{"access_token":"token","expiry":"2099-01-01T00:00:00Z","scope":"gmail.send"}`))
+	if err != nil || token.Scope != "gmail.send" {
+		t.Fatalf("parseMintOutput scope token = %+v, %v", token, err)
 	}
 }

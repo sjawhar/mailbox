@@ -302,3 +302,85 @@ func TestConfigResolveAccount(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadConfigSendCredentialSource(t *testing.T) {
+	stubCmds(t, "my-send-helper")
+	writeConfig(t, `
+[accounts.work]
+read_credential_env = "WORK_READ_JSON"
+send_credential_cmd = ["my-send-helper"]
+send_interactive = true
+send_label = "hardware key touch"
+`)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct, ok := cfg.Account("work")
+	if !ok {
+		t.Fatal("work account missing")
+	}
+	if acct.Send == nil || !acct.Send.Interactive || acct.Send.Label != "hardware key touch" || acct.Send.ConfigKey != "accounts.work.send_credential_cmd" {
+		t.Fatalf("send source = %+v", acct.Send)
+	}
+}
+
+func TestSendCredentialCommandIsInteractiveByDefault(t *testing.T) {
+	stubCmds(t, "my-send-helper")
+	writeConfig(t, `
+[accounts.work]
+read_credential_env = "WORK_READ_JSON"
+send_credential_cmd = ["my-send-helper"]
+`)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct, _ := cfg.Account("work")
+	if acct.Send == nil || !acct.Send.Interactive {
+		t.Fatalf("send source = %+v, want an interactive command source", acct.Send)
+	}
+}
+
+func TestSendLabelRequiresCredentialSource(t *testing.T) {
+	writeConfig(t, `
+[accounts.work]
+read_credential_env = "WORK_READ_JSON"
+send_label = "hardware key touch"
+`)
+
+	_, err := LoadConfig()
+	if err == nil || !strings.Contains(err.Error(), "send_label requires a send credential source") {
+		t.Fatalf("LoadConfig error = %v, want send label source requirement", err)
+	}
+}
+
+func TestSendCredentialEnvAndCommandConflict(t *testing.T) {
+	stubCmds(t, "my-send-helper")
+	writeConfig(t, `
+[accounts.work]
+read_credential_env = "WORK_READ_JSON"
+send_credential_env = "ACME_SEND_OAUTH_JSON"
+send_credential_cmd = ["my-send-helper"]
+`)
+
+	_, err := LoadConfig()
+	if err == nil || !strings.Contains(err.Error(), "accounts.work.send") {
+		t.Fatalf("LoadConfig error = %v, want send source conflict", err)
+	}
+}
+
+func TestDuplicateEnvAcrossClassesFailsCompile(t *testing.T) {
+	writeConfig(t, `
+default_account = "work"
+[accounts.work]
+read_credential_env = "SHARED_OAUTH_JSON"
+send_credential_env = "SHARED_OAUTH_JSON"
+`)
+
+	if _, err := LoadConfig(); err == nil || !strings.Contains(err.Error(), "declared by both") {
+		t.Fatalf("shared env var across classes compiled: %v", err)
+	}
+}

@@ -21,10 +21,10 @@ func ScrubbedEnviron(cfg *Config) []string {
 	return scrubbedEnviron(cfg, os.Environ())
 }
 
-// CredentialChildEnviron returns the restricted environment for an account's
-// credential command, restoring only its safe configured passthrough values
-// and incrementing the credential recursion depth.
-func CredentialChildEnviron(cfg *Config, acct *AccountConfig) []string {
+// CredentialChildEnviron returns the restricted environment for a requested
+// credential class, restoring only its account's safe configured passthrough
+// values and incrementing the credential recursion depth.
+func CredentialChildEnviron(cfg *Config, acct *AccountConfig, _ Class) []string {
 	parent := os.Environ()
 	child := scrubbedEnviron(cfg, parent)
 
@@ -91,7 +91,7 @@ func isConfiguredCredentialEnvironment(cfg *Config, name string) bool {
 		return false
 	}
 	for _, acct := range cfg.Accounts {
-		for _, source := range []*CredentialSource{acct.Read, acct.Write} {
+		for _, source := range []*CredentialSource{acct.Read, acct.Write, acct.Send} {
 			if source != nil && source.Kind == SourceEnv && source.EnvVar == name {
 				return true
 			}

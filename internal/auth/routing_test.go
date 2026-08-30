@@ -37,8 +37,11 @@ func probeMain() {
 		os.Exit(1)
 	}
 	class := ClassRead
-	if os.Getenv("PROBE_CLASS") == string(ClassWrite) {
+	switch os.Getenv("PROBE_CLASS") {
+	case string(ClassWrite):
 		class = ClassWrite
+	case string(ClassSend):
+		class = ClassSend
 	}
 	var acq Acquirer
 	if os.Getenv("PROBE_SURFACE") == "tui" {
@@ -54,6 +57,15 @@ func probeMain() {
 			os.Exit(1)
 		}
 		fmt.Printf("ROUTE=%s\nTOKEN=%s\nDIAG=%s\n", source.WriteRoute(), token, source.TakeDiagnostic(class))
+		return
+	}
+	if class == ClassSend {
+		token, err := source.SendToken(context.Background(), acq)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Printf("ROUTE=%s\nTOKEN=%s\nDIAG=%s\n", source.SendRoute(), token.AccessToken, source.TakeDiagnostic(class))
 		return
 	}
 	token, err := source.Resolve(context.Background(), acq)
@@ -484,4 +496,72 @@ func TestRouting(t *testing.T) {
 			t.Fatalf("exit, stderr = %d, %q; want no-config guidance", got.exit, got.stderr)
 		}
 	})
+}
+
+func TestCredentialChildrenCannotMintOtherClassCredentials(t *testing.T) {
+	tests := []struct {
+		name      string
+		class     Class
+		helper    string
+		config    string
+		canaryEnv string
+		targetEnv string
+	}{
+		{
+			name:   "read helper cannot mint send credential",
+			class:  ClassRead,
+			helper: "mint-send-canary",
+			config: `default_account = "work"
+[accounts.work]
+read_credential_cmd = ["mint-send-canary"]
+send_credential_env = "CANARY_SEND_OAUTH"
+credential_env_passthrough = ["TEST_BINARY", "PROBE_MINT_ENV_FILE"]
+`,
+			canaryEnv: "CANARY_SEND_OAUTH",
+			targetEnv: "CANARY_SEND_OAUTH",
+		},
+		{
+			name:   "send helper cannot mint read credential",
+			class:  ClassSend,
+			helper: "mint-read-canary",
+			config: `default_account = "work"
+[accounts.work]
+read_credential_env = "WORK_READ_JSON"
+send_credential_cmd = ["mint-read-canary"]
+send_interactive = false
+credential_env_passthrough = ["TEST_BINARY", "PROBE_MINT_ENV_FILE"]
+`,
+			canaryEnv: "WORK_READ_JSON",
+			targetEnv: "WORK_READ_JSON",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pe := newProbeEnv(t)
+			envFile := filepath.Join(pe.stubs, "mint-child-env")
+			writeStub(t, pe.stubs, tc.helper, `exec "$TEST_BINARY" __mint --env `+tc.targetEnv)
+			writeProbeConfig(t, pe, tc.config)
+			pe.extra["TEST_BINARY"] = os.Args[0]
+			pe.extra["PROBE_MINT_ENV_FILE"] = envFile
+			pe.extra[tc.canaryEnv] = "not-an-authorized-user-json"
+			if tc.class == ClassSend {
+				pe.extra["PROBE_CLASS"] = string(ClassSend)
+			}
+
+			got := execProbe(t, pe)
+			if got.exit == 0 || !strings.Contains(got.stderr, tc.targetEnv+" is unset") {
+				t.Fatalf("mint-probe result = %+v, want unset credential refusal", got)
+			}
+			if strings.Contains(got.stdout, "TOKEN=") {
+				t.Fatalf("mint-probe stdout = %q, want zero minted tokens", got.stdout)
+			}
+			childEnv, err := os.ReadFile(envFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(childEnv), tc.targetEnv+"=") {
+				t.Fatalf("credential child leaked %s into __mint: %q", tc.targetEnv, childEnv)
+			}
+		})
+	}
 }

@@ -47,6 +47,7 @@ type Class string
 const (
 	ClassRead  Class = "read"
 	ClassWrite Class = "write"
+	ClassSend  Class = "send"
 )
 
 type SourceKind string
@@ -77,6 +78,7 @@ type AccountConfig struct {
 	Name        string
 	Read        *CredentialSource
 	Write       *CredentialSource
+	Send        *CredentialSource
 	Passthrough []string
 }
 
@@ -98,6 +100,10 @@ type rawAccount struct {
 	WriteCredentialCmd *[]string `toml:"write_credential_cmd"`
 	WriteInteractive   *bool     `toml:"write_interactive"`
 	WriteLabel         *string   `toml:"write_label"`
+	SendCredentialEnv  *string   `toml:"send_credential_env"`
+	SendCredentialCmd  *[]string `toml:"send_credential_cmd"`
+	SendInteractive    *bool     `toml:"send_interactive"`
+	SendLabel          *string   `toml:"send_label"`
 	Passthrough        []string  `toml:"credential_env_passthrough"`
 }
 
@@ -256,7 +262,7 @@ func compileConfig(configPath string, raw rawConfig, keys []toml.Key) (*Config, 
 
 	declaredVars := make(map[string]string)
 	for _, account := range accounts {
-		for _, source := range []*CredentialSource{account.Read, account.Write} {
+		for _, source := range []*CredentialSource{account.Read, account.Write, account.Send} {
 			if source == nil || source.Kind != SourceEnv {
 				continue
 			}
@@ -346,6 +352,14 @@ func compileAccount(configPath, name string, raw rawAccount) (*AccountConfig, er
 		return nil, configError(configPath, "accounts.%s.write_label requires a write credential source", name)
 	}
 
+	send, err := compileCredentialSource(configPath, name, ClassSend, raw.SendCredentialEnv, raw.SendCredentialCmd, raw.SendInteractive, raw.SendLabel)
+	if err != nil {
+		return nil, err
+	}
+	if raw.SendLabel != nil && send == nil {
+		return nil, configError(configPath, "accounts.%s.send_label requires a send credential source", name)
+	}
+
 	passthroughKey := fmt.Sprintf("accounts.%s.credential_env_passthrough", name)
 	for _, variable := range raw.Passthrough {
 		if !envVarNamePattern.MatchString(variable) {
@@ -357,6 +371,7 @@ func compileAccount(configPath, name string, raw rawAccount) (*AccountConfig, er
 		Name:        name,
 		Read:        read,
 		Write:       write,
+		Send:        send,
 		Passthrough: raw.Passthrough,
 	}, nil
 }
@@ -401,7 +416,7 @@ func compileCredentialSource(configPath, accountName string, class Class, enviro
 		return nil, configError(configPath, "%s: resolve argv0 %q: %v", commandKey, argv[0], err)
 	}
 
-	interactiveValue := class == ClassWrite
+	interactiveValue := class != ClassRead
 	if interactive != nil {
 		interactiveValue = *interactive
 	}

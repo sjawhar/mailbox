@@ -44,7 +44,7 @@ func runCredentialCmd(ctx context.Context, cfg *Config, acct *AccountConfig, src
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = CredentialChildEnviron(cfg, acct)
+	cmd.Env = CredentialChildEnviron(cfg, acct, src.Class)
 	stdout := &cappedBuffer{limit: mintStdoutLimit}
 	stderr := &tailBuffer{limit: mintStderrLimit}
 	cmd.Stdout = stdout

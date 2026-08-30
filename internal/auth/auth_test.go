@@ -48,7 +48,7 @@ func TestRefreshRefusesRedirectsFromLoopbackTokenEndpoint(t *testing.T) {
 	t.Cleanup(redirector.Close)
 	t.Setenv("MAILBOX_TOKEN_URL", redirector.URL)
 
-	_, _, err := refreshAccessToken(context.Background(), "accounts.work.read_credential_env", oauthJSON())
+	_, _, _, err := refreshAccessToken(context.Background(), "accounts.work.read_credential_env", oauthJSON())
 	if err == nil {
 		t.Fatal("refresh followed a redirect from the loopback endpoint")
 	}

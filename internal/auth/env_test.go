@@ -15,10 +15,12 @@ scrub_env_patterns = ["ACME_*_OAUTH"]
 [accounts.work]
 read_credential_env = "WORK_READ_JSON"
 write_credential_cmd = ["my-approver"]
+send_credential_cmd = ["my-approver"]
 credential_env_passthrough = ["ACME_SESSION_FILE", "ACME_REGION"]
 [accounts.personal]
 read_credential_env = "PERSONAL_READ_JSON"
 write_credential_env = "PERSONAL_WRITE_JSON"
+send_credential_env = "ACME_SEND_OAUTH_JSON"
 `)
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -58,6 +60,7 @@ func TestScrubbedEnviron(t *testing.T) {
 		"WORK_READ_JSON":           "decoy",
 		"PERSONAL_READ_JSON":       "decoy",
 		"PERSONAL_WRITE_JSON":      "decoy",
+		"ACME_SEND_OAUTH_JSON":     "decoy",
 		"EXTRA_SENSITIVE":          "decoy",
 		"ACME_WORK_OAUTH":          "decoy",
 		"ACME_SESSION_FILE":        "session",
@@ -78,6 +81,7 @@ func TestScrubbedEnviron(t *testing.T) {
 		"PERSONAL_WRITE_JSON",
 		"EXTRA_SENSITIVE",
 		"ACME_WORK_OAUTH",
+		"ACME_SEND_OAUTH_JSON",
 		"ACME_SESSION_FILE",
 	} {
 		if _, leaked := got[denied]; leaked {
@@ -123,21 +127,22 @@ func TestCredentialChildEnvironPassthroughExactness(t *testing.T) {
 		t.Fatal("work account missing")
 	}
 	for name, value := range map[string]string{
-		"ACME_SESSION_FILE":   "session-path",
-		"ACME_REGION":         "eu-1",
-		"PERSONAL_READ_JSON":  "cross-account-decoy",
-		"WORK_READ_JSON":      "own-credential-decoy",
-		"PERSONAL_WRITE_JSON": "cross-account-write-decoy",
-		"MAILBOX_TOKEN":       "decoy",
-		"MAILBOX_TOKEN_URL":   "http://evil.example/token",
-		"MAILBOX_CONFIG":      "/tmp/decoy.toml",
-		"EXTRA_SENSITIVE":     "unrelated-scrubbed-decoy",
-		"ACME_WORK_OAUTH":     "unrelated-pattern-decoy",
+		"ACME_SESSION_FILE":    "session-path",
+		"ACME_REGION":          "eu-1",
+		"PERSONAL_READ_JSON":   "cross-account-decoy",
+		"WORK_READ_JSON":       "own-credential-decoy",
+		"PERSONAL_WRITE_JSON":  "cross-account-write-decoy",
+		"ACME_SEND_OAUTH_JSON": "cross-account-send-decoy",
+		"MAILBOX_TOKEN":        "decoy",
+		"MAILBOX_TOKEN_URL":    "http://evil.example/token",
+		"MAILBOX_CONFIG":       "/tmp/decoy.toml",
+		"EXTRA_SENSITIVE":      "unrelated-scrubbed-decoy",
+		"ACME_WORK_OAUTH":      "unrelated-pattern-decoy",
 	} {
 		t.Setenv(name, value)
 	}
 
-	env := CredentialChildEnviron(cfg, work)
+	env := CredentialChildEnviron(cfg, work, ClassRead)
 	got := envNames(env)
 	if got["ACME_SESSION_FILE"] != "session-path" {
 		t.Fatalf("passthrough var removed by scrub_env was not re-added: %v", got)
@@ -153,6 +158,7 @@ func TestCredentialChildEnvironPassthroughExactness(t *testing.T) {
 		"PERSONAL_READ_JSON",
 		"PERSONAL_WRITE_JSON",
 		"MAILBOX_TOKEN",
+		"ACME_SEND_OAUTH_JSON",
 		"MAILBOX_TOKEN_URL",
 		"MAILBOX_CONFIG",
 		"EXTRA_SENSITIVE",
@@ -167,7 +173,7 @@ func TestCredentialChildEnvironPassthroughExactness(t *testing.T) {
 	}
 
 	t.Setenv("MAILBOX_CREDENTIAL_DEPTH", "1")
-	got = envNames(CredentialChildEnviron(cfg, work))
+	got = envNames(CredentialChildEnviron(cfg, work, ClassRead))
 	if got["MAILBOX_CREDENTIAL_DEPTH"] != "2" {
 		t.Fatalf("depth = %q, want incremented 2", got["MAILBOX_CREDENTIAL_DEPTH"])
 	}
@@ -196,7 +202,7 @@ func TestCredentialChildEnvironClampsInvalidDepth(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("MAILBOX_CREDENTIAL_DEPTH", test.current)
 
-			got := envNames(CredentialChildEnviron(cfg, work))
+			got := envNames(CredentialChildEnviron(cfg, work, ClassRead))
 			if got["MAILBOX_CREDENTIAL_DEPTH"] != test.want {
 				t.Fatalf("depth = %q, want %s for parent depth %q", got["MAILBOX_CREDENTIAL_DEPTH"], test.want, test.current)
 			}
@@ -243,10 +249,35 @@ func TestCredentialChildEnvironRefusesUnsafePassthrough(t *testing.T) {
 		t.Setenv(name, value)
 	}
 
-	got := envNames(CredentialChildEnviron(cfg, work))
+	got := envNames(CredentialChildEnviron(cfg, work, ClassRead))
 	for _, denied := range []string{"MAILBOX_TOKEN", "WORK_READ_JSON", "PERSONAL_READ_JSON"} {
 		if _, leaked := got[denied]; leaked {
 			t.Errorf("credential child leaked unsafe passthrough %s", denied)
+		}
+	}
+}
+
+func TestCredentialChildScrubsOtherClassCredentials(t *testing.T) {
+	cfg := envTestConfig(t)
+	work, ok := cfg.Account("work")
+	if !ok {
+		t.Fatal("work account missing")
+	}
+	for name, value := range map[string]string{
+		"ACME_SEND_OAUTH_JSON": "canary-send",
+		"WORK_READ_JSON":       "canary-read",
+		"PERSONAL_READ_JSON":   "canary-personal-read",
+		"PERSONAL_WRITE_JSON":  "canary-personal-write",
+	} {
+		t.Setenv(name, value)
+	}
+
+	for _, class := range []Class{ClassRead, ClassWrite, ClassSend} {
+		got := envNames(CredentialChildEnviron(cfg, work, class))
+		for _, denied := range []string{"ACME_SEND_OAUTH_JSON", "WORK_READ_JSON", "PERSONAL_READ_JSON", "PERSONAL_WRITE_JSON"} {
+			if _, leaked := got[denied]; leaked {
+				t.Errorf("%s child leaked %s", class, denied)
+			}
 		}
 	}
 }
