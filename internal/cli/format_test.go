@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +79,57 @@ func TestToontestMirrorsMatchRealPayloads(t *testing.T) {
 			t.Fatalf("mirror %d diverged:\nreal:   %s\nmirror: %s", index, want, got)
 		}
 	}
+	for index := range real {
+		want := jsonLeafPaths(reflect.TypeOf(real[index]), "")
+		got := jsonLeafPaths(reflect.TypeOf(mirrors[index]), "")
+		if !maps.Equal(want, got) {
+			t.Fatalf("payload %d JSON shape diverged — update toontest.Shapes:\nreal:   %v\nmirror: %v", index, want, got)
+		}
+	}
+}
+
+// jsonLeafPaths maps every JSON key path a type can marshal to its leaf kind.
+// The sample-value comparison above cannot catch a NEW field added to a real
+// payload (zero values vanish under omitempty), and the mirrors deliberately
+// flatten exported nested types, so the contract is JSON SHAPE identity at the
+// type level: same key paths, same leaf kinds, regardless of struct layout.
+// This is what lets the TOON property suite mutate mirrors as a stand-in for
+// the real private payload types without drift risk.
+func jsonLeafPaths(t reflect.Type, prefix string) map[string]string {
+	paths := map[string]string{}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		for i := range t.NumField() {
+			field := t.Field(i)
+			if !field.IsExported() {
+				continue
+			}
+			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+			if name == "-" {
+				continue
+			}
+			if name == "" {
+				if field.Anonymous {
+					// Embedded field without a tag: JSON promotes its
+					// fields into the enclosing object.
+					maps.Copy(paths, jsonLeafPaths(field.Type, prefix))
+					continue
+				}
+				name = field.Name
+			}
+			maps.Copy(paths, jsonLeafPaths(field.Type, prefix+"."+name))
+		}
+	case reflect.Slice, reflect.Array:
+		maps.Copy(paths, jsonLeafPaths(t.Elem(), prefix+"[]"))
+	case reflect.Map:
+		maps.Copy(paths, jsonLeafPaths(t.Elem(), prefix+"{}"))
+	default:
+		paths[prefix] = t.Kind().String()
+	}
+	return paths
 }
 
 func readPayloadSample(s1, s2, s3 string) readPayload {
