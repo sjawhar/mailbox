@@ -57,6 +57,7 @@ func TestToontestMirrorsMatchRealPayloads(t *testing.T) {
 		readPayloadSample("s1", "s2", "s3"),
 		statusSample("s1", "s2", "s3"),
 		actionPayload{Account: "s1", Action: "s2", ThreadIDs: []string{"s3"}, OK: true},
+		filterActionPayload{Account: "s1", Action: "s2", Filter: "s3", Matched: 1, Attempted: 1, Succeeded: []string{"s1"}, Failed: []filterActionFailure{{ID: "s2", Status: 7, Reason: "s3"}}, OK: true},
 		attachmentListSample("s1", "s2", "s3"),
 		attachmentSavePayload{Account: "s1", File: "s2", Filename: "s3", Size: 7},
 		openPayload{Account: "s1", ThreadID: "s2", MessageID: "s3", File: "s1"},

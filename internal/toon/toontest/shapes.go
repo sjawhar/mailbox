@@ -40,6 +40,7 @@ func Shapes(s1, s2, s3 string) []any {
 			OK: true,
 		},
 		actionPayload{Account: s1, Action: s2, ThreadIDs: []string{s3}, OK: true},
+		filterActionPayload{Account: s1, Action: s2, Filter: s3, Matched: 1, Attempted: 1, Succeeded: []string{s1}, Failed: []filterActionFailure{{ID: s2, Status: 7, Reason: s3}}, OK: true},
 		attachmentListPayload{Account: s1, ThreadID: s2, Attachments: []attachment{{N: 1, Filename: s3, MimeType: s1, Size: 7}}},
 		attachmentSavePayload{Account: s1, File: s2, Filename: s3, Size: 7},
 		openPayload{Account: s1, ThreadID: s2, MessageID: s3, File: s1},
@@ -136,6 +137,23 @@ type actionPayload struct {
 	Action    string   `json:"action"`
 	ThreadIDs []string `json:"threadIds"`
 	OK        bool     `json:"ok"`
+}
+
+type filterActionPayload struct {
+	Account   string                `json:"account"`
+	Action    string                `json:"action"`
+	Filter    string                `json:"filter"`
+	Matched   int                   `json:"matched"`
+	Attempted int                   `json:"attempted"`
+	Succeeded []string              `json:"succeeded"`
+	Failed    []filterActionFailure `json:"failed"`
+	OK        bool                  `json:"ok"`
+}
+
+type filterActionFailure struct {
+	ID     string `json:"id"`
+	Status int    `json:"status"`
+	Reason string `json:"reason"`
 }
 
 type attachmentListPayload struct {

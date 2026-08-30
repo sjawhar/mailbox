@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -25,28 +26,41 @@ import (
 )
 
 type gmailTestServer struct {
-	t              *testing.T
-	server         *httptest.Server
-	listQuery      url.Values
-	listCalls      int
-	batchRequests  []string
-	directRequests []string
-	labels         []map[string]any
-	profile        map[string]any
-	thread         map[string]any
-	listIDs        []string
-	attachment     []byte
-	metadata       map[string]map[string]any
-	messages       map[string]map[string]any
-	rawMessages    map[string][]byte
-	sentBodies     []map[string]any
-	sendStatus     int
-	readToken      string
-	rawMessageID   string
-	forbidden      bool
-	readForbidden  bool
-	readFailures   int
-	writeToken     string
+	t                  *testing.T
+	server             *httptest.Server
+	listQuery          url.Values
+	listCalls          int
+	batchRequests      []string
+	directRequests     []string
+	labels             []map[string]any
+	profile            map[string]any
+	thread             map[string]any
+	listPages          [][]string
+	listPageStatus     map[int]int
+	batchItemResponses map[string][]scriptedResponse
+	batchRequestStatus []int
+	batchCalls         int
+	batchWriteCalls    int
+	batchWriteIDs      [][]string
+	listIDs            []string
+	attachment         []byte
+	metadata           map[string]map[string]any
+	messages           map[string]map[string]any
+	rawMessages        map[string][]byte
+	sentBodies         []map[string]any
+	sendStatus         int
+	readToken          string
+	rawMessageID       string
+	forbidden          bool
+	readForbidden      bool
+	readFailures       int
+	writeToken         string
+}
+
+type scriptedResponse struct {
+	status     int
+	retryAfter string
+	reason     string
 }
 
 func newGmailTestServer(t *testing.T) *gmailTestServer {
@@ -89,11 +103,35 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/gmail/v1/users/me/threads" && r.Method == http.MethodGet:
 		g.listCalls++
 		g.listQuery = r.URL.Query()
-		threads := make([]map[string]any, len(g.listIDs))
-		for i, id := range g.listIDs {
+		page := 0
+		ids := g.listIDs
+		if g.listPages != nil {
+			if token := r.URL.Query().Get("pageToken"); token != "" {
+				var err error
+				page, err = strconv.Atoi(strings.TrimPrefix(token, "page-"))
+				if err != nil || token != fmt.Sprintf("page-%d", page) {
+					g.t.Fatalf("pageToken = %q, want page-N", token)
+				}
+			}
+			if page >= len(g.listPages) {
+				g.t.Fatalf("requested page %d, only %d fixture pages", page, len(g.listPages))
+			}
+			ids = g.listPages[page]
+		}
+		if status := g.listPageStatus[page]; status != 0 {
+			w.Header().Set("Retry-After", "0")
+			writeResponse(g.t, w, status, googleError(status, "rateLimitExceeded"))
+			return
+		}
+		threads := make([]map[string]any, len(ids))
+		for i, id := range ids {
 			threads[i] = map[string]any{"id": id, "snippet": "snippet " + id}
 		}
-		writeResponse(g.t, w, http.StatusOK, map[string]any{"threads": threads})
+		response := map[string]any{"threads": threads}
+		if g.listPages != nil && page+1 < len(g.listPages) {
+			response["nextPageToken"] = fmt.Sprintf("page-%d", page+1)
+		}
+		writeResponse(g.t, w, http.StatusOK, response)
 	case g.rawMessageID != "" && r.URL.Path == "/gmail/v1/users/me/messages/"+g.rawMessageID && r.Method == http.MethodGet:
 		if r.URL.Query().Get("format") != "minimal" {
 			g.t.Fatalf("raw message format = %q, want minimal", r.URL.Query().Get("format"))
@@ -181,6 +219,7 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
+	g.batchCalls++
 	mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "multipart/mixed" {
 		g.t.Fatalf("batch content type = %q, parse error = %v", r.Header.Get("Content-Type"), err)
@@ -207,20 +246,60 @@ func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, req)
 	}
 
+	writeIDs := make([]string, 0, len(requests))
+	for _, request := range requests {
+		if request.Method == http.MethodPost {
+			writeIDs = append(writeIDs, batchThreadID(g.t, request.URL.Path))
+		}
+	}
+	if len(writeIDs) > 0 {
+		g.batchWriteCalls++
+		g.batchWriteIDs = append(g.batchWriteIDs, append([]string(nil), writeIDs...))
+		if len(g.batchRequestStatus) > 0 {
+			status := g.batchRequestStatus[0]
+			g.batchRequestStatus = g.batchRequestStatus[1:]
+			if status != 0 {
+				writeResponse(g.t, w, status, googleError(status, "authError"))
+				return
+			}
+		}
+	}
+
 	writer := multipart.NewWriter(w)
 	w.Header().Set("Content-Type", "multipart/mixed; boundary="+writer.Boundary())
 	for i, request := range requests {
 		status, body := http.StatusOK, `{}`
-		if strings.Contains(request.URL.RawQuery, "format=metadata") {
+		var responseHeaders string
+		if request.Method == http.MethodGet && strings.Contains(request.URL.RawQuery, "format=metadata") {
 			id := filepath.Base(request.URL.Path)
 			metadata := metadataThread(id)
 			if g.metadata != nil && g.metadata[id] != nil {
 				metadata = g.metadata[id]
 			}
 			body = string(mustJSON(g.t, metadata))
-		} else if g.forbidden {
-			status = http.StatusForbidden
-			body = string(mustJSON(g.t, googleError(http.StatusForbidden, "insufficientPermissions")))
+		} else if request.Method == http.MethodPost {
+			id := batchThreadID(g.t, request.URL.Path)
+			if script := g.batchItemResponses[id]; len(script) > 0 {
+				response := script[0]
+				g.batchItemResponses[id] = script[1:]
+				status = response.status
+				if status == 0 {
+					status = http.StatusOK
+				}
+				reason := response.reason
+				if reason == "" {
+					reason = "rateLimitExceeded"
+				}
+				if status != http.StatusOK {
+					body = string(mustJSON(g.t, googleError(status, reason)))
+				}
+				if response.retryAfter != "" {
+					responseHeaders = "Retry-After: " + response.retryAfter + "\r\n"
+				}
+			} else if g.forbidden {
+				status = http.StatusForbidden
+				body = string(mustJSON(g.t, googleError(http.StatusForbidden, "insufficientPermissions")))
+			}
 		}
 		header := textproto.MIMEHeader{}
 		header.Set("Content-Type", "application/http")
@@ -229,13 +308,27 @@ func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			g.t.Fatalf("create response part: %v", err)
 		}
-		if _, err := fmt.Fprintf(part, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n\r\n%s", status, http.StatusText(status), body); err != nil {
+		if _, err := fmt.Fprintf(part, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\n%s\r\n%s", status, http.StatusText(status), responseHeaders, body); err != nil {
 			g.t.Fatalf("write response part: %v", err)
 		}
 	}
 	if err := writer.Close(); err != nil {
 		g.t.Fatalf("close batch response: %v", err)
 	}
+}
+
+func batchThreadID(t *testing.T, path string) string {
+	t.Helper()
+	const prefix = "/gmail/v1/users/me/threads/"
+	id, found := strings.CutPrefix(path, prefix)
+	if !found {
+		t.Fatalf("batch mutation path = %q, want Gmail thread path", path)
+	}
+	id, _, found = strings.Cut(id, "/")
+	if !found || id == "" {
+		t.Fatalf("batch mutation path = %q, want thread id and action", path)
+	}
+	return id
 }
 
 func runCLI(t *testing.T, g *gmailTestServer, args ...string) (int, string, string) {

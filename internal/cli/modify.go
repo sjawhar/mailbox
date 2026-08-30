@@ -17,6 +17,19 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 	if done || code != 0 {
 		return code
 	}
+	if next.filterFlag != "" {
+		if len(pos) > 0 {
+			return failUsage(cc.stderr, fmt.Errorf("--filter and thread ids are mutually exclusive"))
+		}
+		account, source, client, f, code := next.startBulkFilter()
+		if code != 0 {
+			return code
+		}
+		if action == "archive" {
+			return runBulkFilter(next, account, source, client, action, "archived", f, nil, []string{"INBOX"}, false)
+		}
+		return runBulkFilter(next, account, source, client, action, "trashed", f, nil, nil, true)
+	}
 	if err := requireArity(pos, 1, -1, action); err != nil {
 		return failUsage(cc.stderr, err)
 	}
@@ -54,6 +67,29 @@ func runMark(cc *cmdCtx, args []string) int {
 	if done || code != 0 {
 		return code
 	}
+	if next.filterFlag != "" {
+		if len(pos) > 1 {
+			return failUsage(cc.stderr, fmt.Errorf("--filter and thread ids are mutually exclusive"))
+		}
+		if err := requireArity(pos, 1, 1, "mark"); err != nil {
+			return failUsage(cc.stderr, err)
+		}
+		mode := pos[0]
+		if mode != "read" && mode != "unread" {
+			return failUsage(cc.stderr, fmt.Errorf("mark mode must be read or unread"))
+		}
+		var add, remove []string
+		if mode == "read" {
+			remove = []string{"UNREAD"}
+		} else {
+			add = []string{"UNREAD"}
+		}
+		account, source, client, f, code := next.startBulkFilter()
+		if code != 0 {
+			return code
+		}
+		return runBulkFilter(next, account, source, client, "mark", "marked "+mode, f, add, remove, false)
+	}
 	if err := requireArity(pos, 2, -1, "mark"); err != nil {
 		return failUsage(cc.stderr, err)
 	}
@@ -88,6 +124,37 @@ func runLabel(cc *cmdCtx, args []string) int {
 	pos, next, done, code := cc.parse(cf, args)
 	if done || code != 0 {
 		return code
+	}
+	if next.filterFlag != "" {
+		if len(pos) > 2 {
+			return failUsage(cc.stderr, fmt.Errorf("--filter and thread ids are mutually exclusive"))
+		}
+		if err := requireArity(pos, 2, 2, "label"); err != nil {
+			return failUsage(cc.stderr, err)
+		}
+		mode := pos[0]
+		if mode != "add" && mode != "rm" {
+			return failUsage(cc.stderr, fmt.Errorf("label mode must be add or rm"))
+		}
+		account, source, client, f, code := next.startBulkFilter()
+		if code != 0 {
+			return code
+		}
+		label, err := resolveLabel(context.Background(), client, pos[1])
+		if err != nil {
+			return next.writeRuntimeError(account, source, err)
+		}
+		var add, remove []string
+		if mode == "add" {
+			add = []string{label.ID}
+		} else {
+			remove = []string{label.ID}
+		}
+		verb := "labeled"
+		if mode == "rm" {
+			verb = "unlabeled"
+		}
+		return runBulkFilter(next, account, source, client, "label", verb, f, add, remove, false)
 	}
 	if err := requireArity(pos, 3, -1, "label"); err != nil {
 		return failUsage(cc.stderr, err)
