@@ -60,6 +60,124 @@ func TestFilterCyclePressClearsSelectionAndTitleNamesFilter(t *testing.T) {
 	}
 }
 
+func TestListingReplacementDropsStaleExpiredWriteRetry(t *testing.T) {
+	cfg := cfgWithFilters(t, "github")
+	rows := []*gmail.Thread{filterThread("t1", "GitHub <github@example.test>")}
+	api := &fakeAPI{
+		threads:     rows,
+		modifyErrs:  []error{auth.ErrExpiredToken},
+		attachments: make(map[string][]byte),
+	}
+	model := newTestModelWithConfig(cfg, "work", api)
+	model.listLoaded = true
+
+	model, action := update(t, model, key(keyArchive))
+	model, _ = update(t, model, key(keyFilter))
+	model, retry := update(t, model, runCmd(t, action))
+
+	if retry != nil || model.unlocking {
+		t.Fatalf("stale expired write started an unlock: command=%v unlocking=%t", retry, model.unlocking)
+	}
+	if model.pending != nil {
+		t.Fatalf("stale expired write kept pending action %#v", model.pending)
+	}
+	if model.statusError || !strings.Contains(model.status, "listing changed") {
+		t.Fatalf("stale expired write status = (%q, error=%t), want visible cancellation note", model.status, model.statusError)
+	}
+	if len(api.modifyCalls) != 1 {
+		t.Fatalf("write calls = %#v, want only the original in-flight write", api.modifyCalls)
+	}
+}
+
+func TestListingReplacementLetsInFlightWriteComplete(t *testing.T) {
+	cfg := cfgWithFilters(t, "github")
+	rows := []*gmail.Thread{filterThread("t1", "GitHub <github@example.test>")}
+	api := &fakeAPI{threads: rows, attachments: make(map[string][]byte)}
+	model := newTestModelWithConfig(cfg, "work", api)
+	model.listLoaded = true
+
+	model, action := update(t, model, key(keyArchive))
+	model, _ = update(t, model, key(keyFilter))
+	model, _ = update(t, model, runCmd(t, action))
+
+	if model.pending != nil || model.statusError || !strings.Contains(model.status, "archive completed") {
+		t.Fatalf("in-flight write status = (%#v, %q, error=%t), want completion", model.pending, model.status, model.statusError)
+	}
+	if len(api.modifyCalls) != 1 {
+		t.Fatalf("write calls = %#v, want original in-flight write to complete", api.modifyCalls)
+	}
+}
+
+func TestAccountReplacementDropsPendingWriteWithStatusNote(t *testing.T) {
+	model, api := newTestApp([]*gmail.Thread{filterThread("t1", "Sender <sender@example.test>")})
+	api.modifyErrs = []error{auth.ErrExpiredToken}
+
+	model, action := update(t, model, key(keyArchive))
+	model = switchToPersonal(t, model, api)
+	if model.pending != nil {
+		t.Fatalf("account replacement kept pending action %#v", model.pending)
+	}
+	if model.statusError || !strings.Contains(model.status, "write action continues") {
+		t.Fatalf("account replacement status = (%q, error=%t), want visible pending-write note", model.status, model.statusError)
+	}
+
+	model, retry := update(t, model, runCmd(t, action))
+	if retry != nil || model.unlocking || len(api.modifyCalls) != 1 {
+		t.Fatalf("old-account expiry = command:%v unlocking:%t writes:%#v, want no retry unlock after the original write", retry, model.unlocking, api.modifyCalls)
+	}
+}
+
+func TestListingReplacementRejectsStaleReaderAction(t *testing.T) {
+	rows := testThreads(1)
+	model, api := newTestApp(rows)
+	staleThread := model.currentRequest(threadOperation)
+
+	model, _ = update(t, model, key(keyRefresh))
+	model, _ = update(t, model, threadMsg{request: staleThread, thread: rows[0]})
+	model, action := update(t, model, key(keyArchive))
+	model = drainCommands(t, model, action)
+
+	if len(api.modifyCalls) != 0 {
+		t.Fatalf("stale reader archive dispatched writes: %#v", api.modifyCalls)
+	}
+}
+
+func TestListingReplacementIgnoresEnterUntilRowsCurrent(t *testing.T) {
+	model, api := newTestApp(testThreads(1))
+
+	model, _ = update(t, model, key(keyRefresh))
+	model, command := update(t, model, key("enter"))
+
+	if command != nil || len(api.getCalls) != 0 {
+		t.Fatalf("enter while the replacement listing loads dispatched a thread read: command=%v calls=%#v", command, api.getCalls)
+	}
+}
+
+func TestReaderActionsRequireCurrentListingGeneration(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		key    string
+		writes func(*fakeAPI) int
+	}{
+		{name: "archive", key: keyArchive, writes: func(api *fakeAPI) int { return len(api.modifyCalls) }},
+		{name: "trash", key: keyTrash, writes: func(api *fakeAPI) int { return len(api.trashCalls) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows := testThreads(1)
+			model, api := newTestApp(rows)
+			model, _ = update(t, model, threadMsg{request: model.currentRequest(threadOperation), thread: rows[0]})
+
+			model.beginListing()
+			model, action := update(t, model, key(test.key))
+			model = drainCommands(t, model, action)
+
+			if writes := test.writes(api); writes != 0 {
+				t.Fatalf("reader %s dispatched %d stale-generation write(s)", test.name, writes)
+			}
+		})
+	}
+}
+
 func TestStartupFilterSeedsViewAndUnknownErrors(t *testing.T) {
 	cfg := cfgWithFilters(t, "zeta", "alpha")
 	model := newAppWithStartFilter(t, cfg, "alpha")

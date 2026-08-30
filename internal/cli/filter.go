@@ -164,13 +164,25 @@ func (cc *cmdCtx) renderBulkFilter(account string, source *auth.Source, action, 
 		return 1
 	}
 
+	scopeErr := writeErr
+	if !gmail.IsInsufficientScope(scopeErr) {
+		for _, receipt := range receipts.Failed {
+			if gmail.IsInsufficientScope(receipt.Err) {
+				scopeErr = receipt.Err
+				break
+			}
+		}
+	}
+
 	cc.emitCredentialDiagnostic(source, auth.ClassWrite)
 	if writeErr != nil {
 		fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(writeErr.Error()))
+		cc.emitScopeHint(source, scopeErr, auth.ClassWrite)
 		return 1
 	}
 	if len(output.Failed) > 0 {
 		fmt.Fprintf(cc.stderr, "mailbox: %s\n", formatFilterFailures(output.Failed))
+		cc.emitScopeHint(source, scopeErr, auth.ClassWrite)
 		return 1
 	}
 	return 0

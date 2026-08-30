@@ -21,7 +21,7 @@ var htmlRenderer = goldmark.New()
 // Every other destination — including all data: URLs and unrecognized custom
 // schemes — is removed.
 func RenderHTML(markdown string) (string, error) {
-	source := sanitizeMarkdownDestinations([]byte(markdown))
+	source := []byte(markdown)
 	document := htmlRenderer.Parser().Parse(text.NewReader(source))
 	sanitizeDestinations(document, source)
 
@@ -30,74 +30,6 @@ func RenderHTML(markdown string) (string, error) {
 		return "", fmt.Errorf("send: render markdown body: %w", err)
 	}
 	return out.String(), nil
-}
-
-// sanitizeMarkdownDestinations handles malformed Markdown link syntax that
-// goldmark otherwise leaves as visible source text before its AST sanitizer
-// can inspect the destination. Valid links are also checked in
-// sanitizeDestinations below.
-func sanitizeMarkdownDestinations(source []byte) []byte {
-	var sanitized []byte
-	written := 0
-	for searchFrom := 0; searchFrom < len(source); {
-		offset := bytes.Index(source[searchFrom:], []byte("]("))
-		if offset < 0 {
-			break
-		}
-		linkEnd := searchFrom + offset
-		searchFrom = linkEnd + 2
-		if !hasMarkdownLinkLabel(source, linkEnd) {
-			continue
-		}
-		destinationEnd, ok := markdownDestinationEnd(source, searchFrom)
-		if !ok {
-			continue
-		}
-		if allowedDestination(bytes.TrimSpace(source[searchFrom:destinationEnd])) {
-			searchFrom = destinationEnd + 1
-			continue
-		}
-		if sanitized == nil {
-			sanitized = make([]byte, 0, len(source))
-		}
-		sanitized = append(sanitized, source[written:searchFrom]...)
-		sanitized = append(sanitized, ')')
-		written = destinationEnd + 1
-		searchFrom = written
-	}
-	if sanitized == nil {
-		return source
-	}
-	return append(sanitized, source[written:]...)
-}
-
-func hasMarkdownLinkLabel(source []byte, linkEnd int) bool {
-	for index := linkEnd - 1; index >= 0 && source[index] != '\n'; index-- {
-		if source[index] == '[' && (index == 0 || source[index-1] != '\\') {
-			return true
-		}
-	}
-	return false
-}
-
-func markdownDestinationEnd(source []byte, start int) (int, bool) {
-	depth := 1
-	for index := start; index < len(source); index++ {
-		switch source[index] {
-		case '\\':
-			index++
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return index, true
-			}
-		case '\n':
-			return 0, false
-		}
-	}
-	return 0, false
 }
 
 func sanitizeDestinations(document ast.Node, source []byte) {

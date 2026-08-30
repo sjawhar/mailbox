@@ -47,7 +47,7 @@ func TestRenderHTMLSchemeAllowlist(t *testing.T) {
 		{"[x](mailto:a@example.test)", true, `href="mailto:a@example.test"`},
 		{"[x](#section)", true, `href="#section"`},
 		{"[x](javascript:alert(1))", false, "javascript:"},
-		{"[x](data:image/svg+xml,<svg onload=alert(1)>)", false, "data:"},
+		{"[x](data:image/svg+xml,%3Csvg%20onload=alert(1)%3E)", false, "data:"},
 		{"[x](data:image/png;base64,AAAA)", false, "data:"},
 		{"[x](proto-custom://x)", false, "proto-custom:"},
 		{"[x](relative/path)", false, "relative/path"},
@@ -61,6 +61,31 @@ func TestRenderHTMLSchemeAllowlist(t *testing.T) {
 		if !c.keep && strings.Contains(got, c.fragment) {
 			t.Fatalf("RenderHTML(%q) = %q, want %q removed", c.markdown, got, c.fragment)
 		}
+	}
+}
+
+func TestRenderHTMLCodeExamplesGolden(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		markdown string
+		want     string
+	}{
+		{
+			name:     "code span",
+			markdown: "`[x](javascript:alert(1))`\n",
+			want:     "<p><code>[x](javascript:alert(1))</code></p>\n",
+		},
+		{
+			name:     "fenced code",
+			markdown: "```\n[x](javascript:alert(1))\n```\n",
+			want:     "<pre><code>[x](javascript:alert(1))\n</code></pre>\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := renderHTML(t, test.markdown); got != test.want {
+				t.Fatalf("RenderHTML(%q) = %q, want %q", test.markdown, got, test.want)
+			}
+		})
 	}
 }
 

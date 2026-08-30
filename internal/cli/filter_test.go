@@ -223,6 +223,26 @@ func TestPartialBatchFailureReportsReceiptsInAllFormatsNonzero(t *testing.T) {
 	}
 }
 
+func TestBulkFilterInsufficientScopeReceiptsKeepPayloadAndProvisioningHint(t *testing.T) {
+	g, _ := bulkFilterFixture(t, [][]string{{"t1"}}, allMatching([]string{"t1"}))
+	g.forbidden = true
+
+	code, stdout, stderr := runBulkFilterCommand(t, "archive", "--filter", "github", "--json")
+	if code != 1 {
+		t.Fatalf("archive insufficient-scope receipt = (%d, %q, %q), want exit 1", code, stdout, stderr)
+	}
+	result := decodeFilterActionJSON(t, stdout)
+	if result.Matched != 1 || result.Attempted != 1 || result.OK ||
+		len(result.Succeeded) != 0 ||
+		len(result.Failed) != 1 ||
+		result.Failed[0] != (filterActionFailureResult{ID: "t1", Status: 403, Reason: "insufficientPermissions"}) {
+		t.Fatalf("insufficient-scope receipt payload = %#v, want failed t1 receipt", result)
+	}
+	if !strings.Contains(stderr, "provision:") || !strings.Contains(stderr, "gmail.modify") {
+		t.Fatalf("insufficient-scope receipt stderr = %q, want write provisioning hint", stderr)
+	}
+}
+
 func TestBulkFilterTransportAbortStillRendersPartialReceipts(t *testing.T) {
 	ids := threadIDs(150)
 	g, _ := bulkFilterFixture(t, [][]string{ids}, allMatching(ids))

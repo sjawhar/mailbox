@@ -188,6 +188,7 @@ type TopLevelFlags struct {
 	Text    bool
 	Filter  string
 	Help    bool
+	Version bool
 }
 
 // ParseTopLevel parses global flags and returns the remaining subcommand
@@ -201,10 +202,11 @@ func ParseTopLevel(args []string) (TopLevelFlags, []string, error) {
 	filter := flags.String("filter", "", "named filter from config")
 	help := flags.Bool("help", false, "show help")
 	shortHelp := flags.Bool("h", false, "show help")
+	version := flags.Bool("version", false, "show version")
 	if err := flags.Parse(args); err != nil {
-		return TopLevelFlags{Account: *account, Filter: *filter, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp}, nil, err
+		return TopLevelFlags{Account: *account, Filter: *filter, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp, Version: *version}, nil, err
 	}
-	return TopLevelFlags{Account: *account, Filter: *filter, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp}, flags.Args(), nil
+	return TopLevelFlags{Account: *account, Filter: *filter, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp, Version: *version}, flags.Args(), nil
 }
 
 // Run executes a one-shot command. args excludes the program name.
@@ -383,27 +385,32 @@ func (cc *cmdCtx) runtimeErrorForClass(_ string, source *auth.Source, err error,
 		return cc.needsCredential(credentialError)
 	}
 	fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(err.Error()))
-	if source != nil && gmail.IsInsufficientScope(err) {
-		route, scope := source.LastRoute(), "gmail.readonly"
-		switch class {
-		case auth.ClassWrite:
-			route, scope = source.WriteRoute(), "gmail.modify"
-		case auth.ClassSend:
-			route, scope = source.SendRoute(), "gmail.send"
-		}
-		var typed *gmail.ErrInsufficientScope
-		if errors.As(err, &typed) {
-			scope = typed.Scope
-			switch scope {
-			case "gmail.modify":
-				class, route = auth.ClassWrite, source.WriteRoute()
-			case "gmail.send":
-				class, route = auth.ClassSend, source.SendRoute()
-			}
-		}
-		fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ScopeHint(source.Account(), class, route, scope))
-	}
+	cc.emitScopeHint(source, err, class)
 	return 1
+}
+
+func (cc *cmdCtx) emitScopeHint(source *auth.Source, err error, class auth.Class) {
+	if source == nil || !gmail.IsInsufficientScope(err) {
+		return
+	}
+	route, scope := source.LastRoute(), "gmail.readonly"
+	switch class {
+	case auth.ClassWrite:
+		route, scope = source.WriteRoute(), "gmail.modify"
+	case auth.ClassSend:
+		route, scope = source.SendRoute(), "gmail.send"
+	}
+	var typed *gmail.ErrInsufficientScope
+	if errors.As(err, &typed) {
+		scope = typed.Scope
+		switch scope {
+		case "gmail.modify":
+			class, route = auth.ClassWrite, source.WriteRoute()
+		case "gmail.send":
+			class, route = auth.ClassSend, source.SendRoute()
+		}
+	}
+	fmt.Fprintf(cc.stderr, "provision: %s\n", auth.ScopeHint(source.Account(), class, route, scope))
 }
 
 type errorEnvelope struct {

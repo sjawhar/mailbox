@@ -340,7 +340,7 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		return m.switchAccount()
 	case "enter":
-		if len(m.list.rows) == 0 {
+		if !m.listLoaded || len(m.list.rows) == 0 {
 			return m, nil
 		}
 		m.loading = true
@@ -370,7 +370,14 @@ func (m app) startAction(action string, ids, add, remove []string, advance bool)
 	if m.pending != nil {
 		return m, nil
 	}
-	m.pending = &pendingAction{action: action, ids: ids, add: add, remove: remove, advance: advance}
+	m.pending = &pendingAction{
+		action:            action,
+		ids:               ids,
+		add:               add,
+		remove:            remove,
+		advance:           advance,
+		listingGeneration: m.generations[listOperation],
+	}
 	if !m.ctx.writeReady() {
 		return m.startUnlock()
 	}

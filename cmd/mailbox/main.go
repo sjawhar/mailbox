@@ -23,15 +23,13 @@ func main() {
 }
 
 func dispatch(args []string, stdout, stderr io.Writer, terminal bool) int {
-	if versionRequested(args) {
+	flags, rest, err := cli.ParseTopLevel(args)
+	if flags.Version {
 		fmt.Fprintf(stdout, "mailbox %s\n", version)
 		return 0
 	}
-	flags, rest, err := cli.ParseTopLevel(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "mailbox: %v\n", err)
-		cli.PrintHelp(stderr)
-		return 2
+		return cli.Run(args, stdout, stderr)
 	}
 	if flags.Help {
 		cli.PrintHelp(stdout)
@@ -41,8 +39,13 @@ func dispatch(args []string, stdout, stderr io.Writer, terminal bool) int {
 		return cli.Run(args, stdout, stderr)
 	}
 	if !terminal {
-		fmt.Fprintln(stderr, "mailbox: no subcommand and stdout is not a terminal — agents use subcommands (try 'mailbox inbox --json')")
-		return 2
+		// Machine formats get the structured usage envelope from cli.Run;
+		// text mode keeps the specific bare-invocation diagnostic.
+		if cli.ResolveFormat(flags.JSON, flags.Text, false, terminal) == cli.FormatText {
+			fmt.Fprintln(stderr, "mailbox: no subcommand and stdout is not a terminal — agents use subcommands (try 'mailbox inbox --json')")
+			return 2
+		}
+		return cli.Run(args, stdout, stderr)
 	}
 	cfg, err := auth.LoadConfig()
 	if err != nil {
@@ -59,33 +62,6 @@ func dispatch(args []string, stdout, stderr io.Writer, terminal bool) int {
 		return 1
 	}
 	return 0
-}
-
-// versionRequested reports whether a version flag appears in the top-level
-// flag sequence. Subcommands and their arguments, including arguments after
-// "--", belong to the CLI dispatcher.
-func versionRequested(args []string) bool {
-	skipNext := false
-	for _, a := range args {
-		if a == "--" {
-			return false
-		}
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		if a == "--version" || a == "-version" {
-			return true
-		}
-		if a == "--account" || a == "-account" {
-			skipNext = true
-			continue
-		}
-		if len(a) == 0 || a[0] != '-' {
-			return false
-		}
-	}
-	return false
 }
 
 // bare reports whether the shared top-level grammar contains no subcommand.

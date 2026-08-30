@@ -13,12 +13,13 @@ import (
 )
 
 type threadModel struct {
-	thread           *gmail.Thread
-	rendered         *render.RenderedThread
-	keepQuotes       bool
-	linkInput        string
-	attachments      []render.Attachment
-	attachmentCursor int
+	thread            *gmail.Thread
+	rendered          *render.RenderedThread
+	keepQuotes        bool
+	linkInput         string
+	attachments       []render.Attachment
+	attachmentCursor  int
+	listingGeneration uint64
 }
 
 func (m *app) renderCurrentThread() error {
@@ -158,8 +159,14 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keyCompose:
 		return m.startCompose()
 	case keyArchive:
+		if !m.threadActionsCurrent() {
+			return m, nil
+		}
 		return m.startAction("archive", []string{m.thread.thread.ID}, nil, []string{"INBOX"}, true)
 	case keyTrash:
+		if !m.threadActionsCurrent() {
+			return m, nil
+		}
 		return m.startAction("trash", []string{m.thread.thread.ID}, nil, nil, true)
 	case "d":
 		// Unbound as of v2.1 (# trashes). Consumed here so the key never
@@ -200,6 +207,10 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var command tea.Cmd
 	m.viewport, command = m.viewport.Update(message)
 	return m, command
+}
+
+func (m app) threadActionsCurrent() bool {
+	return m.listLoaded && m.thread.thread != nil && m.thread.listingGeneration == m.generations[listOperation]
 }
 
 func (m app) threadView() string {

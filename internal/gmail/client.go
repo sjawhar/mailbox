@@ -364,7 +364,6 @@ func uniqueIDs(ids []string) []string {
 }
 
 func (c *Client) batchThreadReceipts(ctx context.Context, creds Credentials, ids []string, suffix string, body any) (WriteReceipts, error) {
-	ids = uniqueIDs(ids)
 	var receipts WriteReceipts
 	for start := 0; start < len(ids); start += maxBatchParts {
 		end := min(start+maxBatchParts, len(ids))

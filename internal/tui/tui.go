@@ -127,12 +127,13 @@ const (
 )
 
 type pendingAction struct {
-	action  string
-	ids     []string
-	add     []string
-	remove  []string
-	advance bool
-	retried bool
+	action            string
+	ids               []string
+	add               []string
+	remove            []string
+	advance           bool
+	retried           bool
+	listingGeneration uint64
 }
 
 type app struct {
@@ -268,6 +269,7 @@ func startFilterIndex(cfg *auth.Config, name string) (int, error) {
 func (m *app) beginListing() asyncRequest {
 	m.list.clearSelection()
 	m.listLoaded = false
+	m.beginRequest(threadOperation)
 	return m.beginRequest(listOperation)
 }
 
@@ -336,12 +338,12 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		command := m.requestPreview()
 		return m, command
 	case threadMsg:
-		if m.discardAsync(message) {
+		if m.discardAsync(message) || !m.threadRequestFromCurrentListing(message.request) {
 			return m, nil
 		}
 		m.loading = false
 		m.view = threadView
-		m.thread = threadModel{thread: message.thread}
+		m.thread = threadModel{thread: message.thread, listingGeneration: message.request.listingGeneration}
 		if err := m.renderCurrentThread(); err != nil {
 			m.surfaceError(err)
 		}
@@ -504,10 +506,19 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 			m.surfaceError(message.err)
 			return m, nil
 		}
-		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pending.retried {
-			m.pending.retried = true
-			m.ctx.invalidateWrite()
-			return m.startClassUnlock(auth.ClassWrite)
+		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) {
+			if m.pending.listingGeneration != m.generations[listOperation] {
+				m.loading = false
+				m.pending = nil
+				m.status = "write retry canceled — listing changed"
+				m.statusError = false
+				return m, nil
+			}
+			if !m.pending.retried {
+				m.pending.retried = true
+				m.ctx.invalidateWrite()
+				return m.startClassUnlock(auth.ClassWrite)
+			}
 		}
 		m.loading = false
 		m.pending = nil
@@ -518,6 +529,10 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m app) threadRequestFromCurrentListing(request asyncRequest) bool {
+	return m.listLoaded && request.listingGeneration == m.generations[listOperation]
 }
 func (m app) View() string {
 	switch m.view {
@@ -777,6 +792,8 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 		}
 		m.contexts[target.Name] = account
 	}
+	pendingWrite := m.pending != nil
+
 	m.account = target.Name
 	m.ctx = account
 	m.invalidateRequests()
@@ -791,6 +808,9 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	m.loading = true
 	m.clearStatus()
 	m.status = m.readCommandStatus()
+	if pendingWrite {
+		m.appendStatusNote("write action continues in previous account")
+	}
 	return m, m.firstReadCommand()
 }
 
