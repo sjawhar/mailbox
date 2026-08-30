@@ -153,6 +153,8 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.surfaceError(err)
 		}
 		return m, nil
+	case keyReply:
+		return m.openReply()
 	case keyArchive:
 		return m.startAction("archive", []string{m.thread.thread.ID}, nil, []string{"INBOX"}, true)
 	case keyTrash:
@@ -195,7 +197,7 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m app) threadView() string {
-	return titleStyle.Render("Thread") + "\n" + m.viewport.View() + "\n" + helpStyle.Render("n/p threads · j/k scroll · esc back") + "\n" + m.statusView()
+	return titleStyle.Render("Thread") + "\n" + m.viewport.View() + "\n" + helpStyle.Render("r reply · n/p threads · j/k scroll · esc back") + "\n" + m.statusView()
 }
 
 func (m app) attachmentPickerView() string {

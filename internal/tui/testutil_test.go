@@ -19,12 +19,15 @@ type fakeAPI struct {
 	threads   []*gmail.Thread
 	labels    []gmail.Label
 	listedIDs map[string][]string
+	profile   *gmail.Profile
 
 	listCalls     []gmail.ListOptions
 	metadataCalls [][]string
 	getCalls      []getCall
 	modifyCalls   []modifyCall
 	trashCalls    [][]string
+	sendCalls     []sendCall
+	profileCalls  int
 
 	listErr     error
 	metadataErr error
@@ -35,6 +38,10 @@ type fakeAPI struct {
 	trashErrs   []error
 	labelsErr   error
 	labelsErrs  []error
+	profileErr  error
+	sendErr     error
+	sendErrs    []error
+	sent        *gmail.SentMessage
 	attachments map[string][]byte
 }
 
@@ -47,6 +54,11 @@ type modifyCall struct {
 	ids    []string
 	add    []string
 	remove []string
+}
+
+type sendCall struct {
+	raw      []byte
+	threadID string
 }
 
 func (f *fakeAPI) ListThreads(_ context.Context, opts gmail.ListOptions) (*gmail.ThreadList, error) {
@@ -137,6 +149,35 @@ func (f *fakeAPI) ListLabels(_ context.Context) ([]gmail.Label, error) {
 func (f *fakeAPI) GetAttachment(_ context.Context, messageID, attachmentID string) ([]byte, error) {
 	return f.attachments[messageID+":"+attachmentID], nil
 }
+
+func (f *fakeAPI) GetProfile(_ context.Context) (*gmail.Profile, error) {
+	f.profileCalls++
+	if f.profileErr != nil {
+		return nil, f.profileErr
+	}
+	return f.profile, nil
+}
+
+func (f *fakeAPI) SendMessage(_ context.Context, raw []byte, threadID string) (*gmail.SentMessage, error) {
+	f.sendCalls = append(f.sendCalls, sendCall{
+		raw:      append([]byte(nil), raw...),
+		threadID: threadID,
+	})
+	if len(f.sendErrs) > 0 {
+		err := f.sendErrs[0]
+		f.sendErrs = f.sendErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	if f.sendErr != nil {
+		return nil, f.sendErr
+	}
+	if f.sent != nil {
+		return f.sent, nil
+	}
+	return &gmail.SentMessage{ID: "sent-message", ThreadID: threadID}, nil
+}
 func testConfig() *auth.Config {
 	work := &auth.AccountConfig{Name: "work", Read: &auth.CredentialSource{Class: auth.ClassRead, Kind: auth.SourceEnv, EnvVar: "TEST_WORK", ConfigKey: "accounts.work.read_credential_env"}}
 	personal := &auth.AccountConfig{Name: "personal", Read: &auth.CredentialSource{Class: auth.ClassRead, Kind: auth.SourceEnv, EnvVar: "TEST_PERSONAL", ConfigKey: "accounts.personal.read_credential_env"}}
@@ -173,6 +214,8 @@ func testAccountCtx(cfg *auth.Config, acct *auth.AccountConfig, api gmailAPI) *a
 		writeRoute:      func() auth.Route { return auth.RouteCmd },
 		writeReady:      func() bool { return true },
 		invalidateWrite: func() {},
+		invalidateSend:  func() {},
+		sendScope:       func() string { return "" },
 		unlock: func(context.Context, auth.Class) (string, error) {
 			return "", nil
 		},

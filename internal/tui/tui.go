@@ -39,6 +39,8 @@ type gmailAPI interface {
 	TrashThreads(ctx context.Context, ids []string) error
 	ListLabels(ctx context.Context) ([]gmail.Label, error)
 	GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error)
+	GetProfile(ctx context.Context) (*gmail.Profile, error)
+	SendMessage(ctx context.Context, raw []byte, threadID string) (*gmail.SentMessage, error)
 }
 
 type accountCtx struct {
@@ -46,10 +48,13 @@ type accountCtx struct {
 	acct            *auth.AccountConfig
 	account         string
 	api             gmailAPI
+	self            string
 	lastRoute       func() auth.Route
 	writeRoute      func() auth.Route
 	writeReady      func() bool
 	invalidateWrite func()
+	invalidateSend  func()
+	sendScope       func() string
 	unlock          func(context.Context, auth.Class) (string, error)
 	takeDiagnostic  func(auth.Class) string
 	labels          []gmail.Label
@@ -59,9 +64,11 @@ type accountCtx struct {
 var newAccountCtx = func(cfg *auth.Config, acct *auth.AccountConfig) (*accountCtx, error) {
 	source := auth.NewSource(cfg, acct)
 	writeCredentials := source.WriteCredentials()
+	sendCredentials := source.SendCredentials()
 	client := gmail.NewClient(gmail.ClientConfig{
 		Read:    source.ReadCredentials(auth.ExecAcquirer{Cfg: cfg}),
 		Write:   writeCredentials,
+		Send:    sendCredentials,
 		Account: acct.Name,
 	})
 	return &accountCtx{
@@ -76,6 +83,8 @@ var newAccountCtx = func(cfg *auth.Config, acct *auth.AccountConfig) (*accountCt
 			return err == nil
 		},
 		invalidateWrite: source.InvalidateWrite,
+		invalidateSend:  source.InvalidateSend,
+		sendScope:       source.SendScope,
 		unlock: func(ctx context.Context, class auth.Class) (string, error) {
 			var err error
 			switch class {
@@ -83,6 +92,8 @@ var newAccountCtx = func(cfg *auth.Config, acct *auth.AccountConfig) (*accountCt
 				_, err = source.Resolve(ctx, auth.InteractiveExecAcquirer{Cfg: cfg})
 			case auth.ClassWrite:
 				_, err = source.WriteToken(ctx, auth.InteractiveExecAcquirer{Cfg: cfg})
+			case auth.ClassSend:
+				_, err = source.SendToken(ctx, auth.InteractiveExecAcquirer{Cfg: cfg})
 			default:
 				err = fmt.Errorf("unsupported credential class %q", class)
 			}
@@ -102,6 +113,8 @@ const (
 	labelPickerView
 	threadView
 	attachmentPickerView
+	replyView
+	replyConfirmView
 )
 
 type pendingAction struct {
@@ -122,6 +135,7 @@ type app struct {
 	view        viewState
 	list        inboxModel
 	thread      threadModel
+	reply       replyModel
 	preview     previewModel
 	search      textinput.Model
 	label       textinput.Model
@@ -135,6 +149,7 @@ type app struct {
 	loading            bool
 	layout             layoutMetrics
 	pending            *pendingAction
+	pendingSend        *pendingSend
 	unlocking          bool
 	unlockCtx          context.Context
 	unlockCancel       context.CancelFunc
@@ -318,6 +333,27 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.ctx.labelNameByID = labelNames(m.ctx.labels)
 		m.clearListingStatus()
 		return m, nil
+	case profileMsg:
+		if m.discardAsync(message) {
+			return m, nil
+		}
+		m.loading = false
+		m.ctx.self = message.email
+		return m.openReply()
+	case sendDoneMsg:
+		if m.discardAsync(message) {
+			return m, nil
+		}
+		m.loading = false
+		m.pendingSend = nil
+		m.reply = replyModel{}
+		m.status = "sent — thread updated"
+		m.statusError = false
+		m.appendStatusNote(auth.SendScopeWarning(m.ctx.sendScope(), m.credentialConfigKey(auth.ClassSend)))
+		m.appendStatusNote(m.ctx.takeDiagnostic(auth.ClassSend))
+		m.view = threadView
+		request := m.beginRequest(threadOperation)
+		return m, m.loadingCmd(getThreadCmd(request, message.sent.ThreadID))
 	case actionDoneMsg:
 		if m.discardAsync(message) {
 			return m, nil
@@ -357,8 +393,12 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.unlockCancel = nil
 		if message.err != nil {
 			m.loading = false
-			if message.class == auth.ClassWrite {
+			switch message.class {
+			case auth.ClassWrite:
 				m.pending = nil
+			case auth.ClassSend:
+				m.pendingSend = nil
+				m.beginRequest(unlockOperation)
 			}
 			m.clearUnlockRetry()
 			m.status = m.unlockFailureStatus(message.class, message.err)
@@ -372,6 +412,14 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.statusError = false
 		if message.class == auth.ClassRead {
 			return m.retryUnlockedRead()
+		}
+		if message.class == auth.ClassSend {
+			if m.pendingSend == nil {
+				m.loading = false
+				return m, nil
+			}
+			request := m.beginRequest(sendOperation)
+			return m, m.loadingCmd(sendCmd(request, m.pendingSend.mime, m.pendingSend.threadID))
 		}
 		if m.pending == nil {
 			m.loading = false
@@ -388,6 +436,17 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		if updated, command, handled := m.handleReadUnlock(message.request, message.err, message.retry); handled {
 			m = updated.(app)
 			return m, command
+		}
+		if m.pendingSend != nil && errors.Is(message.err, auth.ErrExpiredSendToken) && !m.pendingSend.retried {
+			m.pendingSend.retried = true
+			m.ctx.invalidateSend()
+			return m.startClassUnlock(auth.ClassSend, sendOperation)
+		}
+		if m.pendingSend != nil {
+			m.loading = false
+			m.pendingSend = nil
+			m.surfaceError(message.err)
+			return m, nil
 		}
 		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pending.retried {
 			m.pending.retried = true
@@ -414,6 +473,10 @@ func (m app) View() string {
 		return m.threadView()
 	case attachmentPickerView:
 		return m.attachmentPickerView()
+	case replyView:
+		return m.replyScreen()
+	case replyConfirmView:
+		return m.replyConfirmScreen()
 	default:
 		return m.inboxView()
 	}
@@ -425,6 +488,7 @@ func (m *app) setSize(width, height int) {
 	m.label.Width = m.layout.labelInputWidth
 	m.viewport.Width = m.layout.readerWidth
 	m.viewport.Height = m.layout.readerHeight
+	m.resizeReply()
 }
 
 func (m *app) clearStatus() {
@@ -495,6 +559,8 @@ func (m app) credentialSource(class auth.Class) *auth.CredentialSource {
 		return m.ctx.acct.Read
 	case auth.ClassWrite:
 		return m.ctx.acct.Write
+	case auth.ClassSend:
+		return m.ctx.acct.Send
 	default:
 		return nil
 	}
@@ -583,6 +649,10 @@ func (m app) updateKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateThreadKey(message)
 	case attachmentPickerView:
 		return m.updateAttachmentKey(message)
+	case replyView:
+		return m.updateReplyKey(message)
+	case replyConfirmView:
+		return m.updateReplyConfirmKey(message)
 	default:
 		return m, nil
 	}
@@ -632,7 +702,9 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	m.list = newInboxModel()
 	m.preview = newPreviewModel()
 	m.thread = threadModel{}
+	m.reply = replyModel{}
 	m.pending = nil
+	m.pendingSend = nil
 	m.loading = true
 	m.clearStatus()
 	request := m.beginRequest(listOperation)
@@ -727,6 +799,10 @@ func (m app) retryUnlockedRead() (tea.Model, tea.Cmd) {
 		request := m.beginRequest(labelOperation)
 		m.unlockRetryGen = request.generation
 		return m, m.loadingCmd(listLabelsCmd(request))
+	case profileOperation:
+		request := m.beginRequest(profileOperation)
+		m.unlockRetryGen = request.generation
+		return m, m.loadingCmd(getProfileCmd(request))
 	case attachmentOperation, openOperation:
 		if m.unlockRetryCommand == nil {
 			m.loading = false
@@ -758,7 +834,7 @@ func (m *app) clearUnlockRetry() {
 
 func retryResult(message tea.Msg) (complete, success bool) {
 	switch message.(type) {
-	case threadsMsg, threadMsg, previewThreadMsg, labelsMsg, actionDoneMsg, attachmentSavedMsg, openedMsg:
+	case threadsMsg, threadMsg, previewThreadMsg, labelsMsg, profileMsg, actionDoneMsg, attachmentSavedMsg, openedMsg:
 		return true, true
 	case errMsg, previewErrMsg:
 		return true, false
