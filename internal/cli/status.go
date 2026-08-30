@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -56,12 +55,8 @@ func runStatus(cc *cmdCtx, args []string) int {
 
 		if _, err := source.Resolve(context.Background(), auth.BatchAcquirer(next.cfg, acct, auth.ClassRead)); err != nil {
 			row.Error = err.Error()
-			if next.isInteractiveReadError(err) {
-				row.Profile.message = fmt.Sprintf("requires interactive unlock (%s)", acct.Read.ConfigKey)
-			} else {
-				output.OK = false
-				next.writeStatusError(acct.Name, err)
-			}
+			output.OK = false
+			next.writeStatusError(acct.Name, err)
 			output.Accounts = append(output.Accounts, row)
 			continue
 		}
@@ -112,11 +107,6 @@ func (cc *cmdCtx) statusAccounts() ([]*auth.AccountConfig, error) {
 
 func (cc *cmdCtx) isDefaultAccount(acct *auth.AccountConfig) bool {
 	return acct.Name == cc.cfg.DefaultAccount || (cc.cfg.DefaultAccount == "" && len(cc.cfg.Accounts) == 1)
-}
-
-func (cc *cmdCtx) isInteractiveReadError(err error) bool {
-	var credentialError *auth.NeedsCredentialError
-	return errors.As(err, &credentialError) && credentialError.Reason == auth.ReasonInteractive
 }
 
 func (cc *cmdCtx) writeStatusError(account string, err error) {

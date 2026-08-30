@@ -70,6 +70,8 @@ Compose:
   mailbox send --reply=<thread-id>  --body TEXT [--message=<id>] [--to ...] # reply
   mailbox send --forward=<thread-id> --to a@x --body TEXT [--message=<id>]  # forward
 
+The body comes from exactly one of: --body TEXT, --body - (stdin), or --body-file PATH (- for stdin) — file input suits agent-drafted content.
+
 A dry-run is the default: resolve the envelope first. Start with the dry run, copy its --message value, then add --send to transmit that exact target. Reply and forward previews select the newest message unless --message selects one; --send requires --message so it pins the exact message within the named thread.
 
 Refusal rules:
@@ -87,6 +89,10 @@ ids: mailbox ids are THREAD ids everywhere; the one exception is 'send --message
 ## Output formats
 
 TOON is the default for agents and pipes. `--json` is the stable opt-in. `--text` forces human output.
+
+## Credential helpers
+
+Every surface executes configured credential commands. `*_interactive` passes caller standard input only when it is a real terminal; otherwise helpers receive `/dev/null`.
 
 ## Send workflow
 

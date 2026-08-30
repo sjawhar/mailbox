@@ -187,7 +187,7 @@ func (m app) updateReplyConfirmKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pendingSend = &pendingSend{mime: mime, threadID: m.reply.threadID}
-		return m.startClassUnlock(auth.ClassSend, sendOperation)
+		return m.startClassUnlock(auth.ClassSend)
 	default:
 		return m, nil
 	}

@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/sjawhar/mailbox/internal/render"
 )
 
@@ -49,7 +51,9 @@ func runCredentialCmd(ctx context.Context, cfg *Config, acct *AccountConfig, src
 	stderr := &tailBuffer{limit: mintStderrLimit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	if src.Interactive {
+	// A nil Cmd.Stdin is os.DevNull. Helpers inherit stdin only when an
+	// interactive source is launched from a real terminal.
+	if src.Interactive && term.IsTerminal(int(os.Stdin.Fd())) {
 		cmd.Stdin = os.Stdin
 	}
 

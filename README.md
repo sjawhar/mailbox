@@ -122,10 +122,13 @@ than a fallback to a bare token.
 | `scrub_env_patterns` | Shell-style glob patterns for additional names removed from every mailbox child process. |
 | `credential_timeout_secs` | Positive command timeout in seconds. The default is 120 seconds. Timeout cancels the credential helper's process group. |
 | `read_credential_env`, `write_credential_env`, `send_credential_env` | The environment variable containing an `authorized_user` JSON value or bare token for that class. |
-| `read_interactive`, `write_interactive`, `send_interactive` | Applies only to a command source. Read defaults to `false`; write and send default to `true`. Batch surfaces refuse interactive sources; only the TUI executes them. |
+| `read_interactive`, `write_interactive`, `send_interactive` | Applies only to a command source. Read defaults to `false`; write and send default to `true`. Command sources execute from every surface. An interactive source inherits caller standard input only when it is a real terminal; otherwise the helper receives `/dev/null`. |
 | `write_label`, `send_label` | Optional label shown by the TUI while a credential command is awaiting approval. |
 | `credential_env_passthrough` | Per-account allow-list restored to every credential class for that account after scrubbing. Use it only for genuinely shared helper material. |
 | `read_credential_env_passthrough`, `write_credential_env_passthrough`, `send_credential_env_passthrough` | Per-account, class-private allow-lists restored only to that class's credential command. A name cannot appear in the shared list and a class list, or in two class lists. |
+
+The configured credential helper, not the invoking surface, is responsible for
+any approval step.
 
 Mailbox scrubs `MAILBOX_TOKEN`, `MAILBOX_TOKEN_URL`, `MAILBOX_CONFIG`, every
 configured credential variable, every class-private passthrough variable, and
@@ -168,7 +171,7 @@ When a one-shot command needs an unavailable write credential, it exits with
 status 1 and names the configuration key and file:
 
 ```text
-mailbox: account "primary" has no usable write credential: interactive source; this surface cannot prompt — accounts.primary.write_credential_cmd (config: /path/to/config.toml)
+mailbox: account "primary" has no usable write credential: no credential source configured — accounts.primary.write_credential_cmd (config: /path/to/config.toml)
 ```
 
 With `--json`, the same condition writes this envelope to standard output:

@@ -101,12 +101,21 @@ func cacheDigest(t *testing.T, root string) map[string][32]byte {
 	return digest
 }
 
-func TestBatchAcquirerRefusesInteractiveSendSource(t *testing.T) {
+func TestBatchAcquirerExecutesInteractiveSendSource(t *testing.T) {
 	dir := t.TempDir()
 	spawn := filepath.Join(dir, "spawned")
-	writeStub(t, dir, "interactive-send-helper", `printf spawned > "$SEND_SPAWN_FILE"; printf '%s\n' 'send.interactive.token-value-1234567890'`)
+	stdin := filepath.Join(dir, "stdin")
+	writeStub(t, dir, "interactive-send-helper", `
+printf spawned > "$SEND_SPAWN_FILE"
+if [ -t 0 ]; then
+  printf 'tty\n' > "$SEND_STDIN_FILE"
+else
+  printf 'not-tty\n' > "$SEND_STDIN_FILE"
+fi
+printf '%s\n' 'send.interactive.token-value-1234567890'`)
 	t.Setenv("SEND_SPAWN_FILE", spawn)
-	_, cfg, acct := sendTestSource(&CredentialSource{
+	t.Setenv("SEND_STDIN_FILE", stdin)
+	source, cfg, acct := sendTestSource(&CredentialSource{
 		Class:       ClassSend,
 		Kind:        SourceCmd,
 		Argv:        []string{"interactive-send-helper"},
@@ -115,13 +124,19 @@ func TestBatchAcquirerRefusesInteractiveSendSource(t *testing.T) {
 		ConfigKey:   "accounts.work.send_credential_cmd",
 	})
 
-	_, err := BatchAcquirer(cfg, acct, ClassSend).Acquire(context.Background(), acct, ClassSend)
-	var needs *NeedsCredentialError
-	if !errors.As(err, &needs) || needs.Class != ClassSend || needs.Reason != ReasonInteractive {
-		t.Fatalf("BatchAcquirer send error = %v, want interactive refusal", err)
+	token, err := source.SendToken(context.Background(), BatchAcquirer(cfg, acct, ClassSend))
+	if err != nil || token.AccessToken != "send.interactive.token-value-1234567890" || token.Route != RouteCmd {
+		t.Fatalf("BatchAcquirer SendToken = %+v, %v", token, err)
 	}
-	if _, err := os.Stat(spawn); !os.IsNotExist(err) {
-		t.Fatalf("interactive send helper spawned: %v", err)
+	if _, err := os.Stat(spawn); err != nil {
+		t.Fatalf("interactive send helper did not spawn: %v", err)
+	}
+	data, err := os.ReadFile(stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "not-tty\n"; got != want {
+		t.Fatalf("interactive send helper stdin = %q, want %q", got, want)
 	}
 }
 

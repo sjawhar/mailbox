@@ -142,42 +142,53 @@ func TestCLISendRejectsSelfOnlyReplyWithoutTouchingSendCustody(t *testing.T) {
 	}
 }
 
-func TestCLISendBatchRefusalEnvelopeNeverSpawnsInteractiveHelper(t *testing.T) {
+func TestCLISendBatchInteractiveSourceTransmitsViaStub(t *testing.T) {
 	fixture := newSendFixture(t, true)
 	args := []string{"send", "--reply", "t1", "--body", "hi", "--send", "--message", "m-t1"}
 
 	code, stdout, stderr := runBinary(t, fixture.env, append(args, "--json")...)
-	if code != 1 {
-		t.Fatalf("JSON batch refusal exit = %d, stdout=%q, stderr=%q", code, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("JSON interactive batch send = %d, stdout=%q, stderr=%q", code, stdout, stderr)
 	}
 	var jsonEnvelope struct {
-		Error struct {
-			Code      string `json:"code"`
-			ConfigKey string `json:"config_key"`
-		} `json:"error"`
+		Sent struct {
+			ID string `json:"id"`
+		} `json:"sent"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &jsonEnvelope); err != nil {
-		t.Fatalf("decode JSON batch refusal: %v: %q", err, stdout)
+		t.Fatalf("decode JSON interactive batch send: %v: %q", err, stdout)
 	}
-	if jsonEnvelope.Error.Code != "needs_send_credential" || jsonEnvelope.Error.ConfigKey != "accounts.work.send_credential_cmd" {
-		t.Fatalf("JSON batch refusal = %#v", jsonEnvelope)
+	if jsonEnvelope.Sent.ID != "sent-e2e-1" {
+		t.Fatalf("JSON interactive batch send = %#v", jsonEnvelope)
 	}
 
 	code, stdout, stderr = runBinary(t, fixture.env, args...)
-	if code != 1 {
-		t.Fatalf("TOON batch refusal exit = %d, stdout=%q, stderr=%q", code, stdout, stderr)
+	if code != 0 {
+		t.Fatalf("TOON interactive batch send = %d, stdout=%q, stderr=%q", code, stdout, stderr)
 	}
-	toonEnvelope := toonField(t, decodeTOON(t, stdout), "error")
-	if code := toonString(t, toonEnvelope, "code"); code != "needs_send_credential" {
-		t.Fatalf("TOON batch refusal code = %q", code)
+	toonEnvelope := toonField(t, decodeTOON(t, stdout), "sent")
+	if id := toonString(t, toonEnvelope, "id"); id != "sent-e2e-1" {
+		t.Fatalf("TOON interactive batch send id = %q", id)
 	}
-	if configKey := toonString(t, toonEnvelope, "config_key"); configKey != "accounts.work.send_credential_cmd" {
-		t.Fatalf("TOON batch refusal config_key = %q", configKey)
+	if spawns := fileLines(t, fixture.spawnFile); len(spawns) != 2 || spawns[0] != "spawn" || spawns[1] != "spawn" {
+		t.Fatalf("interactive batch helper spawns = %#v, want two", spawns)
 	}
-	assertNoSpawns(t, fixture.spawnFile)
-	if sends := fixture.gmail.recordedSends(); len(sends) != 0 {
-		t.Fatalf("batch refusal captured sends = %#v, want none", sends)
+	sends := fixture.gmail.recordedSends()
+	if len(sends) != 2 {
+		t.Fatalf("interactive batch captured sends = %#v, want two", sends)
 	}
+	for _, captured := range sends {
+		if captured.Auth != "Bearer "+sendCanary() {
+			t.Fatalf("interactive batch authorization = %q, want canary bearer", captured.Auth)
+		}
+		if captured.ThreadID != "t1" {
+			t.Fatalf("interactive batch threadId = %q, want t1", captured.ThreadID)
+		}
+		if !bytes.Equal(captured.Raw, []byte(goldenReplyMIME)) {
+			t.Fatalf("interactive batch captured MIME:\n got: %q\nwant: %q", captured.Raw, goldenReplyMIME)
+		}
+	}
+	assertNoCanaryOnDisk(t, sendCanary(), fixture.stubs, fixture.cache, filepath.Dir(buildMailbox(t)))
 }
 
 func TestTUIReplyFenceAndEscapeDoNotTransmitEarly(t *testing.T) {
@@ -287,7 +298,9 @@ printf '%s\n' "$SEND_CANARY"
 `
 	if interactive {
 		script = `#!/bin/sh
-"$PTY_TMUX_BIN" -S "$PTY_TMUX_SOCKET" capture-pane -p -t "$PTY_TMUX_SESSION" > "$SEND_PANE_FILE" 2>&1
+if [ -n "$PTY_TMUX_BIN" ]; then
+  "$PTY_TMUX_BIN" -S "$PTY_TMUX_SOCKET" capture-pane -p -t "$PTY_TMUX_SESSION" > "$SEND_PANE_FILE" 2>&1
+fi
 printf 'spawn\n' >> "$SEND_SPAWN_FILE"
 sleep 2
 printf '%s\n' "$SEND_CANARY"

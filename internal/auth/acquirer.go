@@ -29,38 +29,17 @@ func (a EnvOnlyAcquirer) Acquire(ctx context.Context, acct *AccountConfig, class
 		return Acquired{}, credentialError(a.Cfg, acct, class, nil, ReasonNoSource)
 	}
 	if src.Kind != SourceEnv {
-		return Acquired{}, credentialError(a.Cfg, acct, class, src, ReasonInteractive)
+		return Acquired{}, credentialError(a.Cfg, acct, class, src, ReasonNoSource)
 	}
 	return acquireEnv(ctx, a.Cfg, acct, src)
 }
 
-// ExecAcquirer can obtain environment credentials and non-interactive command
-// credentials. BatchAcquirer selects it only for the latter.
+// ExecAcquirer can obtain environment credentials and command credentials.
 type ExecAcquirer struct {
 	Cfg *Config
 }
 
 func (a ExecAcquirer) Acquire(ctx context.Context, acct *AccountConfig, class Class) (Acquired, error) {
-	src := sourceFor(acct, class)
-	if src == nil {
-		return Acquired{}, credentialError(a.Cfg, acct, class, nil, ReasonNoSource)
-	}
-	if src.Kind == SourceEnv {
-		return acquireEnv(ctx, a.Cfg, acct, src)
-	}
-	if src.Interactive {
-		return Acquired{}, credentialError(a.Cfg, acct, class, src, ReasonInteractive)
-	}
-	return runCredentialCmd(ctx, a.Cfg, acct, src)
-}
-
-// InteractiveExecAcquirer is the sole acquirer that can execute interactive
-// credential commands. Only the TUI constructs it.
-type InteractiveExecAcquirer struct {
-	Cfg *Config
-}
-
-func (a InteractiveExecAcquirer) Acquire(ctx context.Context, acct *AccountConfig, class Class) (Acquired, error) {
 	src := sourceFor(acct, class)
 	if src == nil {
 		return Acquired{}, credentialError(a.Cfg, acct, class, nil, ReasonNoSource)
@@ -79,9 +58,9 @@ func (a refusalAcquirer) Acquire(context.Context, *AccountConfig, Class) (Acquir
 	return Acquired{}, a.err
 }
 
-// BatchAcquirer is the choke point for every non-interactive surface. Its
-// selected type makes a forbidden command spawn impossible for env, absent,
-// and interactive sources.
+// BatchAcquirer is the choke point for every batch surface. It refuses absent
+// sources and keeps environment sources on environment acquisition; command
+// sources always execute through ExecAcquirer.
 func BatchAcquirer(cfg *Config, acct *AccountConfig, class Class) Acquirer {
 	src := sourceFor(acct, class)
 	if src == nil {
@@ -89,9 +68,6 @@ func BatchAcquirer(cfg *Config, acct *AccountConfig, class Class) Acquirer {
 	}
 	if src.Kind == SourceEnv {
 		return EnvOnlyAcquirer{Cfg: cfg}
-	}
-	if src.Interactive {
-		return refusalAcquirer{err: credentialError(cfg, acct, class, src, ReasonInteractive)}
 	}
 	return ExecAcquirer{Cfg: cfg}
 }

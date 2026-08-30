@@ -538,11 +538,10 @@ func (c *Config) ResolveAccount(flagValue string) (*AccountConfig, error) {
 type CredentialReason string
 
 const (
-	ReasonNoSource    CredentialReason = "no credential source configured"
-	ReasonNoConfig    CredentialReason = "no config file"
-	ReasonEnvUnset    CredentialReason = "declared environment variable is unset"
-	ReasonInteractive CredentialReason = "interactive source; this surface cannot prompt"
-	ReasonRecursion   CredentialReason = "credential command recursion (MAILBOX_CREDENTIAL_DEPTH is set)"
+	ReasonNoSource  CredentialReason = "no credential source configured"
+	ReasonNoConfig  CredentialReason = "no config file"
+	ReasonEnvUnset  CredentialReason = "declared environment variable is unset"
+	ReasonRecursion CredentialReason = "credential command recursion (MAILBOX_CREDENTIAL_DEPTH is set)"
 )
 
 // NeedsCredentialError describes an unavailable credential without exposing

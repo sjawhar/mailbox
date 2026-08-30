@@ -877,13 +877,11 @@ write_label = "PTY approval"
 func TestEnvelopeSmokeNoWriteCredential(t *testing.T) {
 	gmail := newFakeGmail(t)
 	stubs := t.TempDir()
-	approve := filepath.Join(stubs, "unreachable-approve-write")
-	writeExecutable(t, approve, "#!/bin/sh\nexit 99\n")
-	config := writeE2EConfig(t, stubs, fmt.Sprintf(`default_account = "work"
+	config := writeE2EConfig(t, stubs, `default_account = "work"
 [accounts.work]
 read_credential_env = "PTY_READ_OAUTH"
-write_credential_cmd = [%q]
-`, approve))
+write_credential_env = "UNSET_WRITE_CREDENTIAL"
+`)
 	cache := t.TempDir()
 	env := map[string]string{
 		"MAILBOX_CONFIG":         config,
@@ -912,7 +910,7 @@ write_credential_cmd = [%q]
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		t.Fatalf("archive stdout must contain exactly one envelope: %q (extra decode: %v)", stdout, err)
 	}
-	if envelope.Error.Code != "needs_write_credential" || envelope.Error.ConfigKey != "accounts.work.write_credential_cmd" {
+	if envelope.Error.Code != "needs_write_credential" || envelope.Error.ConfigKey != "accounts.work.write_credential_env" {
 		t.Fatalf("archive envelope = %#v", envelope)
 	}
 }

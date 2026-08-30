@@ -496,7 +496,7 @@ func TestSendScopeWarning(t *testing.T) {
 	})
 }
 
-func TestSendNeedsCredentialAndBatchInteractiveRefusals(t *testing.T) {
+func TestSendNeedsCredentialAndBatchInteractiveSources(t *testing.T) {
 	t.Run("MAILBOX_TOKEN cannot provide a send credential", func(t *testing.T) {
 		g := newGmailTestServer(t)
 		configureSendMessages(g)
@@ -519,23 +519,60 @@ func TestSendNeedsCredentialAndBatchInteractiveRefusals(t *testing.T) {
 		}
 	})
 
-	t.Run("interactive send source is refused in batch", func(t *testing.T) {
+	t.Run("interactive send source transmits in batch without inheriting pipe stdin", func(t *testing.T) {
 		g := newGmailTestServer(t)
 		configureSendMessages(g)
 		rig := newSendRig(t, g, interactiveSendSource())
+		stdinRecord := filepath.Join(filepath.Dir(rig.helperPath), "send-stdin")
+		rig.setHelper(t, fmt.Sprintf(`#!/bin/sh
+printf 'spawn\n' >> %q
+if [ -t 0 ]; then
+  printf 'tty\n' > %q
+elif IFS= read -r value; then
+  printf 'not-tty:read:%%s\n' "$value" > %q
+else
+  printf 'not-tty:eof\n' > %q
+fi
+printf '%%s\n' %q
+`, rig.spawnLog, stdinRecord, stdinRecord, stdinRecord, cliSendToken))
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		originalStdin := os.Stdin
+		os.Stdin = reader
+		t.Cleanup(func() {
+			os.Stdin = originalStdin
+			_ = reader.Close()
+			_ = writer.Close()
+		})
+		if _, err := writer.Write([]byte("caller pipe must not reach helper\n")); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+
 		code, stdout, stderr := runConfiguredSend("send", "--reply=t1", "--message=m-t1", "--body=x", "--send", "--json")
-		if code != 1 || stderr != "" {
+		if code != 0 || stderr != "" {
 			t.Fatalf("interactive batch send = %d, stdout=%q, stderr=%q", code, stdout, stderr)
 		}
-		var payload map[string]map[string]any
+		var payload map[string]any
 		if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload["error"]["code"] != "needs_send_credential" {
+		if sent, ok := payload["sent"].(map[string]any); !ok || sent["id"] != "sent-1" {
 			t.Fatalf("interactive payload = %#v", payload)
 		}
-		if rig.spawns(t) != "" || len(g.sentBodies) != 0 {
-			t.Fatalf("interactive batch touched send custody: spawns=%q sent=%v", rig.spawns(t), g.sentBodies)
+		if got := rig.spawns(t); strings.Count(got, "spawn\n") != 1 || len(g.sentBodies) != 1 {
+			t.Fatalf("interactive batch custody = spawns:%q sent:%v", got, g.sentBodies)
+		}
+		data, err := os.ReadFile(stdinRecord)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := string(data), "not-tty:eof\n"; got != want {
+			t.Fatalf("interactive send helper stdin = %q, want %q", got, want)
 		}
 	})
 }
@@ -727,4 +764,47 @@ func TestSendGrammar(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSendBodyFileAndStdinSources(t *testing.T) {
+	g := newGmailTestServer(t)
+	newSendRig(t, g, nonInteractiveSendSource())
+	bodyPath := filepath.Join(t.TempDir(), "draft.md")
+	if err := os.WriteFile(bodyPath, []byte("drafted in a file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("body-file reads the file", func(t *testing.T) {
+		code, stdout, stderr := runConfiguredSendWithInput(t, "", "--to=a@example.test", "--subject=s", "--body-file="+bodyPath, "--text")
+		if code != 0 {
+			t.Fatalf("exit = %d, stderr=%q", code, stderr)
+		}
+		if !strings.Contains(stdout, "body: 18 bytes") {
+			t.Fatalf("stdout = %q, want file-sized body", stdout)
+		}
+	})
+
+	t.Run("body-file dash reads stdin", func(t *testing.T) {
+		code, stdout, stderr := runConfiguredSendWithInput(t, "from stdin", "--to=a@example.test", "--subject=s", "--body-file=-", "--text")
+		if code != 0 {
+			t.Fatalf("exit = %d, stderr=%q", code, stderr)
+		}
+		if !strings.Contains(stdout, "body: 10 bytes") {
+			t.Fatalf("stdout = %q, want stdin-sized body", stdout)
+		}
+	})
+
+	t.Run("body and body-file are mutually exclusive", func(t *testing.T) {
+		code, _, stderr := runConfiguredSendWithInput(t, "", "--to=a@example.test", "--subject=s", "--body=x", "--body-file="+bodyPath)
+		if code != 2 || !strings.Contains(stderr, "mutually exclusive") {
+			t.Fatalf("exit=%d stderr=%q, want usage refusal", code, stderr)
+		}
+	})
+
+	t.Run("missing body-file is a runtime error naming the flag", func(t *testing.T) {
+		code, _, stderr := runConfiguredSendWithInput(t, "", "--to=a@example.test", "--subject=s", "--body-file="+filepath.Join(t.TempDir(), "absent"))
+		if code == 0 || !strings.Contains(stderr, "--body-file") {
+			t.Fatalf("exit=%d stderr=%q, want failure naming --body-file", code, stderr)
+		}
+	})
 }
