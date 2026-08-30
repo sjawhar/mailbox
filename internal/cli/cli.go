@@ -26,6 +26,7 @@ type cmdCtx struct {
 	stdin       io.Reader
 	rawArgs     []string
 	cfg         *auth.Config
+	filterFlag  string
 	acct        *auth.AccountConfig
 }
 
@@ -54,15 +55,15 @@ func commandSpecs() []commandSpec {
 		{
 			name:        "inbox",
 			description: "list inbox threads",
-			usage:       "mailbox inbox [--unread] [--max N] [--text|--json]",
-			help:        "Lists inbox threads. It takes no positional arguments; --unread restricts results to unread threads and --max sets 1–500 rows (default 25).",
+			usage:       "mailbox inbox [--unread] [--max N] [--filter NAME] [--text|--json]",
+			help:        "Lists inbox threads. It takes no positional arguments; --unread restricts results to unread threads, --max sets 1–500 rows (default 25), and --filter restricts rows to a named config filter.",
 			run:         runInbox,
 		},
 		{
 			name:        "search",
 			description: "search threads",
-			usage:       "mailbox search [--max N] [--text|--json] <query...>",
-			help:        "Searches threads with one or more query terms; --max sets 1–500 rows (default 25). Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax).",
+			usage:       "mailbox search [--max N] [--filter NAME] [--text|--json] <query...>",
+			help:        "Searches threads with one or more query terms; --max sets 1–500 rows (default 25) and --filter restricts rows to a named config filter. Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax).",
 			run:         runSearch,
 		},
 		{
@@ -161,6 +162,7 @@ func PrintHelp(output io.Writer) {
 	fmt.Fprintln(output, "")
 	fmt.Fprintln(output, "global flags:")
 	fmt.Fprintln(output, "  --account NAME   account name from config")
+	fmt.Fprintln(output, "  --filter NAME    named filter from config")
 	fmt.Fprintf(output, "  --json           %s\n", jsonFlagHelp)
 	fmt.Fprintf(output, "  --text           %s\n", textFlagHelp)
 	fmt.Fprintln(output, "  --help, -h       show this help")
@@ -184,6 +186,7 @@ type TopLevelFlags struct {
 	Account string
 	JSON    bool
 	Text    bool
+	Filter  string
 	Help    bool
 }
 
@@ -195,12 +198,13 @@ func ParseTopLevel(args []string) (TopLevelFlags, []string, error) {
 	account := flags.String("account", "", "account name from config")
 	jsonOutput := flags.Bool("json", false, "machine output")
 	textOutput := flags.Bool("text", false, "human output")
+	filter := flags.String("filter", "", "named filter from config")
 	help := flags.Bool("help", false, "show help")
 	shortHelp := flags.Bool("h", false, "show help")
 	if err := flags.Parse(args); err != nil {
 		return TopLevelFlags{}, nil, err
 	}
-	return TopLevelFlags{Account: *account, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp}, flags.Args(), nil
+	return TopLevelFlags{Account: *account, Filter: *filter, JSON: *jsonOutput, Text: *textOutput, Help: *help || *shortHelp}, flags.Args(), nil
 }
 
 // Run executes a one-shot command. args excludes the program name.
@@ -217,7 +221,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return failUsage(stderr, nil)
 	}
 
-	cc := &cmdCtx{accountFlag: global.Account, json: global.JSON, text: global.Text, stdout: stdout, stderr: stderr, stdin: os.Stdin, rawArgs: args}
+	cc := &cmdCtx{accountFlag: global.Account, filterFlag: global.Filter, json: global.JSON, text: global.Text, stdout: stdout, stderr: stderr, stdin: os.Stdin, rawArgs: args}
 	if rest[0] == "__mint" {
 		return runMint(cc, rest[1:])
 	}
@@ -237,6 +241,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 type commonFlags struct {
 	fs         *flag.FlagSet
 	account    *string
+	filter     *string
 	json, text *bool
 	help       *bool
 }
@@ -246,11 +251,12 @@ func (cc *cmdCtx) flags(name string) commonFlags {
 	fs.SetOutput(io.Discard)
 	account := fs.String("account", cc.accountFlag, "account name from config")
 	jsonOutput := fs.Bool("json", cc.json, "machine output")
+	filter := fs.String("filter", cc.filterFlag, "named filter from config")
 	textOutput := fs.Bool("text", cc.text, "human output")
 	help := false
 	fs.BoolVar(&help, "help", false, "show help")
 	fs.BoolVar(&help, "h", false, "show help")
-	return commonFlags{fs: fs, account: account, json: jsonOutput, text: textOutput, help: &help}
+	return commonFlags{fs: fs, account: account, filter: filter, json: jsonOutput, text: textOutput, help: &help}
 }
 
 func (cc *cmdCtx) parse(cf commonFlags, args []string) (pos []string, next *cmdCtx, done bool, code int) {
@@ -262,7 +268,11 @@ func (cc *cmdCtx) parse(cf commonFlags, args []string) (pos []string, next *cmdC
 	copy.accountFlag = *cf.account
 	copy.json = *cf.json
 	copy.text = *cf.text
+	copy.filterFlag = *cf.filter
 	next = &copy
+	if *cf.filter != "" && !filterCommands[cf.fs.Name()] {
+		return nil, nil, false, failUsage(cc.stderr, fmt.Errorf("--filter is not supported by %s", cf.fs.Name()))
+	}
 	if *cf.help {
 		if command, ok := commandByName(cf.fs.Name()); ok {
 			printCommandHelp(next.stdout, command)
@@ -270,6 +280,15 @@ func (cc *cmdCtx) parse(cf commonFlags, args []string) (pos []string, next *cmdC
 		return pos, next, true, 0
 	}
 	return pos, next, false, 0
+}
+
+var filterCommands = map[string]bool{
+	"inbox":   true,
+	"search":  true,
+	"archive": true,
+	"trash":   true,
+	"mark":    true,
+	"label":   true,
 }
 
 func printCommandHelp(output io.Writer, spec commandSpec) {

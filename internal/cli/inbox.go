@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/mailbox/internal/auth"
+	"github.com/sjawhar/mailbox/internal/filter"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/refs"
 )
@@ -50,6 +51,7 @@ func runSearch(cc *cmdCtx, args []string) int {
 
 type listingPayload struct {
 	Account string      `json:"account"`
+	Filter  string      `json:"filter,omitempty"`
 	Threads []threadRow `json:"threads"`
 }
 
@@ -57,6 +59,10 @@ func runListing(cc *cmdCtx, options gmail.ListOptions) int {
 	account, source, client, code := cc.start()
 	if code != 0 {
 		return code
+	}
+	f, err := cc.resolveFilter()
+	if err != nil {
+		return cc.runtimeError(account, source, err)
 	}
 	ctx := context.Background()
 	listed, err := client.ListThreads(ctx, options)
@@ -76,6 +82,7 @@ func runListing(cc *cmdCtx, options gmail.ListOptions) int {
 		if hasInboxLabel(options.LabelIDs) {
 			metadata = gmail.FilterThreadsWithLabel(metadata, "INBOX")
 		}
+		metadata = filter.FilterThreads(f, metadata)
 		ids = ids[:0]
 		for _, thread := range metadata {
 			ids = append(ids, thread.ID)
@@ -87,13 +94,16 @@ func runListing(cc *cmdCtx, options gmail.ListOptions) int {
 	}
 	switch cc.format() {
 	case FormatText:
+		if f != nil {
+			fmt.Fprintf(cc.stdout, "filter: %s\n", f.Name)
+		}
 		if len(rows) == 0 {
 			fmt.Fprintln(cc.stdout, "no threads")
 		} else {
 			printThreads(cc.stdout, rows, isTerminal(cc.stdout))
 		}
 	default:
-		if err := cc.writeMachine(listingPayload{Account: string(account), Threads: rows}); err != nil {
+		if err := cc.writeMachine(listingPayload{Account: string(account), Filter: filterName(f), Threads: rows}); err != nil {
 			return cc.runtimeError(account, source, wrapError("write JSON", err))
 		}
 	}

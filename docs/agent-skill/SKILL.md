@@ -11,8 +11,8 @@ Use `mailbox` for one-shot Gmail triage commands. Run `mailbox <command> --help`
 
 | Command | Usage | Description |
 | --- | --- | --- |
-| `inbox` | `mailbox inbox [--unread] [--max N] [--text\|--json]` | list inbox threads |
-| `search` | `mailbox search [--max N] [--text\|--json] <query...>` | search threads |
+| `inbox` | `mailbox inbox [--unread] [--max N] [--filter NAME] [--text\|--json]` | list inbox threads |
+| `search` | `mailbox search [--max N] [--filter NAME] [--text\|--json] <query...>` | search threads |
 | `read` | `mailbox read [--full] [--text\|--json] <thread>` | read a thread |
 | `open` | `mailbox open [--text\|--json] <thread>` | open thread HTML in a browser |
 | `archive` | `mailbox archive [--text\|--json] <thread>...` | archive threads |
@@ -25,11 +25,11 @@ Use `mailbox` for one-shot Gmail triage commands. Run `mailbox <command> --help`
 
 ### `inbox`
 
-Lists inbox threads. It takes no positional arguments; --unread restricts results to unread threads and --max sets 1–500 rows (default 25).
+Lists inbox threads. It takes no positional arguments; --unread restricts results to unread threads, --max sets 1–500 rows (default 25), and --filter restricts rows to a named config filter.
 
 ### `search`
 
-Searches threads with one or more query terms; --max sets 1–500 rows (default 25). Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax).
+Searches threads with one or more query terms; --max sets 1–500 rows (default 25) and --filter restricts rows to a named config filter. Gmail query operators pass through verbatim: from: to: cc: bcc: subject: label: is: has: in: filename: after: before: older_than: newer_than: deliveredto: list: (see Gmail search syntax).
 
 ### `read`
 

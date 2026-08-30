@@ -53,7 +53,7 @@ func TestAgentEnvironmentPresenceNotValue(t *testing.T) {
 
 func TestToontestMirrorsMatchRealPayloads(t *testing.T) {
 	real := []any{
-		listingPayload{Account: "s1", Threads: []threadRow{{N: 1, ID: "s2", Subject: "s3", From: "s1", Date: "s2", Snippet: "s3", Unread: true, Labels: []string{"s1"}}}},
+		listingPayload{Account: "s1", Filter: "s2", Threads: []threadRow{{N: 1, ID: "s2", Subject: "s3", From: "s1", Date: "s2", Snippet: "s3", Unread: true, Labels: []string{"s1"}}}},
 		readPayloadSample("s1", "s2", "s3"),
 		statusSample("s1", "s2", "s3"),
 		actionPayload{Account: "s1", Action: "s2", ThreadIDs: []string{"s3"}, OK: true},

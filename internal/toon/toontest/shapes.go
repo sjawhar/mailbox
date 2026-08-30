@@ -8,7 +8,7 @@ import "time"
 // unexported JSON payloads; its contract test pins them field-for-field.
 func Shapes(s1, s2, s3 string) []any {
 	return []any{
-		listingPayload{Account: s1, Threads: []threadRow{{N: 1, ID: s2, Subject: s3, From: s1, Date: s2, Snippet: s3, Unread: true, Labels: []string{s1}}}},
+		listingPayload{Account: s1, Filter: s2, Threads: []threadRow{{N: 1, ID: s2, Subject: s3, From: s1, Date: s2, Snippet: s3, Unread: true, Labels: []string{s1}}}},
 		readPayload{
 			Account:      s1,
 			ID:           s2,
@@ -49,6 +49,7 @@ func Shapes(s1, s2, s3 string) []any {
 
 type listingPayload struct {
 	Account string      `json:"account"`
+	Filter  string      `json:"filter,omitempty"`
 	Threads []threadRow `json:"threads"`
 }
 
