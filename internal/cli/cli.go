@@ -48,7 +48,7 @@ const outputFormats = "TOON is the default for agents and pipes. --json is the s
 
 const sendWorkflow = "Start with the dry run, copy its --message value, then add --send to transmit that exact target."
 
-//go:generate go run github.com/sjawhar/mailbox/cmd/skillgen -out ../../docs/agent-skill/SKILL.md
+//go:generate go run github.com/sjawhar/mailbox/cmd/skillgen -out ../../skills/using-mailbox/SKILL.md
 
 func commandSpecs() []commandSpec {
 	return []commandSpec{
