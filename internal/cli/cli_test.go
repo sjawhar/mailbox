@@ -1187,6 +1187,8 @@ func TestSkillGeneratorDocumentsDispatchAndHelp(t *testing.T) {
 		"TOON is the default for agents and pipes.",
 		"`--json` is the stable opt-in.",
 		"`--text` forces human output.",
+		"Every surface executes configured credential commands.",
+		"`*_interactive` passes caller standard input only when it is a real terminal; otherwise helpers receive `/dev/null`.",
 		"Start with the dry run, copy its `--message` value, then add `--send` to transmit that exact target.",
 		"| R1 | empty_recipients |",
 		"| R2 | self_only_recipients |",

@@ -45,7 +45,7 @@ func probeMain() {
 	}
 	var acq Acquirer
 	if os.Getenv("PROBE_SURFACE") == "tui" {
-		acq = InteractiveExecAcquirer{Cfg: cfg}
+		acq = ExecAcquirer{Cfg: cfg}
 	} else {
 		acq = BatchAcquirer(cfg, acct, class)
 	}
@@ -105,6 +105,15 @@ func newProbeEnv(t *testing.T) probeEnv {
 	writeStub(t, stubs, "token-helper", `
 printf 'spawn\n' >> "${PROBE_SPAWN_FILE:-/dev/null}"
 printf '%s\n' "$*" > "${PROBE_ARGV_FILE:-/dev/null}"
+if [ -n "${PROBE_STDIN_FILE:-}" ]; then
+  if [ -t 0 ]; then
+    printf 'tty\n' > "$PROBE_STDIN_FILE"
+  elif IFS= read -r value; then
+    printf 'not-tty:read:%s\n' "$value" > "$PROBE_STDIN_FILE"
+  else
+    printf 'not-tty:eof\n' > "$PROBE_STDIN_FILE"
+  fi
+fi
 case "${STUB_MODE:-json}" in
 json) printf '%s\n' '{"access_token":"command-json-token","expiry":"2099-01-01T00:00:00Z"}' ;;
 bare) printf '%s\n' 'bare.command.token-value-1234567890' ;;
@@ -124,6 +133,15 @@ descendant) (sleep 30 >&1 &) ;;
 esac`)
 	writeStub(t, stubs, "approve-write", `
 printf 'spawn\n' >> "${PROBE_SPAWN_FILE:-/dev/null}"
+if [ -n "${PROBE_STDIN_FILE:-}" ]; then
+  if [ -t 0 ]; then
+    printf 'tty\n' > "$PROBE_STDIN_FILE"
+  elif IFS= read -r value; then
+    printf 'not-tty:read:%s\n' "$value" > "$PROBE_STDIN_FILE"
+  else
+    printf 'not-tty:eof\n' > "$PROBE_STDIN_FILE"
+  fi
+fi
 printf '%s\n' 'write.command.token-value-1234567890'`)
 	return probeEnv{
 		stubs:    stubs,
@@ -352,16 +370,21 @@ func TestRouting(t *testing.T) {
 		}
 	})
 
-	t.Run("interactive command is structurally refused in batch and allowed in TUI", func(t *testing.T) {
+	t.Run("interactive command executes in batch with non-terminal stdin isolated", func(t *testing.T) {
 		config := readCommandConfig(readCmd+"read_interactive = true\n", "", 0)
 		batch := newProbeEnv(t)
+		batch.extra["PROBE_STDIN_FILE"] = filepath.Join(batch.stubs, "batch-stdin")
 		writeProbeConfig(t, batch, config)
-		got := execProbe(t, batch)
-		if got.exit == 0 || !strings.Contains(got.stderr, "accounts.work.read_credential_cmd") || !strings.Contains(got.stderr, batch.config) {
-			t.Fatalf("batch result = %+v, want interactive credential refusal naming config key and path", got)
+		assertProbeSuccess(t, execProbe(t, batch), RouteCmd, "command-json-token")
+		if spawns := readSpawns(t, batch); len(spawns) != 1 {
+			t.Fatalf("batch command spawns = %v, want one", spawns)
 		}
-		if spawns := readSpawns(t, batch); len(spawns) != 0 {
-			t.Fatalf("batch command spawns = %v, want none", spawns)
+		data, err := os.ReadFile(batch.extra["PROBE_STDIN_FILE"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := string(data), "not-tty:eof\n"; got != want {
+			t.Fatalf("batch helper stdin = %q, want %q", got, want)
 		}
 
 		tui := newProbeEnv(t)
@@ -463,13 +486,21 @@ func TestRouting(t *testing.T) {
 		}
 	})
 
-	t.Run("write interactive command is refused in batch and produces a completion diagnostic in TUI", func(t *testing.T) {
+	t.Run("write interactive command executes in batch with non-terminal stdin isolated", func(t *testing.T) {
 		batch := newProbeEnv(t)
-		writeProbeConfig(t, batch, readCommandConfig(readCmd, writeCmd, 0))
 		batch.extra["PROBE_CLASS"] = "write"
-		got := execProbe(t, batch)
-		if got.exit == 0 || !strings.Contains(got.stderr, "accounts.work.write_credential_cmd") {
-			t.Fatalf("batch result = %+v, want write config-key refusal", got)
+		batch.extra["PROBE_STDIN_FILE"] = filepath.Join(batch.stubs, "batch-stdin")
+		writeProbeConfig(t, batch, readCommandConfig(readCmd, writeCmd, 0))
+		assertProbeSuccess(t, execProbe(t, batch), RouteCmd, "write.command.token-value-1234567890")
+		if spawns := readSpawns(t, batch); len(spawns) != 1 {
+			t.Fatalf("batch write command spawns = %v, want one", spawns)
+		}
+		data, err := os.ReadFile(batch.extra["PROBE_STDIN_FILE"])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := string(data), "not-tty:eof\n"; got != want {
+			t.Fatalf("batch write helper stdin = %q, want %q", got, want)
 		}
 
 		tui := newProbeEnv(t)

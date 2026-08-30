@@ -137,6 +137,7 @@ func sendCommandHelp() string {
 	output.WriteString("  mailbox send --to a@x [--cc b@y] [--bcc c@z] --subject S --body TEXT      # compose\n")
 	output.WriteString("  mailbox send --reply=<thread-id>  --body TEXT [--message=<id>] [--to ...] # reply\n")
 	output.WriteString("  mailbox send --forward=<thread-id> --to a@x --body TEXT [--message=<id>]  # forward\n\n")
+	output.WriteString("The body comes from exactly one of: --body TEXT, --body - (stdin), or --body-file PATH (- for stdin) — file input suits agent-drafted content.\n\n")
 	output.WriteString("A dry-run is the default: resolve the envelope first. " + sendWorkflow + " Reply and forward previews select the newest message unless --message selects one; --send requires --message so it pins the exact message within the named thread.\n\n")
 	output.WriteString("Refusal rules:\n")
 	for _, rule := range send.RuleDocs() {

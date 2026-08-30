@@ -32,6 +32,7 @@ func WriteAgentSkill(w io.Writer) error {
 
 	writef("## Id semantics\n\n%s\n\n", idSemantics)
 	writef("## Output formats\n\n%s\n\n", markdownFlags(outputFormats))
+	writef("## Credential helpers\n\nEvery surface executes configured credential commands. `*_interactive` passes caller standard input only when it is a real terminal; otherwise helpers receive `/dev/null`.\n\n")
 	writef("## Send workflow\n\n%s\n\n", markdownFlags(sendWorkflow))
 	writef("## Refusal rules\n\n| Rule | Code | Refusal |\n| --- | --- | --- |\n")
 	for _, rule := range send.RuleDocs() {

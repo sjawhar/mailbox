@@ -91,11 +91,11 @@ var newAccountCtx = func(cfg *auth.Config, acct *auth.AccountConfig) (*accountCt
 			var err error
 			switch class {
 			case auth.ClassRead:
-				_, err = source.Resolve(ctx, auth.InteractiveExecAcquirer{Cfg: cfg})
+				_, err = source.Resolve(ctx, auth.ExecAcquirer{Cfg: cfg})
 			case auth.ClassWrite:
-				_, err = source.WriteToken(ctx, auth.InteractiveExecAcquirer{Cfg: cfg})
+				_, err = source.WriteToken(ctx, auth.ExecAcquirer{Cfg: cfg})
 			case auth.ClassSend:
-				_, err = source.SendToken(ctx, auth.InteractiveExecAcquirer{Cfg: cfg})
+				_, err = source.SendToken(ctx, auth.ExecAcquirer{Cfg: cfg})
 			default:
 				err = fmt.Errorf("unsupported credential class %q", class)
 			}
@@ -145,25 +145,24 @@ type app struct {
 	viewport    viewport.Model
 	spinner     spinner.Model
 
-	status             string
-	statusError        bool
-	statusNote         string
-	loading            bool
-	layout             layoutMetrics
-	pending            *pendingAction
-	pendingSend        *pendingSend
-	unlocking          bool
-	unlockCtx          context.Context
-	unlockCancel       context.CancelFunc
-	unlockClass        auth.Class
-	unlockRetry        asyncOperation
-	unlockRetryGen     uint64
-	unlockRetryCommand func(asyncRequest) tea.Cmd
-	pinned             bool
-	generations        [asyncOperationCount]uint64
+	status       string
+	statusError  bool
+	statusNote   string
+	loading      bool
+	layout       layoutMetrics
+	pending      *pendingAction
+	pendingSend  *pendingSend
+	unlocking    bool
+	unlockCtx    context.Context
+	unlockCancel context.CancelFunc
+	unlockClass  auth.Class
+	pinned       bool
+	generations  [asyncOperationCount]uint64
 }
 
 const envTokenIdentityNotice = "MAILBOX_TOKEN pins one identity for all accounts"
+
+type initialReadMsg struct{}
 
 func newApp(account *accountCtx) app {
 	search := textinput.New()
@@ -192,11 +191,30 @@ func newApp(account *accountCtx) app {
 		pinned:   os.Getenv("MAILBOX_TOKEN") != "",
 	}
 	model.generations[listOperation] = 1
-	model.unlockRetry = asyncOperationCount
+	model.status = model.readCommandStatus()
 	return model
 }
 
 func (m app) Init() tea.Cmd {
+	return m.firstReadCommand()
+}
+
+func (m app) readCommandStatus() string {
+	source := m.ctx.acct.Read
+	if source == nil || source.Kind != auth.SourceCmd {
+		return ""
+	}
+	return m.unlockStatus(auth.ClassRead)
+}
+
+func (m app) firstReadCommand() tea.Cmd {
+	if m.readCommandStatus() != "" {
+		return tea.Tick(unlockRenderFence, func(time.Time) tea.Msg { return initialReadMsg{} })
+	}
+	return m.listReadCommand()
+}
+
+func (m app) listReadCommand() tea.Cmd {
 	return m.loadingCmd(listThreadsCmd(m.currentRequest(listOperation), m.list.query))
 }
 
@@ -210,25 +228,14 @@ func (m app) spinnerCmd() tea.Cmd {
 
 func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 	var diagnostic string
-	var completedRetry bool
-	if message, ok := msg.(asyncMessage); ok && !m.discardAsync(message) {
-		if !m.unlocking {
-			diagnostic = m.ctx.takeDiagnostic(auth.ClassRead)
-		}
-		if m.isUnlockRetry(message.requestRef()) {
-			completedRetry, _ = retryResult(msg)
-		}
+	if message, ok := msg.(asyncMessage); ok && !m.discardAsync(message) && !m.unlocking {
+		diagnostic = m.ctx.takeDiagnostic(auth.ClassRead)
 	}
 	defer func() {
-		if !completedRetry && (diagnostic == "" || m.unlocking) {
+		if diagnostic == "" || m.unlocking {
 			return
 		}
-		if completedRetry {
-			m.clearUnlockRetry()
-		}
-		if diagnostic != "" && !m.unlocking {
-			m.appendStatusNote(diagnostic)
-		}
+		m.appendStatusNote(diagnostic)
 		model = m
 	}()
 	switch message := msg.(type) {
@@ -245,6 +252,8 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 			return m, command
 		}
 		return m, nil
+	case initialReadMsg:
+		return m, m.listReadCommand()
 	case spinner.TickMsg:
 		if m.loading {
 			var command tea.Cmd
@@ -314,10 +323,6 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 			return m, nil
 		}
 		m.preview.loading = false
-		if updated, command, handled := m.handleReadUnlock(message.request, message.err, nil); handled {
-			m = updated.(app)
-			return m, command
-		}
 		m.preview.err = render.SanitizeTerminal(message.err.Error())
 		m.surfaceError(message.err)
 		return m, nil
@@ -402,7 +407,6 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 				m.pendingSend = nil
 				m.beginRequest(unlockOperation)
 			}
-			m.clearUnlockRetry()
 			m.status = m.unlockFailureStatus(message.class, message.err)
 			m.statusError = true
 			return m, nil
@@ -412,9 +416,6 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 			m.appendStatusNote(note)
 		}
 		m.statusError = false
-		if message.class == auth.ClassRead {
-			return m.retryUnlockedRead()
-		}
 		if message.class == auth.ClassSend {
 			if m.pendingSend == nil {
 				m.loading = false
@@ -435,14 +436,10 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		if m.unlocking {
 			return m, nil
 		}
-		if updated, command, handled := m.handleReadUnlock(message.request, message.err, message.retry); handled {
-			m = updated.(app)
-			return m, command
-		}
 		if m.pendingSend != nil && errors.Is(message.err, auth.ErrExpiredSendToken) && !m.pendingSend.retried {
 			m.pendingSend.retried = true
 			m.ctx.invalidateSend()
-			return m.startClassUnlock(auth.ClassSend, sendOperation)
+			return m.startClassUnlock(auth.ClassSend)
 		}
 		if m.pendingSend != nil {
 			m.loading = false
@@ -453,7 +450,7 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		if m.pending != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pending.retried {
 			m.pending.retried = true
 			m.ctx.invalidateWrite()
-			return m.startClassUnlock(auth.ClassWrite, actionOperation)
+			return m.startClassUnlock(auth.ClassWrite)
 		}
 		m.loading = false
 		m.pending = nil
@@ -635,7 +632,6 @@ func (m *app) abandonUnlock() {
 	m.unlockCtx = nil
 	m.unlockCancel = nil
 	m.loading = false
-	m.clearUnlockRetry()
 	m.beginRequest(unlockOperation)
 }
 
@@ -731,23 +727,23 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	m.pendingSend = nil
 	m.loading = true
 	m.clearStatus()
-	request := m.beginRequest(listOperation)
-	return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
+	m.status = m.readCommandStatus()
+	return m, m.firstReadCommand()
 }
 
 func (m app) startUnlock() (tea.Model, tea.Cmd) {
-	return m.startClassUnlock(auth.ClassWrite, actionOperation)
+	return m.startClassUnlock(auth.ClassWrite)
 }
 
-// unlockRenderFence waits one-plus Bubble Tea frame intervals before arming an
-// interactive credential command. It never spawns a credential command or
-// refreshes automatically: it only delays a human-caused unlock. Bubble Tea has
-// no render acknowledgement, so this proves a frame interval elapsed with the
-// attribution in View, not that bytes reached a terminal. In practice helper
-// spawn, IPC, decrypt, and hardware approval take orders of magnitude longer.
+// unlockRenderFence waits one-plus Bubble Tea frame intervals before arming a
+// credential command. TUI uses it after rendering command-source attribution
+// and before a human-caused unlock. Bubble Tea has no render acknowledgement,
+// so this proves a frame interval elapsed with the attribution in View, not that
+// bytes reached a terminal. In practice helper spawn, IPC, decrypt, and hardware
+// approval take orders of magnitude longer.
 const unlockRenderFence = 50 * time.Millisecond
 
-func (m app) startClassUnlock(class auth.Class, retry asyncOperation) (tea.Model, tea.Cmd) {
+func (m app) startClassUnlock(class auth.Class) (tea.Model, tea.Cmd) {
 	if m.unlocking {
 		m.deflectUnlock()
 		return m, nil
@@ -757,11 +753,6 @@ func (m app) startClassUnlock(class auth.Class, retry asyncOperation) (tea.Model
 	m.unlockCtx = ctx
 	m.unlockCancel = cancel
 	m.unlockClass = class
-	m.unlockRetry = retry
-	m.unlockRetryGen = 0
-	if class != auth.ClassRead {
-		m.unlockRetryCommand = nil
-	}
 	m.loading = true
 	m.status = m.unlockStatus(class)
 	m.statusError = false
@@ -793,96 +784,6 @@ func (m app) unlockStatus(class auth.Class) string {
 		class,
 		render.SanitizeTerminal(source.Argv0),
 	)
-}
-
-func (m app) retryUnlockedRead() (tea.Model, tea.Cmd) {
-	switch m.unlockRetry {
-	case listOperation:
-		request := m.beginRequest(listOperation)
-		m.unlockRetryGen = request.generation
-		return m, m.loadingCmd(listThreadsCmd(request, m.list.query))
-	case threadOperation:
-		if len(m.list.rows) == 0 {
-			m.loading = false
-			m.clearUnlockRetry()
-			return m, nil
-		}
-		request := m.beginRequest(threadOperation)
-		m.unlockRetryGen = request.generation
-		return m, m.loadingCmd(getThreadCmd(request, m.list.rows[m.list.cursor].ID))
-	case previewOperation:
-		command := m.requestPreview()
-		if command == nil {
-			m.loading = false
-			m.clearUnlockRetry()
-			return m, nil
-		}
-		m.unlockRetryGen = m.generations[previewOperation]
-		return m, m.loadingCmd(command)
-	case labelOperation:
-		request := m.beginRequest(labelOperation)
-		m.unlockRetryGen = request.generation
-		return m, m.loadingCmd(listLabelsCmd(request))
-	case profileOperation:
-		request := m.beginRequest(profileOperation)
-		m.unlockRetryGen = request.generation
-		return m, m.loadingCmd(getProfileCmd(request))
-	case attachmentOperation, openOperation:
-		if m.unlockRetryCommand == nil {
-			m.loading = false
-			m.clearUnlockRetry()
-			return m, nil
-		}
-		request := m.beginRequest(m.unlockRetry)
-		m.unlockRetryGen = request.generation
-		return m, m.loadingCmd(m.unlockRetryCommand(request))
-	default:
-		m.loading = false
-		m.clearUnlockRetry()
-		return m, nil
-	}
-}
-
-func (m app) isUnlockRetry(request asyncRequest) bool {
-	return m.unlockClass == auth.ClassRead &&
-		m.unlockRetry == request.operation &&
-		m.unlockRetryGen == request.generation &&
-		m.unlockRetryGen != 0
-}
-
-func (m *app) clearUnlockRetry() {
-	m.unlockRetry = asyncOperationCount
-	m.unlockRetryGen = 0
-	m.unlockRetryCommand = nil
-}
-
-func retryResult(message tea.Msg) (complete, success bool) {
-	switch message.(type) {
-	case threadsMsg, threadMsg, previewThreadMsg, labelsMsg, profileMsg, actionDoneMsg, attachmentSavedMsg, openedMsg:
-		return true, true
-	case errMsg, previewErrMsg:
-		return true, false
-	default:
-		return false, false
-	}
-}
-
-func (m app) handleReadUnlock(request asyncRequest, err error, retry func(asyncRequest) tea.Cmd) (tea.Model, tea.Cmd, bool) {
-	var needsCredential *auth.NeedsCredentialError
-	if !errors.As(err, &needsCredential) ||
-		needsCredential.Class != auth.ClassRead ||
-		needsCredential.Reason != auth.ReasonInteractive {
-		return m, nil, false
-	}
-	if m.isUnlockRetry(request) {
-		m.loading = false
-		m.pending = nil
-		m.surfaceError(err)
-		return m, nil, true
-	}
-	m.unlockRetryCommand = retry
-	model, command := m.startClassUnlock(auth.ClassRead, request.operation)
-	return model, command, true
 }
 
 // dispatchPending re-issues the buffered action exactly once after an unlock.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
@@ -35,6 +36,11 @@ func runSend(cc *cmdCtx, args []string) int {
 	})
 	cf.fs.Func("body", "message body", func(value string) error {
 		body, bodySet = value, true
+		return nil
+	})
+	var bodyFile string
+	cf.fs.Func("body-file", "read the body from a file (- for stdin)", func(value string) error {
+		bodyFile = value
 		return nil
 	})
 	cf.fs.Func("reply", "thread id", func(value string) error {
@@ -75,8 +81,11 @@ func runSend(cc *cmdCtx, args []string) int {
 	if mode != send.ModeCompose && subjectSet {
 		return failUsage(cc.stderr, fmt.Errorf("--subject is only valid for compose"))
 	}
-	if !bodySet {
-		return failUsage(cc.stderr, fmt.Errorf("send requires --body"))
+	if bodySet && bodyFile != "" {
+		return failUsage(cc.stderr, fmt.Errorf("--body and --body-file are mutually exclusive"))
+	}
+	if !bodySet && bodyFile == "" {
+		return failUsage(cc.stderr, fmt.Errorf("send requires --body or --body-file"))
 	}
 	if mode == send.ModeCompose && messageSet {
 		return failUsage(cc.stderr, fmt.Errorf("--message is only valid with --reply or --forward"))
@@ -84,10 +93,17 @@ func runSend(cc *cmdCtx, args []string) int {
 	if *sendNow && mode != send.ModeCompose && (!messageSet || message == "") {
 		return failUsage(cc.stderr, fmt.Errorf("--send requires --message=<id> on reply/forward: run the dry-run first and copy the message id it prints (target pinning)"))
 	}
-	if body == "-" {
+	switch {
+	case body == "-" && bodySet, bodyFile == "-":
 		data, err := io.ReadAll(next.stdin)
 		if err != nil {
-			return next.runtimeError("", nil, wrapError("read --body", err))
+			return next.runtimeError("", nil, wrapError("read body from stdin", err))
+		}
+		body = string(data)
+	case bodyFile != "":
+		data, err := os.ReadFile(bodyFile)
+		if err != nil {
+			return next.runtimeError("", nil, wrapError("read --body-file", err))
 		}
 		body = string(data)
 	}
