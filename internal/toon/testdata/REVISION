@@ -1,0 +1,5 @@
+TOON spec v4.1 encode fixtures.
+Vendored from sjawhar/toon-rust branch spec-v4.1,
+rev 9f0a88fab65727a0384db1794b6a26e6fa5b2002 (upstream PR toon-format/toon-rust#79),
+path spec/tests/fixtures/encode/.
+Spec: spec/SPEC.md in the same tree (toon-format/spec, version 4.1, 2026-07-26).
