@@ -28,7 +28,8 @@ printf '%s\n' "$SEND_CANARY"
 read_credential_env = "PTY_READ_OAUTH"
 send_credential_cmd = ["send-helper"]
 send_interactive = false
-credential_env_passthrough = ["SEND_CANARY", "SEND_SPAWN_FILE"]
+credential_env_passthrough = ["SEND_SPAWN_FILE"]
+send_credential_env_passthrough = ["SEND_CANARY"]
 `)
 	cache := t.TempDir()
 	env := map[string]string{
@@ -292,7 +293,8 @@ read_credential_env = "PTY_READ_OAUTH"
 send_credential_cmd = ["send-helper"]
 send_interactive = %t
 send_label = "hardware key touch"
-credential_env_passthrough = ["SEND_CANARY", "SEND_SPAWN_FILE", "SEND_PANE_FILE", "PTY_TMUX_BIN", "PTY_TMUX_SOCKET", "PTY_TMUX_SESSION"]
+credential_env_passthrough = ["SEND_SPAWN_FILE", "SEND_PANE_FILE", "PTY_TMUX_BIN", "PTY_TMUX_SOCKET", "PTY_TMUX_SESSION"]
+send_credential_env_passthrough = ["SEND_CANARY"]
 `, interactive))
 	cache := t.TempDir()
 	env := map[string]string{

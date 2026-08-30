@@ -97,7 +97,8 @@ write_label = "Approval required"        # optional text shown while the TUI wai
 send_credential_cmd = ["my-send-helper"]
 send_interactive = true                  # true by default for a command source
 send_label = "hardware key touch"        # optional text shown while the TUI waits
-credential_env_passthrough = ["ACME_SESSION_FILE"]
+credential_env_passthrough = ["ACME_BROKER_SESSION"]      # shared by this account's credential classes
+send_credential_env_passthrough = ["ACME_SEND_SESSION"]   # available only to its send helper
 
 # Instead of either command above, its class can read a value directly:
 # read_credential_env = "ACME_OAUTH_JSON"
@@ -123,16 +124,20 @@ than a fallback to a bare token.
 | `read_credential_env`, `write_credential_env`, `send_credential_env` | The environment variable containing an `authorized_user` JSON value or bare token for that class. |
 | `read_interactive`, `write_interactive`, `send_interactive` | Applies only to a command source. Read defaults to `false`; write and send default to `true`. Batch surfaces refuse interactive sources; only the TUI executes them. |
 | `write_label`, `send_label` | Optional label shown by the TUI while a credential command is awaiting approval. |
-| `credential_env_passthrough` | Per-account allow-list restored only for that account's credential command after scrubbing. It cannot restore a credential variable or an unconditionally denied value. |
+| `credential_env_passthrough` | Per-account allow-list restored to every credential class for that account after scrubbing. Use it only for genuinely shared helper material. |
+| `read_credential_env_passthrough`, `write_credential_env_passthrough`, `send_credential_env_passthrough` | Per-account, class-private allow-lists restored only to that class's credential command. A name cannot appear in the shared list and a class list, or in two class lists. |
 
 Mailbox scrubs `MAILBOX_TOKEN`, `MAILBOX_TOKEN_URL`, `MAILBOX_CONFIG`, every
-configured credential variable, and the names selected by `scrub_env` and
-`scrub_env_patterns` from child environments. A credential command receives
-only its account's declared `credential_env_passthrough` values in addition to
-that scrubbed environment.
+configured credential variable, every class-private passthrough variable, and
+the names selected by `scrub_env` and `scrub_env_patterns` from credential-child
+environments. A credential command receives only its account's shared
+`credential_env_passthrough` values plus its own class-private passthrough
+values. No passthrough list can restore a credential variable or an
+unconditionally denied value.
 
-Without a configuration file, mailbox provides one implicit `default` account
-that is usable only with `MAILBOX_TOKEN`.
+Without a configuration file, mailbox provides one implicit `default` account:
+read and write use it only with `MAILBOX_TOKEN`; send requires a configured
+`send_credential_env` or `send_credential_cmd`.
 
 ## Authentication
 

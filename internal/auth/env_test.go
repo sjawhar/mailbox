@@ -281,3 +281,55 @@ func TestCredentialChildScrubsOtherClassCredentials(t *testing.T) {
 		}
 	}
 }
+
+// This fails if a class-private credential passthrough survives scrubbing for
+// another credential child or the requested child does not restore its own.
+func TestCredentialChildEnvironScopesClassPassthrough(t *testing.T) {
+	writeConfig(t, `
+[accounts.work]
+read_credential_env = "WORK_READ_JSON"
+write_credential_env = "WORK_WRITE_JSON"
+send_credential_env = "WORK_SEND_JSON"
+credential_env_passthrough = ["SHARED_CANARY"]
+read_credential_env_passthrough = ["READ_CANARY"]
+send_credential_env_passthrough = ["SEND_CANARY"]
+`)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, ok := cfg.Account("work")
+	if !ok {
+		t.Fatal("work account missing")
+	}
+	for name, value := range map[string]string{
+		"SHARED_CANARY": "shared",
+		"READ_CANARY":   "read",
+		"SEND_CANARY":   "send",
+	} {
+		t.Setenv(name, value)
+	}
+
+	for _, test := range []struct {
+		class  Class
+		readOK bool
+		sendOK bool
+	}{
+		{class: ClassRead, readOK: true},
+		{class: ClassWrite},
+		{class: ClassSend, sendOK: true},
+	} {
+		t.Run(string(test.class), func(t *testing.T) {
+			got := envNames(CredentialChildEnviron(cfg, work, test.class))
+			if got["SHARED_CANARY"] != "shared" {
+				t.Fatalf("%s child shared passthrough = %q, want shared", test.class, got["SHARED_CANARY"])
+			}
+			if _, exists := got["READ_CANARY"]; exists != test.readOK {
+				t.Fatalf("%s child read passthrough present = %v, want %v: %v", test.class, exists, test.readOK, got)
+			}
+			if _, exists := got["SEND_CANARY"]; exists != test.sendOK {
+				t.Fatalf("%s child send passthrough present = %v, want %v: %v", test.class, exists, test.sendOK, got)
+			}
+		})
+	}
+}

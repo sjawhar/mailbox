@@ -74,6 +74,10 @@ func TestLoadConfigParseContract(t *testing.T) {
 		{"non-positive timeout", "credential_timeout_secs = 0\n[accounts.a]\nread_credential_env = \"V\"\n", "credential_timeout_secs"},
 		{"passthrough names deny-set var", "[accounts.a]\nread_credential_env = \"V\"\ncredential_env_passthrough = [\"MAILBOX_TOKEN\"]\n", "accounts.a.credential_env_passthrough"},
 		{"passthrough names a declared credential var", "default_account = \"a\"\n[accounts.a]\nread_credential_env = \"V\"\ncredential_env_passthrough = [\"W\"]\n[accounts.b]\nread_credential_env = \"W\"\n", "accounts.a.credential_env_passthrough"},
+		{"shared and send passthrough have ambiguous custody", "[accounts.a]\nread_credential_env = \"READ\"\nsend_credential_env = \"SEND\"\ncredential_env_passthrough = [\"CUSTODY\"]\nsend_credential_env_passthrough = [\"CUSTODY\"]\n", "CUSTODY"},
+		{"read and send passthrough have ambiguous custody", "[accounts.a]\nread_credential_env = \"READ\"\nsend_credential_env = \"SEND\"\nread_credential_env_passthrough = [\"CUSTODY\"]\nsend_credential_env_passthrough = [\"CUSTODY\"]\n", "CUSTODY"},
+		{"send passthrough names deny-set var", "[accounts.a]\nread_credential_env = \"READ\"\nsend_credential_env_passthrough = [\"MAILBOX_TOKEN\"]\n", "accounts.a.send_credential_env_passthrough"},
+		{"send passthrough names a declared credential var", "[accounts.a]\nread_credential_env = \"READ\"\nsend_credential_env = \"SEND\"\nsend_credential_env_passthrough = [\"SEND\"]\n", "accounts.a.send_credential_env_passthrough"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

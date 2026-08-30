@@ -143,3 +143,20 @@ func TestScopeHintNamesOnlyConfigMetadata(t *testing.T) {
 		}
 	}
 }
+
+// This fails if no-config send guidance recommends the read/write-only caller
+// override instead of the class-specific credential sources.
+func TestNoConfigSendCredentialGuidanceNamesOnlySendSources(t *testing.T) {
+	cfg := noConfig("/tmp/mailbox/config.toml")
+	acct := cfg.Accounts[0]
+	got := credentialError(cfg, acct, ClassSend, nil, ReasonNoSource).Error()
+
+	for _, want := range []string{"send_credential_env", "send_credential_cmd"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("send no-config guidance = %q, want %q", got, want)
+		}
+	}
+	if strings.Contains(got, "MAILBOX_TOKEN") {
+		t.Fatalf("send no-config guidance = %q, must not recommend MAILBOX_TOKEN", got)
+	}
+}
