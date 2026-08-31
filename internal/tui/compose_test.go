@@ -179,6 +179,7 @@ func TestEditorGuardsBlockDuringUnlockPendingAndSend(t *testing.T) {
 		func(m *app) { m.unlocking = true },
 		func(m *app) { m.pending = &pendingAction{action: "archive"} },
 		func(m *app) { m.pendingSend = &pendingSend{} },
+		func(m *app) { m.pendingDraft = &pendingDraft{} },
 	} {
 		model := newThreadModel(t, replyThread())
 		model.ctx.self = "me@example.test"
@@ -216,4 +217,12 @@ func recipientAddresses(recipients []send.Recipient) []string {
 		addresses[index] = recipient.Address
 	}
 	return addresses
+}
+
+func TestEmptyDraftsStillDiscardSilently(t *testing.T) {
+	model := modelMidCompose(t, "   \n\t\n")
+	model, _ = update(t, model, editorDoneMsg{request: model.currentRequest(composeOperation)})
+	if model.view == replyConfirmView || model.abandonPrompt {
+		t.Fatalf("empty body reached the confirm/prompt surface: view=%v prompt=%v", model.view, model.abandonPrompt)
+	}
 }

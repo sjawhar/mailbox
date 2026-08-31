@@ -77,6 +77,7 @@ type Envelope struct {
 	References      []string
 	ThreadID        string
 	TargetMessageID string
+	Attachments     []Attachment
 }
 
 // Resolve derives a sendable envelope, including R5 body validation.

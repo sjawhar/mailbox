@@ -51,7 +51,7 @@ func SanitizeTerminal(value string) string {
 				output.WriteRune(r)
 			}
 			index += size
-		case r < ' ' || (r >= '\x7f' && r <= '\x9f'):
+		case isBidiControl(r) || r < ' ' || (r >= '\x7f' && r <= '\x9f'):
 			writePrefix(index)
 			index += size
 		default:
@@ -65,6 +65,19 @@ func SanitizeTerminal(value string) string {
 		return value
 	}
 	return output.String()
+}
+
+func isBidiControl(r rune) bool {
+	switch {
+	case r == '\u061c', r == '\u200e', r == '\u200f':
+		return true
+	case r >= '\u202a' && r <= '\u202e':
+		return true
+	case r >= '\u2066' && r <= '\u2069':
+		return true
+	default:
+		return false
+	}
 }
 
 // RenderTerminalMarkdown sanitizes untrusted Markdown before rendering it for a

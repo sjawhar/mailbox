@@ -14,6 +14,7 @@ const (
 	sendOperation
 	unlockOperation
 	composeOperation
+	draftOperation
 	asyncOperationCount
 )
 

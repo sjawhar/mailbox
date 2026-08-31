@@ -123,7 +123,7 @@ func (m app) composeSubjectScreen() string {
 }
 
 func (m app) editorBlocked() bool {
-	return m.unlocking || m.pending != nil || m.pendingSend != nil
+	return m.unlocking || m.pending != nil || m.pendingSend != nil || m.pendingDraft != nil
 }
 
 func commaSeparatedRecipients(value string) []string {
@@ -152,7 +152,7 @@ func (m app) startEditor(envelope *send.Envelope, state composeState) (tea.Model
 	}
 	var block strings.Builder
 	send.RenderText(&block, m.account, envelope, 0)
-	dir, path, err := compose.CreateDraft(filepath.Join(cacheDir, "compose"), block.String())
+	dir, path, err := compose.CreateDraft(filepath.Join(cacheDir, "compose"), block.String(), envelope.Body)
 	if err != nil {
 		m.surfaceError(err)
 		return m, nil

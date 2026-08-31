@@ -50,6 +50,13 @@ func allPayloadShapes() []any {
 			Sent:     &send.SentPayload{ID: payloadSeed, ThreadID: payloadSeed},
 			Scope:    payloadSeed,
 			Warning:  payloadSeed,
+			Attachments: []send.AttachmentPayload{{
+				Filename: payloadSeed,
+				Size:     7,
+				MIMEType: payloadSeed,
+				SHA256:   payloadSeed,
+			}},
+			DraftID: payloadSeed,
 		},
 		send.RefusalOf(payloadSeed, &send.Refusal{
 			Rule:    payloadSeed,

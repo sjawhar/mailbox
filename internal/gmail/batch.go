@@ -33,15 +33,26 @@ type batchResult struct {
 	body []byte
 }
 
-func (c *Client) doBatch(ctx context.Context, creds Credentials, items []batchItem) ([]batchResult, []batchFailure, error) {
-	results := make([]batchResult, len(items))
+func (c *Client) batchScopeMapped(op operation, err error) error {
+	return c.scopeMapped(err, routes[op].scope)
+}
+
+func (c *Client) doBatch(ctx context.Context, op operation, items []batchItem) (results []batchResult, terminalFailures []batchFailure, err error) {
+	creds, err := c.credentials(routes[op].class)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		err = c.batchScopeMapped(op, err)
+	}()
+
+	results = make([]batchResult, len(items))
 	pending := make([]batchItem, len(items))
 	for index, item := range items {
 		item.resultIndex = index
 		pending[index] = item
 	}
 
-	var terminalFailures []batchFailure
 	unauthorizedRetries := 0
 	rateLimitRetries := 0
 	for {

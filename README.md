@@ -42,11 +42,13 @@ Run `mailbox` without a subcommand in a terminal to open the interactive TUI. Fo
 | `mailbox trash (<ref>... \| --filter NAME)` | Move one or more threads to Trash, or every matching inbox thread. |
 | `mailbox mark read\|unread (<ref>... \| --filter NAME)` | Mark one or more threads read or unread. |
 | `mailbox label add\|rm <name> (<ref>... \| --filter NAME)` | Add or remove a Gmail label. |
-| `mailbox attachment <ref> [n] [-o path]` | List attachments, or download attachment `n`. |
+| `mailbox attachment <message-id> [filename\|index] [-o PATH\|-o -]` | List message attachment parts, or fetch one without overwriting an existing file. |
 | `mailbox status` | Report the selected account's authentication route, Gmail profile, and cache state. |
-| `mailbox send [--to RECIPIENT] [--subject SUBJECT] [--reply THREAD] [--forward THREAD] --body BODY [--send]` | Preview a compose, reply, or forward envelope; add `--send` only to transmit it. |
+| `mailbox send [--to RECIPIENT] [--subject SUBJECT] [--reply THREAD] [--forward THREAD] --body BODY [--attach PATH]... [--save-draft\|--send]` | Preview a compose, reply, or forward envelope; `--save-draft` creates a Gmail draft and `--send` transmits it. |
+| `mailbox send --draft <draft-id> [overrides] [--send --message=<id>]` | Resume a Gmail server-side draft through the send pipeline. |
+| `mailbox drafts [--max N]` | List Gmail server-side drafts newest first. |
 
-`inbox` and `search` assign numbered references for the selected account. A number resolves only against that account's most recent listing; every mailbox surface resolves identifiers to threads, and a raw message ID resolves to its parent thread. The one exception is `send --message`, which names a message within the thread. JSON listings expose the durable Gmail IDs, so automation should use IDs instead of numbered references.
+`inbox` and `search` assign numbered references for the selected account. A number resolves only against that account's most recent listing; every mailbox surface resolves identifiers to threads, and a raw message ID resolves to its parent thread. The two exceptions are `send --message`, which names a message within the thread, and `attachment`, which takes the literal message ID from `read` output. JSON listings expose the durable Gmail IDs, so automation should use IDs instead of numbered references.
 
 `--filter NAME` is available on `inbox`, `search`, `archive`, `trash`, `mark`, and `label`. On listings it keeps only matching threads and reports the active filter. On actions it replaces explicit references—combining a filter with references is a usage error—and traverses the **entire inbox** before changing every matching thread, not merely the first page. A zero-match action is successful and changes nothing.
 
@@ -75,11 +77,13 @@ For `r` and `c`, mailbox selects `$VISUAL`, then `$EDITOR`, then `vi`. It parses
 # ------------------------ >8 ------------------------
 ```
 
-Mailbox sends only the bytes after the first exact scissors line; edits above it do not alter the envelope. A missing line refuses the send, and a saved non-empty body returns to the existing confirmation screen.
+Mailbox sends only the bytes after the first exact scissors line; edits above it do not alter the envelope. A missing line refuses the send. From the confirmation screen, `Esc` opens `d` discard · `s` save to Gmail drafts · `e` keep editing; `Esc` or `enter` discards by default, while an empty draft discards silently.
 
 ## Output formats
 
 TOON is the default for agents and pipes. `--json` is the stable opt-in for machine-readable JSON, and `--text` forces human output. Every command in the table accepts these output flags. A listing rendered with `--json` has this shape:
+
+Attachment downloads with `-o -` are the exception: they stream raw bytes to standard output and write status to standard error without TOON or JSON wrapping.
 
 ```json
 {
@@ -209,9 +213,9 @@ Mailbox keeps credentials separate by class:
 
 | Class | Commands | Gmail scope |
 | --- | --- | --- |
-| Read | `inbox`, `search`, `read`, `open`, `attachment`, `status` | `gmail.readonly` |
-| Write | `archive`, `trash`, `mark`, `label` | `gmail.modify` |
-| Send | `send --send` | `gmail.send` |
+| Read | `inbox`, `search`, `read`, `open`, `attachment`, `drafts`, `send --draft` dry runs, `status` | `gmail.readonly` |
+| Write | `archive`, `trash`, `mark`, `label`, `send --save-draft`, post-send draft deletion, TUI draft save | `gmail.modify` |
+| Send | `send --send`, `send --draft ... --send` | `gmail.send` |
 
 Read and write resolution is `MAILBOX_TOKEN`, then a valid read cache entry (read only), then the configured source. `MAILBOX_TOKEN` is an override for those two classes; if its scope is insufficient for a write, mailbox reports that error rather than trying another source. The read cache stores only expiring tokens. Every entry is bound to its configured source, so changing that source invalidates its cache entry.
 
@@ -252,6 +256,8 @@ writes nothing to disk, and does not load configuration.
 
 Every body source—`--body`, standard input, `--body-file`, and editor compose—is markdown. Mailbox sends it as `multipart/alternative`: a raw markdown `text/plain` leaf and a sanitized rendered `text/html` leaf. Raw HTML is omitted from the HTML leaf. Link and image destinations allow only `https`, `http`, `mailto`, and empty or fragment destinations; other schemes are removed before rendering.
 
+`--attach PATH` is repeatable on compose, reply, and forward sends, including `--save-draft` and `--draft` resume. With one or more attachments, mailbox nests the existing `multipart/alternative` body inside `multipart/mixed`; zero attachments retain the existing MIME shape. The fixed 25,000,000-byte cap measures the final RFC 5322/MIME message, including headers, boundaries, body leaves, forwarded original, and carried or new attachments.
+
 For replies and forwards, `--message` selects the message within the named thread. `--send` requires that pin so the inspected envelope and sent message cannot diverge; without `--message`, a preview selects the newest message.
 
 For replies, mailbox derives recipients from `Reply-To` or `From`, plus the original `To` and `Cc`, then subtracts the account primary address from every final `To`, `Cc`, and `Bcc` set before evaluating refusals. Primary-address comparison is case-insensitive on the addr-spec; aliases, plus-tags, and dot variants are intentionally not treated as self.
@@ -264,6 +270,19 @@ For replies, mailbox derives recipients from `Reply-To` or `From`, plus the orig
 | R4 | A subject or recipient contains a carriage return or line feed. |
 | R5 | The message body is empty. |
 | R6 | `Reply-To` differs from `From`; provide explicit `--to` or `--cc`. |
+| R-A1 | An attachment path cannot be read. |
+| R-A2 | An attachment file is empty. |
+| R-A3 | The final RFC 5322/MIME message exceeds 25,000,000 bytes. |
+
+`--save-draft` completes the same recipient resolution, refusal checks, and MIME assembly as a send, then creates a Gmail draft instead of transmitting it. It is mutually exclusive with `--send`; reply and forward drafts retain their thread.
+
+`mailbox send --draft <draft-id>` resumes a Gmail draft through the same resolver and is a dry run by default. The preview prints the draft's current message ID; `mailbox send --draft <draft-id> --send --message=<id>` pins that ID before sending. A server-side edit changes the ID and refuses with `draft_changed`, including a fresh preview. On decoded send success, mailbox sends through `messages.send` and then deletes the draft. A repeated 401 after reminting is a concrete send credential rejection; only an indeterminate send reports `draft_send_unknown` and leaves the draft intact.
+
+## Drafts
+
+`mailbox drafts [--max N]` lists Gmail drafts newest first with `draft_id`, `thread_id`, recipients, subject, and update time. Draft listing and draft resolution use the read class without an unlock; creating or deleting a draft uses the write class.
+
+Google's scope design makes `gmail.modify` send-capable via `drafts.send`; every holder of a modify credential has this today, independent of mailbox. mailbox never calls `drafts.send` — its transport has no such operation — and transmits resumed drafts only through `messages.send` under the send credential. The credential-level exposure is Google's design and is documented rather than silently accepted.
 
 ## Migrating from v0.3.0 and earlier
 

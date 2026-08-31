@@ -25,6 +25,12 @@ type pendingSend struct {
 	retried  bool
 }
 
+type pendingDraft struct {
+	mime     []byte
+	threadID string
+	retried  bool
+}
+
 func (m app) openReply() (tea.Model, tea.Cmd) {
 	if m.editorBlocked() {
 		return m, nil
@@ -105,10 +111,14 @@ func (m *app) surfaceReplyRefusal(refusal *send.Refusal) {
 }
 
 func (m app) replyConfirmScreen() string {
+	help := "y send · esc back"
+	if m.abandonPrompt {
+		help = "abandon? d discard · s save to Gmail drafts · e keep editing · esc/enter discard"
+	}
 	return strings.Join([]string{
 		titleStyle.Render("Confirm send"),
 		replyEnvelopeText(m.account, m.reply.envelope),
-		helpStyle.Render("y send · esc back"),
+		helpStyle.Render(help),
 		m.statusView(),
 	}, "\n")
 }
@@ -125,19 +135,50 @@ func (m app) updateReplyConfirmKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.unlocking && m.unlockClass == auth.ClassSend && m.pendingSend != nil {
 			m.abandonUnlock()
 		}
-		if m.reply.envelope != nil && m.reply.envelope.Mode == send.ModeCompose {
-			m.view = listView
-		} else {
-			m.view = threadView
+		if m.abandonPrompt {
+			return m.discardComposed()
 		}
-		m.reply = replyModel{}
-		m.composeState = composeState{}
+		m.abandonPrompt = true
 		m.clearStatus()
 		return m, nil
-	case keyConfirmSend:
+	case "enter", "d":
+		if m.abandonPrompt {
+			return m.discardComposed()
+		}
+		return m, nil
+	case "s":
+		if !m.abandonPrompt {
+			return m, nil
+		}
 		mime, err := send.BuildMIME(m.reply.envelope, nil, "")
 		if err != nil {
 			m.surfaceError(err)
+			return m, nil
+		}
+		if refusal := send.OutboundSizeRefusal(mime, m.reply.envelope.Attachments); refusal != nil {
+			m.surfaceReplyRefusal(refusal)
+			return m, nil
+		}
+		m.abandonPrompt = false
+		m.pendingDraft = &pendingDraft{mime: mime, threadID: m.reply.threadID}
+		return m.startClassUnlock(auth.ClassWrite)
+	case "e":
+		if !m.abandonPrompt {
+			return m, nil
+		}
+		m.abandonPrompt = false
+		return m.startEditor(m.reply.envelope, m.composeState)
+	case keyConfirmSend:
+		if m.abandonPrompt {
+			return m, nil
+		}
+		mime, err := send.BuildMIME(m.reply.envelope, nil, "")
+		if err != nil {
+			m.surfaceError(err)
+			return m, nil
+		}
+		if refusal := send.OutboundSizeRefusal(mime, m.reply.envelope.Attachments); refusal != nil {
+			m.surfaceReplyRefusal(refusal)
 			return m, nil
 		}
 		m.pendingSend = &pendingSend{mime: mime, threadID: m.reply.threadID}
@@ -145,4 +186,17 @@ func (m app) updateReplyConfirmKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m app) discardComposed() (tea.Model, tea.Cmd) {
+	if m.reply.envelope != nil && m.reply.envelope.Mode == send.ModeCompose {
+		m.view = listView
+	} else {
+		m.view = threadView
+	}
+	m.reply = replyModel{}
+	m.composeState = composeState{}
+	m.abandonPrompt = false
+	m.clearStatus()
+	return m, nil
 }

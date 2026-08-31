@@ -4,8 +4,9 @@ import "time"
 
 // Shapes returns one fully-populated instance per mailbox payload shape:
 // listing, read thread, status, action result, attachment list, attachment
-// save, open, credential error envelope, and usage error envelope. These
-// mirror internal/cli's unexported JSON payloads; its contract test pins them
+// save, drafts listing, open, credential error envelope, usage error envelope,
+// and send envelope, and draft-changed error envelope. These mirror
+// internal/cli's unexported JSON payloads; its contract test pins them
 // field-for-field.
 func Shapes(s1, s2, s3 string) []any {
 	return []any{
@@ -42,11 +43,70 @@ func Shapes(s1, s2, s3 string) []any {
 		},
 		actionPayload{Account: s1, Action: s2, ThreadIDs: []string{s3}, OK: true},
 		filterActionPayload{Account: s1, Action: s2, Filter: s3, Matched: 1, Attempted: 1, Succeeded: []string{s1}, Failed: []filterActionFailure{{ID: s2, Status: 7, Reason: s3}}, OK: true},
-		attachmentListPayload{Account: s1, ThreadID: s2, Attachments: []attachment{{N: 1, Filename: s3, MimeType: s1, Size: 7}}},
-		attachmentSavePayload{Account: s1, File: s2, Filename: s3, Size: 7},
+		attachmentListPayload{Account: s1, Message: s2, Attachments: []attachmentRow{{Index: 7, Filename: s3, MIMEType: s1, Size: 7}}},
+		attachmentSavePayload{Account: s1, Path: s2, Filename: s3, Size: 7, SHA256: s1},
+		draftsPayload{Account: s1, Drafts: []draftRow{{DraftID: s2, ThreadID: s3, To: s1, Subject: s2, Updated: s3}}},
 		openPayload{Account: s1, ThreadID: s2, MessageID: s3, File: s1},
 		errorEnvelope{Error: errorDetail{Code: s1, Account: s2, ConfigKey: s3, Config: s1}},
+		cliErrorPayload{Error: cliErrorDetail{Code: s1, Account: s2, Message: s3}},
+		draftChangedPayload{Error: draftChangedError{
+			Code:    s1,
+			Account: s2,
+			Message: s3,
+			Pinned:  s1,
+			Current: s2,
+			Fresh: envelopePayload{
+				Account:    s1,
+				Mode:       s2,
+				ThreadID:   s3,
+				Message:    s1,
+				To:         []recipientPayload{{Address: s1, Name: s2, Provenance: s3}},
+				Cc:         []recipientPayload{{Address: s2, Name: s3, Provenance: s1}},
+				Bcc:        []recipientPayload{{Address: s3, Name: s1, Provenance: s2}},
+				Subject:    s1,
+				BodyBytes:  7,
+				InReplyTo:  s2,
+				References: []string{s1, s3},
+				Forward:    &forwardPayload{OriginalBytes: 7, Disclosure: s2},
+				Sendable:   true,
+				Sent:       &sentPayload{ID: s1, ThreadID: s2},
+				Scope:      s3,
+				Warning:    s1,
+				Attachments: []attachmentPayload{{
+					Filename: s1,
+					Size:     7,
+					MIMEType: s2,
+					SHA256:   s3,
+				}},
+				DraftID: s3,
+			},
+		}},
 		usageErrorPayload{Error: usageErrorDetail{Code: s1, Message: s2}},
+		envelopePayload{
+			Account:    s1,
+			Mode:       s2,
+			ThreadID:   s3,
+			Message:    s1,
+			To:         []recipientPayload{{Address: s1, Name: s2, Provenance: s3}},
+			Cc:         []recipientPayload{{Address: s2, Name: s3, Provenance: s1}},
+			Bcc:        []recipientPayload{{Address: s3, Name: s1, Provenance: s2}},
+			Subject:    s1,
+			BodyBytes:  7,
+			InReplyTo:  s2,
+			References: []string{s1, s3},
+			Forward:    &forwardPayload{OriginalBytes: 7, Disclosure: s2},
+			Sendable:   true,
+			Sent:       &sentPayload{ID: s1, ThreadID: s2},
+			Scope:      s3,
+			Warning:    s1,
+			Attachments: []attachmentPayload{{
+				Filename: s1,
+				Size:     7,
+				MIMEType: s2,
+				SHA256:   s3,
+			}},
+			DraftID: s3,
+		},
 	}
 }
 
@@ -159,16 +219,37 @@ type filterActionFailure struct {
 }
 
 type attachmentListPayload struct {
-	Account     string       `json:"account"`
-	ThreadID    string       `json:"threadId"`
-	Attachments []attachment `json:"attachments"`
+	Account     string          `json:"account"`
+	Message     string          `json:"message"`
+	Attachments []attachmentRow `json:"attachments"`
+}
+
+type attachmentRow struct {
+	Index    int    `json:"index"`
+	Filename string `json:"filename"`
+	MIMEType string `json:"mime_type"`
+	Size     int64  `json:"size"`
 }
 
 type attachmentSavePayload struct {
 	Account  string `json:"account"`
-	File     string `json:"file"`
+	Path     string `json:"path"`
 	Filename string `json:"filename"`
 	Size     int64  `json:"size"`
+	SHA256   string `json:"sha256"`
+}
+
+type draftsPayload struct {
+	Account string     `json:"account"`
+	Drafts  []draftRow `json:"drafts"`
+}
+
+type draftRow struct {
+	DraftID  string `json:"draft_id"`
+	ThreadID string `json:"thread_id"`
+	To       string `json:"to"`
+	Subject  string `json:"subject"`
+	Updated  string `json:"updated"`
 }
 
 type openPayload struct {
@@ -189,11 +270,78 @@ type errorDetail struct {
 	Config    string `json:"config"`
 }
 
+type cliErrorPayload struct {
+	Error cliErrorDetail `json:"error"`
+}
+
+type cliErrorDetail struct {
+	Code    string `json:"code"`
+	Account string `json:"account"`
+	Message string `json:"message"`
+}
+
 type usageErrorPayload struct {
 	Error usageErrorDetail `json:"error"`
+}
+
+type draftChangedPayload struct {
+	Error draftChangedError `json:"error"`
+}
+
+type draftChangedError struct {
+	Code    string          `json:"code"`
+	Account string          `json:"account"`
+	Message string          `json:"message"`
+	Pinned  string          `json:"pinned"`
+	Current string          `json:"current"`
+	Fresh   envelopePayload `json:"fresh"`
 }
 
 type usageErrorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type recipientPayload struct {
+	Address    string `json:"address"`
+	Name       string `json:"name"`
+	Provenance string `json:"provenance"`
+}
+
+type forwardPayload struct {
+	OriginalBytes int    `json:"originalBytes"`
+	Disclosure    string `json:"disclosure"`
+}
+
+type sentPayload struct {
+	ID       string `json:"id"`
+	ThreadID string `json:"threadId"`
+}
+
+type attachmentPayload struct {
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
+	MIMEType string `json:"mime_type"`
+	SHA256   string `json:"sha256"`
+}
+
+type envelopePayload struct {
+	Account     string              `json:"account"`
+	Mode        string              `json:"mode"`
+	ThreadID    string              `json:"threadId,omitempty"`
+	Message     string              `json:"message,omitempty"`
+	To          []recipientPayload  `json:"to"`
+	Cc          []recipientPayload  `json:"cc"`
+	Bcc         []recipientPayload  `json:"bcc"`
+	Subject     string              `json:"subject"`
+	BodyBytes   int                 `json:"bodyBytes"`
+	InReplyTo   string              `json:"inReplyTo,omitempty"`
+	References  []string            `json:"references,omitempty"`
+	Forward     *forwardPayload     `json:"forward,omitempty"`
+	Sendable    bool                `json:"sendable"`
+	Sent        *sentPayload        `json:"sent,omitempty"`
+	Scope       string              `json:"scope,omitempty"`
+	Warning     string              `json:"warning,omitempty"`
+	Attachments []attachmentPayload `json:"attachments,omitempty"`
+	DraftID     string              `json:"draft_id,omitempty"`
 }

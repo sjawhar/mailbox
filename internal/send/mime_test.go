@@ -11,6 +11,8 @@ import (
 	"testing"
 )
 
+var v21ComposeGolden = []byte("To: <a@example.test>\r\nSubject: s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=\"fixedboundary\"\r\n\r\n--fixedboundary\r\nContent-Transfer-Encoding: base64\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\naGk=\r\n--fixedboundary\r\nContent-Transfer-Encoding: base64\r\nContent-Type: text/html; charset=UTF-8\r\n\r\nPHA+aGk8L3A+Cg==\r\n--fixedboundary--\r\n")
+
 func TestBuildMIMEComposeAlternativeGolden(t *testing.T) {
 	const boundary = "mailbox-test-boundary"
 	env := &Envelope{
@@ -309,4 +311,182 @@ func decodePart(part io.Reader) (string, error) {
 
 func crlf(value string) []byte {
 	return []byte(strings.ReplaceAll(value, "\n", "\r\n"))
+}
+func TestBuildMIMEZeroAttachmentsByteIdenticalToV21(t *testing.T) {
+	env := &Envelope{Mode: ModeCompose, To: []Recipient{{Address: "a@example.test"}}, Subject: "s", Body: "hi"}
+	got, err := BuildMIME(env, nil, "fixedboundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, v21ComposeGolden) {
+		t.Fatalf("zero-attachment MIME drifted from v2.1:\n%q\nwant\n%q", got, v21ComposeGolden)
+	}
+}
+
+func TestBuildMIMEZeroAttachmentForwardShapeUnchanged(t *testing.T) {
+	env := &Envelope{Mode: ModeForward, To: []Recipient{{Address: "a@example.test"}}, Subject: "Fwd: s", Body: "fyi"}
+	raw, err := BuildMIME(env, []byte("From: o@example.test\r\n\r\noriginal body"), "fixedboundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	types := readMixedPartTypes(t, raw, "fixedboundary")
+	if len(types) != 2 || types[0].contentType != "multipart/alternative" || types[1].contentType != "message/rfc822" {
+		t.Fatalf("zero-attachment forward parts = %+v, want [alternative, original.eml] exactly", types)
+	}
+}
+
+type mixedPart struct {
+	contentType string
+	disposition string
+}
+
+func readMixedPartTypes(t *testing.T, raw []byte, boundary string) []mixedPart {
+	t.Helper()
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := multipart.NewReader(message.Body, boundary)
+	var out []mixedPart
+	for {
+		part, err := parts.NextPart()
+		if err == io.EOF {
+			return out
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		mediaType, _, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, mixedPart{contentType: mediaType, disposition: part.Header.Get("Content-Disposition")})
+	}
+}
+
+func TestBuildMIMENestsAlternativeInsideMixed(t *testing.T) {
+	env := &Envelope{
+		Mode: ModeCompose, To: []Recipient{{Address: "a@example.test"}}, Subject: "s", Body: "hi",
+		Attachments: []Attachment{{Filename: "résumé 100%.pdf", MIMEType: "application/pdf", Content: []byte("%PDF"), SHA256: "h"}},
+	}
+	raw, err := BuildMIME(env, nil, "mixedboundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/mixed" || params["boundary"] != "mixedboundary" {
+		t.Fatalf("outer Content-Type = %q (%v)", msg.Header.Get("Content-Type"), err)
+	}
+	parts := multipart.NewReader(msg.Body, "mixedboundary")
+	first, err := parts.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if innerType, _, _ := mime.ParseMediaType(first.Header.Get("Content-Type")); innerType != "multipart/alternative" {
+		t.Fatalf("first part = %q, want multipart/alternative", first.Header.Get("Content-Type"))
+	}
+	att, err := parts.NextPart()
+	if err != nil {
+		t.Fatal(err)
+	}
+	disposition, dispositionParams, err := mime.ParseMediaType(att.Header.Get("Content-Disposition"))
+	if err != nil || disposition != "attachment" || dispositionParams["filename"] != "résumé 100%.pdf" {
+		t.Fatalf("Content-Disposition = %q (%v)", att.Header.Get("Content-Disposition"), err)
+	}
+	if att.Header.Get("Content-Transfer-Encoding") != "base64" || att.Header.Get("Content-Type") != "application/pdf" {
+		t.Fatalf("attachment headers = %v", att.Header)
+	}
+	decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, att))
+	if err != nil || string(decoded) != "%PDF" {
+		t.Fatalf("attachment content = %q, %v", decoded, err)
+	}
+	if _, err := parts.NextPart(); err != io.EOF {
+		t.Fatalf("trailing parts after attachment, want EOF: %v", err)
+	}
+}
+
+func TestBuildMIMEMultipleAttachmentsPreserveOrderAndHeaders(t *testing.T) {
+	attachments := []Attachment{
+		{Filename: "first.pdf", MIMEType: "application/pdf", Content: []byte("%PDF-first"), SHA256: "h1"},
+		{Filename: "second bijlage.txt", MIMEType: "text/plain; charset=utf-8", Content: []byte("second-body"), SHA256: "h2"},
+	}
+	for _, shape := range []string{"compose", "forward"} {
+		env := &Envelope{Mode: ModeCompose, To: []Recipient{{Address: "a@example.test"}}, Subject: "s", Body: "hi", Attachments: attachments}
+		var original []byte
+		wantLead := []string{"multipart/alternative"}
+		if shape == "forward" {
+			env.Mode, env.Subject, env.Body = ModeForward, "Fwd: s", "fyi"
+			original = []byte("From: o@example.test\r\n\r\noriginal body")
+			wantLead = []string{"multipart/alternative", "message/rfc822"}
+		}
+		raw, err := BuildMIME(env, original, "mixedboundary")
+		if err != nil {
+			t.Fatalf("%s: %v", shape, err)
+		}
+		msg, err := mail.ReadMessage(bytes.NewReader(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts := multipart.NewReader(msg.Body, "mixedboundary")
+		for _, want := range wantLead {
+			part, err := parts.NextPart()
+			if err != nil {
+				t.Fatalf("%s lead part: %v", shape, err)
+			}
+			if mediaType, _, _ := mime.ParseMediaType(part.Header.Get("Content-Type")); mediaType != want {
+				t.Fatalf("%s lead part = %q, want %q", shape, mediaType, want)
+			}
+		}
+		for index, attachment := range attachments {
+			part, err := parts.NextPart()
+			if err != nil {
+				t.Fatalf("%s attachment %d: %v", shape, index, err)
+			}
+			_, dispositionParams, err := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+			if err != nil || dispositionParams["filename"] != attachment.Filename {
+				t.Fatalf("%s attachment %d disposition = %q (%v), want filename %q", shape, index, part.Header.Get("Content-Disposition"), err, attachment.Filename)
+			}
+			if part.Header.Get("Content-Type") != attachment.MIMEType || part.Header.Get("Content-Transfer-Encoding") != "base64" {
+				t.Fatalf("%s attachment %d headers = %v", shape, index, part.Header)
+			}
+			decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, part))
+			if err != nil || !bytes.Equal(decoded, attachment.Content) {
+				t.Fatalf("%s attachment %d bytes = %q, %v", shape, index, decoded, err)
+			}
+		}
+		if _, err := parts.NextPart(); err != io.EOF {
+			t.Fatalf("%s: trailing part after final attachment, want EOF: %v", shape, err)
+		}
+	}
+}
+
+func TestBuildMIMEReplyWithAttachmentsKeepsThreadingHeaders(t *testing.T) {
+	env := &Envelope{
+		Mode: ModeReply, To: []Recipient{{Address: "a@example.test"}}, Subject: "Re: s", Body: "hi",
+		InReplyTo: "<m-t1@example.test>", References: []string{"<m-t1@example.test>"},
+		Attachments: []Attachment{{Filename: "extra.txt", MIMEType: "text/plain; charset=utf-8", Content: []byte("x"), SHA256: "h"}},
+	}
+	raw, err := BuildMIME(env, nil, "mixedboundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Header.Get("In-Reply-To") != "<m-t1@example.test>" || msg.Header.Get("References") != "<m-t1@example.test>" {
+		t.Fatalf("threading headers lost under mixed nesting: %v", msg.Header)
+	}
+}
+
+func TestBuildMIMERejectsUnsanitizedFilename(t *testing.T) {
+	env := &Envelope{Mode: ModeCompose, To: []Recipient{{Address: "a@example.test"}}, Subject: "s", Body: "hi",
+		Attachments: []Attachment{{Filename: "cr\rlf", MIMEType: "text/plain", Content: []byte("x"), SHA256: "h"}}}
+	if _, err := BuildMIME(env, nil, ""); err == nil {
+		t.Fatal("BuildMIME accepted a control-byte filename; validateHeaderValues must refuse")
+	}
 }

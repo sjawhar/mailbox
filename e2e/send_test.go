@@ -266,7 +266,16 @@ func TestTUIReplyFenceAndEscapeDoNotTransmitEarly(t *testing.T) {
 		session.WaitFor("r reply", 15*time.Second)
 		session.SendKeys("r")
 		session.WaitFor("Confirm send", 5*time.Second)
-		session.SendKeys("esc")
+		if output, err := session.cmd("send-keys", "-t", session.name, "Escape").CombinedOutput(); err != nil {
+			t.Fatalf("tmux send escape: %v: %s", err, output)
+		}
+		prompt := session.WaitFor("abandon?", 5*time.Second)
+		for _, want := range []string{"d discard", "s save to Gmail drafts", "e keep editing"} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("abandon prompt missing %q:\n%s", want, prompt)
+			}
+		}
+		session.SendKeys("d")
 		session.WaitFor("r reply", 5*time.Second)
 		assertNoSpawns(t, fixture.spawnFile)
 		if sends := fixture.gmail.recordedSends(); len(sends) != 0 {

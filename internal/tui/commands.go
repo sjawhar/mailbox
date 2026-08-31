@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -72,6 +73,13 @@ type sendDoneMsg struct {
 }
 
 func (message sendDoneMsg) requestRef() asyncRequest { return message.request }
+
+type draftSavedMsg struct {
+	request asyncRequest
+	id      string
+}
+
+func (message draftSavedMsg) requestRef() asyncRequest { return message.request }
 
 type errMsg struct {
 	request asyncRequest
@@ -180,6 +188,16 @@ func sendCmd(request asyncRequest, raw []byte, threadID string) tea.Cmd {
 	}
 }
 
+func saveDraftCmd(request asyncRequest, raw []byte, threadID string) tea.Cmd {
+	return func() tea.Msg {
+		draft, err := request.ctx.api.CreateDraft(context.Background(), raw, threadID)
+		if err != nil {
+			return errMsg{request: request, err: err}
+		}
+		return draftSavedMsg{request: request, id: draft.ID}
+	}
+}
+
 const previewDebounce = 125 * time.Millisecond
 
 func previewDebounceCmd(request asyncRequest, threadID string) tea.Cmd {
@@ -239,11 +257,7 @@ func saveAttachmentCmd(request asyncRequest, attachment render.Attachment) tea.C
 		if err != nil {
 			return errMsg{request: request, err: err}
 		}
-		path, overwrite, err := render.AttachmentDestination(directory, attachment.Filename)
-		if err != nil {
-			return errMsg{request: request, err: err}
-		}
-		contents, err := request.ctx.api.GetAttachment(context.Background(), attachment.MessageID, attachment.AttachmentID)
+		contents, err := render.ResolveAttachmentBytes(context.Background(), request.ctx.api, attachment)
 		if err != nil {
 			return errMsg{
 				request: request,
@@ -253,13 +267,14 @@ func saveAttachmentCmd(request asyncRequest, attachment render.Attachment) tea.C
 				},
 			}
 		}
-		if err := render.WriteAttachment(path, contents, overwrite); err != nil {
+		name, _ := render.CanonicalFilename(attachment.Filename, attachment.N-1)
+		if err := render.SaveAttachment(directory, name, contents); err != nil {
 			if errors.Is(err, os.ErrExist) {
-				return errMsg{request: request, err: fmt.Errorf("refusing to overwrite existing attachment %q", path)}
+				return errMsg{request: request, err: fmt.Errorf("refusing to overwrite existing attachment %q", name)}
 			}
 			return errMsg{request: request, err: err}
 		}
-		return attachmentSavedMsg{request: request, path: path}
+		return attachmentSavedMsg{request: request, path: filepath.Join(directory, name)}
 	}
 }
 

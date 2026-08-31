@@ -678,6 +678,32 @@ func TestGetMessage(t *testing.T) {
 	}
 }
 
+func TestGetMessageFull(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, request *http.Request) {
+		requireRequest(t, request, http.MethodGet, "/gmail/v1/users/me/messages/m1", "read-token")
+		if got := request.URL.Query().Get("format"); got != "full" {
+			t.Fatalf("format = %q, want full", got)
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id": "m1",
+			"payload": map[string]any{
+				"parts": []map[string]any{{
+					"filename": "report.pdf",
+					"body":     map[string]any{"attachmentId": "a1"},
+				}},
+			},
+		})
+	}, "read-token")
+
+	message, err := client.GetMessageFull(context.Background(), "m1")
+	if err != nil {
+		t.Fatalf("GetMessageFull: %v", err)
+	}
+	if len(message.Payload.Parts) != 1 || message.Payload.Parts[0].Filename != "report.pdf" {
+		t.Fatalf("message payload = %+v, want complete part tree", message.Payload)
+	}
+}
+
 func TestGetMessageRawAndRawBytes(t *testing.T) {
 	raw := []byte("Subject: test\r\n\r\nBody")
 	client, _ := newTestClient(t, func(w http.ResponseWriter, request *http.Request) {

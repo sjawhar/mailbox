@@ -19,9 +19,10 @@ Use `mailbox` for one-shot Gmail triage commands. Run `mailbox <command> --help`
 | `trash` | `mailbox trash [--filter NAME] [--text\|--json] [<thread>...]` | move threads to trash |
 | `mark` | `mailbox mark [--filter NAME] [--text\|--json] <read\|unread> [<thread>...]` | mark threads read or unread |
 | `label` | `mailbox label [--filter NAME] [--text\|--json] <add\|rm> <label> [<thread>...]` | add or remove a label |
-| `attachment` | `mailbox attachment [-o PATH] [--text\|--json] <thread> [attachment]` | list or save attachments |
+| `attachment` | `mailbox attachment [-o PATH\|-o -] [--text\|--json] <message-id> [filename\|index]` | list or fetch message attachments |
+| `drafts` | `mailbox drafts [--max N] [--text\|--json]` | list Gmail drafts |
 | `status` | `mailbox status [--text\|--json]` | show configured account status |
-| `send` | `mailbox send [options]` | compose, reply, or forward mail (dry-run by default) |
+| `send` | `mailbox send [--attach PATH]... [--save-draft\|--send] [options]` | compose, reply, or forward mail (dry-run by default) |
 
 ### `inbox`
 
@@ -57,7 +58,11 @@ Adds or removes one Gmail label on one or more threads, or every inbox thread ma
 
 ### `attachment`
 
-Lists a thread's attachments, or saves one numbered attachment; -o selects the output file or directory.
+Lists a message's attachments from 'read' output, or fetches one. Listings use zero-based indexes and sanitized filenames; select an exact listed filename or zero-based index. Downloads never overwrite existing files (attachment_exists); use -o to choose another file or directory. -o - streams raw bytes to stdout and writes status to stderr, without machine-format wrapping.
+
+### `drafts`
+
+Lists Gmail server-side drafts newest-first: draft_id, thread_id, to, subject, updated. --max sets 1–500 rows (default 25). Listing is read-class (no unlock). Resume one with 'mailbox send --draft <draft_id>'.
 
 ### `status`
 
@@ -72,6 +77,13 @@ Compose:
 
 The body comes from exactly one of: --body TEXT, --body - (stdin), or --body-file PATH (- for stdin) — file input suits agent-drafted content.
 
+Attachments:
+  --attach PATH is repeatable on compose, reply, and forward, including --save-draft and --draft resume. The dry-run reports each part's filename, size, mime_type, and sha256. The final message is capped at 25,000,000 bytes.
+
+Drafts:
+  --save-draft resolves recipients and refusals, renders markdown MIME and attachments, then creates a Gmail draft. It costs a write unlock and is mutually exclusive with --send.
+  --draft <draft-id> resumes a Gmail draft through the same validation and fresh attachment serialization. Its dry-run prints the draft's CURRENT message id; --send --message=<id> pins that id. A server-side edit refuses draft_changed and prints a fresh preview. On decoded success mailbox transmits through messages.send (send class), then deletes the draft (write class). A repeated 401 after reminting is a concrete send credential rejection; only an indeterminate send reports draft_send_unknown and leaves the draft intact. mailbox never calls drafts.send.
+
 A dry-run is the default: resolve the envelope first. Start with the dry run, copy its --message value, then add --send to transmit that exact target. Reply and forward previews select the newest message unless --message selects one; --send requires --message so it pins the exact message within the named thread.
 
 Refusal rules:
@@ -81,10 +93,13 @@ Refusal rules:
   R4 (header_injection): A subject or recipient contains CR or LF.
   R5 (empty_body): The message body is empty.
   R6 (needs_explicit_recipient): Reply-To differs from From; provide --to or --cc.
+  R-A1 (attachment_unreadable): An --attach path does not exist or cannot be read.
+  R-A2 (attachment_empty): An --attach file is empty.
+  R-A3 (attachment_too_large): The final MIME message exceeds 25,000,000 bytes.
 
 ## Id semantics
 
-ids: mailbox ids are THREAD ids everywhere; the one exception is 'send --message', which names a message WITHIN the given thread (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing.
+ids: mailbox ids are THREAD ids everywhere; the exceptions are 'send --message' and 'attachment', which take message ids (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing.
 
 ## Output formats
 
@@ -108,3 +123,6 @@ Start with the dry run, copy its `--message` value, then add `--send` to transmi
 | R4 | header_injection | A subject or recipient contains CR or LF. |
 | R5 | empty_body | The message body is empty. |
 | R6 | needs_explicit_recipient | Reply-To differs from From; provide --to or --cc. |
+| R-A1 | attachment_unreadable | An --attach path does not exist or cannot be read. |
+| R-A2 | attachment_empty | An --attach file is empty. |
+| R-A3 | attachment_too_large | The final MIME message exceeds 25,000,000 bytes. |

@@ -136,3 +136,40 @@ func TestNotInThreadRefusalRendersEverywhere(t *testing.T) {
 		t.Fatalf("json.Marshal(RefusalOf()) = %s, want %s", got, want)
 	}
 }
+
+func TestRenderTextAttachmentLineAndPayloadMetadata(t *testing.T) {
+	env := &Envelope{
+		Mode:    ModeCompose,
+		To:      []Recipient{{Address: "dest@example.com", Provenance: ProvenanceExplicit}},
+		Subject: "Status",
+		Body:    "update",
+		Attachments: []Attachment{{
+			Filename: "report.pdf",
+			MIMEType: "application/pdf",
+			SHA256:   "abc123",
+			Content:  []byte("%PDF"),
+		}},
+	}
+
+	var text bytes.Buffer
+	RenderText(&text, "work", env, 0)
+	const wantLine = "attachment: report.pdf (4 bytes, application/pdf) sha256=abc123"
+	if !strings.Contains(text.String(), wantLine) {
+		t.Fatalf("RenderText() = %q, want %q", text.String(), wantLine)
+	}
+
+	encoded, err := json.Marshal(Payload("work", env, 0))
+	if err != nil {
+		t.Fatalf("json.Marshal(Payload()) error = %v", err)
+	}
+	for _, field := range []string{
+		`"filename":"report.pdf"`,
+		`"size":4`,
+		`"mime_type":"application/pdf"`,
+		`"sha256":"abc123"`,
+	} {
+		if !strings.Contains(string(encoded), field) {
+			t.Fatalf("json.Marshal(Payload()) = %s, want %s", encoded, field)
+		}
+	}
+}

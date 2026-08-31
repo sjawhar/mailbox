@@ -72,6 +72,7 @@ func TestInlineCIDs(t *testing.T) {
 				part := msg.Payload.Parts[1]
 				part.Body.Data = ""
 				part.Body.AttachmentID = "att-1"
+				part.Filename = ""
 				return msg
 			},
 			html: `<img src="cid:logo@corp">`,
@@ -103,6 +104,7 @@ func TestInlineCIDs(t *testing.T) {
 				part := msg.Payload.Parts[1]
 				part.Body.Data = ""
 				part.Body.AttachmentID = "att-1"
+				part.Filename = ""
 				return msg
 			},
 			html: `<img src="cid:logo@corp">`,

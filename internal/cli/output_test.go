@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"strings"
 	"testing"
-
-	"github.com/sjawhar/mailbox/internal/render"
 )
 
 func TestPrintThreadsPlain(t *testing.T) {
@@ -60,10 +58,10 @@ func TestPrintThreadsSanitizesMailText(t *testing.T) {
 func TestAttachmentListSanitizesMailFilename(t *testing.T) {
 	var output bytes.Buffer
 	ctx := &cmdCtx{stdout: &output, text: true}
-	if code := ctx.attachmentList("work", nil, "thread", []render.Attachment{{
-		N:        1,
+	if code := ctx.attachmentList("work", nil, "message", []attachmentRow{{
+		Index:    0,
 		Filename: "report\x1b]52;c;clipboard\a.pdf",
-		MimeType: "application/pdf",
+		MIMEType: "application/pdf",
 	}}); code != 0 {
 		t.Fatalf("attachmentList() exit = %d, want 0", code)
 	}

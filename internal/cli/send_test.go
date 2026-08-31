@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -74,6 +76,27 @@ func (r *sendRig) spawns(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func (r *sendRig) run(t *testing.T, args ...string) (int, string, string) {
+	t.Helper()
+	return runConfiguredSend(args...)
+}
+
+func newDraftCapableSendRig(t *testing.T, g *gmailTestServer) *sendRig {
+	t.Helper()
+	rig := newSendRig(t, g, nonInteractiveSendSource()+`write_credential_cmd = ["write-helper"]
+write_interactive = false
+`)
+	writeHelper := filepath.Join(filepath.Dir(rig.helperPath), "write-helper")
+	if err := os.WriteFile(writeHelper, []byte("#!/bin/sh\nprintf '%s\\n' write-token-1234567890\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLI_READ", cliSendToken)
+	t.Setenv("MAILBOX_TOKEN", "")
+	g.readToken = cliSendToken
+	g.writeToken = "write-token-1234567890"
+	return rig
 }
 
 func nonInteractiveSendSource() string {
@@ -854,4 +877,158 @@ func TestSendBodyFileAndStdinSources(t *testing.T) {
 			t.Fatalf("exit=%d stderr=%q, want failure naming --body-file", code, stderr)
 		}
 	})
+}
+
+func TestSendAttachDryRunReportsAttachmentsWithoutTouchingSendCustody(t *testing.T) {
+	g := newGmailTestServer(t)
+	configureSendMessages(g)
+	rig := newSendRig(t, g, nonInteractiveSendSource())
+	content := []byte("%PDF-1.4 fixture")
+	pdf := filepath.Join(t.TempDir(), "report.pdf")
+	if err := os.WriteFile(pdf, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := rig.run(t, "send", "--reply", "t1", "--body", "hi", "--attach", pdf, "--json")
+	if code != 0 {
+		t.Fatalf("dry-run exit = %d, stderr=%q", code, stderr)
+	}
+	var payload struct {
+		Sendable    bool `json:"sendable"`
+		Attachments []struct {
+			Filename string `json:"filename"`
+			Size     int64  `json:"size"`
+			MIMEType string `json:"mime_type"`
+			SHA256   string `json:"sha256"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("decode: %v: %q", err, stdout)
+	}
+	want := sha256.Sum256(content)
+	if !payload.Sendable || len(payload.Attachments) != 1 || payload.Attachments[0].Filename != "report.pdf" ||
+		payload.Attachments[0].Size != int64(len(content)) || payload.Attachments[0].SHA256 != hex.EncodeToString(want[:]) ||
+		payload.Attachments[0].MIMEType != "application/pdf" {
+		t.Fatalf("attachments = %+v", payload.Attachments)
+	}
+	if got := rig.spawns(t); got != "" || len(g.sentBodies) != 0 {
+		t.Fatalf("dry-run touched custody: spawns=%q sent=%v", got, g.sentBodies)
+	}
+}
+
+func TestSendAttachRefusalsRenderAsEnvelopes(t *testing.T) {
+	g := newGmailTestServer(t)
+	configureSendMessages(g)
+	rig := newSendRig(t, g, nonInteractiveSendSource())
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.bin")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tooLarge := filepath.Join(dir, "too-large.bin")
+	if err := os.WriteFile(tooLarge, bytes.Repeat([]byte("x"), send.MaxOutboundMessageBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, path, code, rule string
+	}{
+		{name: "unreadable", path: filepath.Join(dir, "missing.bin"), code: "attachment_unreadable", rule: "R-A1"},
+		{name: "empty", path: empty, code: "attachment_empty", rule: "R-A2"},
+		{name: "too large", path: tooLarge, code: "attachment_too_large", rule: "R-A3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := rig.run(t, "send", "--reply", "t1", "--body", "hi", "--attach", tc.path, "--json")
+			if code != 1 {
+				t.Fatalf("exit = %d, stdout=%q stderr=%q, want 1", code, stdout, stderr)
+			}
+			var payload map[string]map[string]any
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["error"]["code"] != tc.code || payload["error"]["rule"] != tc.rule {
+				t.Fatalf("refusal = %#v", payload)
+			}
+			if got := rig.spawns(t); got != "" || len(g.sentBodies) != 0 {
+				t.Fatalf("refusal touched send custody: spawns=%q sent=%v", got, g.sentBodies)
+			}
+		})
+	}
+}
+
+func TestSaveDraftAndSendAreMutuallyExclusive(t *testing.T) {
+	g := newGmailTestServer(t)
+	rig := newSendRig(t, g, nonInteractiveSendSource())
+	code, stdout, stderr := rig.run(t, "send", "--to", "a@example.test", "--subject", "s", "--body", "b", "--save-draft", "--send", "--json")
+	if code != 2 || !strings.Contains(stderr, "mutually exclusive") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q, want usage refusal", code, stdout, stderr)
+	}
+	var payload struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil || payload.Error.Code != "usage" {
+		t.Fatalf("usage payload = %q (%v)", stdout, err)
+	}
+}
+
+func TestSaveDraftRunsFullResolutionThenCreatesDraftUnderWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "reply", args: []string{"--reply", "t1"}},
+		{name: "forward", args: []string{"--forward", "t1", "--to", "a@example.test"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGmailTestServer(t)
+			configureSendMessages(g)
+			rig := newDraftCapableSendRig(t, g)
+			attachment := filepath.Join(t.TempDir(), "report.txt")
+			if err := os.WriteFile(attachment, []byte("draft attachment"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := append([]string{"send"}, tc.args...)
+			args = append(args, "--body", "hi", "--attach", attachment, "--save-draft", "--json")
+			code, stdout, stderr := rig.run(t, args...)
+			if code != 0 {
+				t.Fatalf("save-draft exit = %d, stderr=%q", code, stderr)
+			}
+			var payload struct {
+				DraftID     string `json:"draft_id"`
+				Sendable    bool   `json:"sendable"`
+				Attachments []struct {
+					Filename string `json:"filename"`
+				} `json:"attachments"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil || payload.DraftID == "" || !payload.Sendable ||
+				len(payload.Attachments) != 1 || payload.Attachments[0].Filename != "report.txt" {
+				t.Fatalf("save-draft payload = %q (%v), want envelope with draft_id", stdout, err)
+			}
+			if len(g.draftCreates) != 1 {
+				t.Fatalf("drafts.create calls = %d, want one", len(g.draftCreates))
+			}
+			if got := g.draftCreates[0].ThreadID; got != "t1" {
+				t.Fatalf("drafts.create threadId = %q, want t1", got)
+			}
+			if got := g.draftCreates[0].Bearer; got != "Bearer write-token-1234567890" {
+				t.Fatalf("drafts.create authorization = %q, want write credential", got)
+			}
+			raw, err := base64.RawURLEncoding.DecodeString(g.draftCreates[0].Raw)
+			if err != nil || !strings.Contains(string(raw), "report.txt") {
+				t.Fatalf("draft raw = %q (%v), want attached MIME", g.draftCreates[0].Raw, err)
+			}
+			if len(g.sentBodies) != 0 {
+				t.Fatalf("save-draft transmitted: %v", g.sentBodies)
+			}
+
+			refusalArgs := append([]string{"send"}, tc.args...)
+			refusalArgs = append(refusalArgs, "--body", "   ", "--attach", attachment, "--save-draft", "--json")
+			code, stdout, _ = rig.run(t, refusalArgs...)
+			if code != 1 || !strings.Contains(stdout, "empty_body") || len(g.draftCreates) != 1 {
+				t.Fatalf("R5 must refuse before any write: exit=%d stdout=%q creates=%d", code, stdout, len(g.draftCreates))
+			}
+		})
+	}
 }

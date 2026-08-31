@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/mailbox/internal/filter"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/render"
+	"github.com/sjawhar/mailbox/internal/send"
 )
 
 // Run starts the interactive TUI on the configured account and blocks until quit.
@@ -47,6 +48,7 @@ type gmailAPI interface {
 	GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error)
 	GetProfile(ctx context.Context) (*gmail.Profile, error)
 	SendMessage(ctx context.Context, raw []byte, threadID string) (*gmail.SentMessage, error)
+	CreateDraft(ctx context.Context, raw []byte, threadID string) (*gmail.Draft, error)
 }
 
 type accountCtx struct {
@@ -157,21 +159,23 @@ type app struct {
 	viewport       viewport.Model
 	spinner        spinner.Model
 
-	status       string
-	statusError  bool
-	statusNote   string
-	loading      bool
-	listLoaded   bool
-	filterIndex  int
-	layout       layoutMetrics
-	pending      *pendingAction
-	pendingSend  *pendingSend
-	unlocking    bool
-	unlockCtx    context.Context
-	unlockCancel context.CancelFunc
-	unlockClass  auth.Class
-	pinned       bool
-	generations  [asyncOperationCount]uint64
+	status        string
+	statusError   bool
+	statusNote    string
+	loading       bool
+	listLoaded    bool
+	filterIndex   int
+	layout        layoutMetrics
+	pending       *pendingAction
+	pendingSend   *pendingSend
+	pendingDraft  *pendingDraft
+	abandonPrompt bool
+	unlocking     bool
+	unlockCtx     context.Context
+	unlockCancel  context.CancelFunc
+	unlockClass   auth.Class
+	pinned        bool
+	generations   [asyncOperationCount]uint64
 }
 
 const envTokenIdentityNotice = "MAILBOX_TOKEN pins one identity for all accounts"
@@ -405,6 +409,22 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.loading = false
 		m.ctx.self = message.email
 		return m.openReply()
+	case draftSavedMsg:
+		if m.discardAsync(message) {
+			return m, nil
+		}
+		m.pendingDraft = nil
+		m.loading = false
+		m.status = "draft saved — " + render.SanitizeTerminal(message.id)
+		m.statusError = false
+		if m.reply.envelope != nil && m.reply.envelope.Mode == send.ModeCompose {
+			m.view = listView
+		} else {
+			m.view = threadView
+		}
+		m.reply = replyModel{}
+		m.composeState = composeState{}
+		return m, nil
 	case sendDoneMsg:
 		if m.discardAsync(message) {
 			return m, nil
@@ -462,6 +482,7 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 			switch message.class {
 			case auth.ClassWrite:
 				m.pending = nil
+				m.pendingDraft = nil
 			case auth.ClassSend:
 				m.pendingSend = nil
 				m.beginRequest(unlockOperation)
@@ -483,6 +504,10 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 			request := m.beginRequest(sendOperation)
 			return m, m.loadingCmd(sendCmd(request, m.pendingSend.mime, m.pendingSend.threadID))
 		}
+		if message.class == auth.ClassWrite && m.pendingDraft != nil {
+			request := m.beginRequest(draftOperation)
+			return m, m.loadingCmd(saveDraftCmd(request, m.pendingDraft.mime, m.pendingDraft.threadID))
+		}
 		if m.pending == nil {
 			m.loading = false
 			return m, nil
@@ -503,6 +528,17 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		if m.pendingSend != nil {
 			m.loading = false
 			m.pendingSend = nil
+			m.surfaceError(message.err)
+			return m, nil
+		}
+		if m.pendingDraft != nil && errors.Is(message.err, auth.ErrExpiredToken) && !m.pendingDraft.retried {
+			m.pendingDraft.retried = true
+			m.ctx.invalidateWrite()
+			return m.startClassUnlock(auth.ClassWrite)
+		}
+		if m.pendingDraft != nil {
+			m.loading = false
+			m.pendingDraft = nil
 			m.surfaceError(message.err)
 			return m, nil
 		}
@@ -700,6 +736,7 @@ func (m *app) abandonUnlock() {
 	switch m.unlockClass {
 	case auth.ClassWrite:
 		m.pending = nil
+		m.pendingDraft = nil
 	case auth.ClassSend:
 		m.pendingSend = nil
 	}
@@ -792,7 +829,7 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 		}
 		m.contexts[target.Name] = account
 	}
-	pendingWrite := m.pending != nil
+	pendingWrite := m.pending != nil || m.pendingDraft != nil
 
 	m.account = target.Name
 	m.ctx = account
@@ -805,6 +842,7 @@ func (m app) switchAccount() (tea.Model, tea.Cmd) {
 	m.reply = replyModel{}
 	m.pending = nil
 	m.pendingSend = nil
+	m.pendingDraft = nil
 	m.loading = true
 	m.clearStatus()
 	m.status = m.readCommandStatus()

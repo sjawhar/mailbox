@@ -80,7 +80,7 @@ func TestAttachmentCollisionSurfacesFileName(t *testing.T) {
 	}
 }
 
-func TestAttachmentTraversalIsRejected(t *testing.T) {
+func TestAttachmentTraversalSanitizesIntoCurrentDirectory(t *testing.T) {
 	thread := attachmentThread()
 	thread.Messages[0].Payload.Parts[1].Filename = "../escape.pdf"
 	model, api := newTestApp([]*gmail.Thread{thread})
@@ -100,21 +100,17 @@ func TestAttachmentTraversalIsRejected(t *testing.T) {
 			t.Errorf("restore working directory: %v", err)
 		}
 	})
-	outside := filepath.Join(filepath.Dir(temporaryDirectory), "escape.pdf")
-	t.Cleanup(func() {
-		if err := os.Remove(outside); err != nil && !os.IsNotExist(err) {
-			t.Errorf("remove traversal target: %v", err)
-		}
-	})
 
 	model, _ = update(t, model, key("a"))
 	model, command := update(t, model, key("enter"))
 	message := runCmd(t, command)
 	model, _ = update(t, model, message)
-	if !strings.Contains(model.status, "unsafe attachment filename") {
-		t.Fatalf("status = %q, want traversal rejection", model.status)
+	saved := filepath.Join(temporaryDirectory, "escape.pdf")
+	if !strings.Contains(model.status, saved) {
+		t.Fatalf("status = %q, want sanitized save path %q", model.status, saved)
 	}
-	if _, err := os.Stat(outside); !os.IsNotExist(err) {
-		t.Fatalf("traversal target exists or could not be checked: %v", err)
+	contents, err := os.ReadFile(saved)
+	if err != nil || string(contents) != "malicious contents" {
+		t.Fatalf("saved contents = %q, %v", contents, err)
 	}
 }

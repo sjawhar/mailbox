@@ -38,7 +38,7 @@ type commandSpec struct {
 	run         func(*cmdCtx, []string) int
 }
 
-const idSemantics = "ids: mailbox ids are THREAD ids everywhere; the one exception is 'send --message', which names a message WITHIN the given thread (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing."
+const idSemantics = "ids: mailbox ids are THREAD ids everywhere; the exceptions are 'send --message' and 'attachment', which take message ids (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing."
 
 const jsonFlagHelp = "machine-readable JSON output (stable)"
 
@@ -48,7 +48,7 @@ const outputFormats = "TOON is the default for agents and pipes. --json is the s
 
 const sendWorkflow = "Start with the dry run, copy its --message value, then add --send to transmit that exact target."
 
-//go:generate go run github.com/sjawhar/mailbox/cmd/skillgen -out ../../docs/agent-skill/SKILL.md
+//go:generate go run github.com/sjawhar/mailbox/cmd/skillgen -out ../../skills/using-mailbox/SKILL.md
 
 func commandSpecs() []commandSpec {
 	return []commandSpec{
@@ -110,10 +110,17 @@ func commandSpecs() []commandSpec {
 		},
 		{
 			name:        "attachment",
-			description: "list or save attachments",
-			usage:       "mailbox attachment [-o PATH] [--text|--json] <thread> [attachment]",
-			help:        "Lists a thread's attachments, or saves one numbered attachment; -o selects the output file or directory.",
+			description: "list or fetch message attachments",
+			usage:       "mailbox attachment [-o PATH|-o -] [--text|--json] <message-id> [filename|index]",
+			help:        "Lists a message's attachments from 'read' output, or fetches one. Listings use zero-based indexes and sanitized filenames; select an exact listed filename or zero-based index. Downloads never overwrite existing files (attachment_exists); use -o to choose another file or directory. -o - streams raw bytes to stdout and writes status to stderr, without machine-format wrapping.",
 			run:         runAttachment,
+		},
+		{
+			name:        "drafts",
+			description: "list Gmail drafts",
+			usage:       "mailbox drafts [--max N] [--text|--json]",
+			help:        "Lists Gmail server-side drafts newest-first: draft_id, thread_id, to, subject, updated. --max sets 1–500 rows (default 25). Listing is read-class (no unlock). Resume one with 'mailbox send --draft <draft_id>'.",
+			run:         runDrafts,
 		},
 		{
 			name:        "status",
@@ -125,7 +132,7 @@ func commandSpecs() []commandSpec {
 		{
 			name:        "send",
 			description: "compose, reply, or forward mail (dry-run by default)",
-			usage:       "mailbox send [options]",
+			usage:       "mailbox send [--attach PATH]... [--save-draft|--send] [options]",
 			help:        sendCommandHelp(),
 			run:         runSend,
 		},
@@ -139,6 +146,11 @@ func sendCommandHelp() string {
 	output.WriteString("  mailbox send --reply=<thread-id>  --body TEXT [--message=<id>] [--to ...] # reply\n")
 	output.WriteString("  mailbox send --forward=<thread-id> --to a@x --body TEXT [--message=<id>]  # forward\n\n")
 	output.WriteString("The body comes from exactly one of: --body TEXT, --body - (stdin), or --body-file PATH (- for stdin) — file input suits agent-drafted content.\n\n")
+	output.WriteString("Attachments:\n")
+	output.WriteString("  --attach PATH is repeatable on compose, reply, and forward, including --save-draft and --draft resume. The dry-run reports each part's filename, size, mime_type, and sha256. The final message is capped at 25,000,000 bytes.\n\n")
+	output.WriteString("Drafts:\n")
+	output.WriteString("  --save-draft resolves recipients and refusals, renders markdown MIME and attachments, then creates a Gmail draft. It costs a write unlock and is mutually exclusive with --send.\n")
+	output.WriteString("  --draft <draft-id> resumes a Gmail draft through the same validation and fresh attachment serialization. Its dry-run prints the draft's CURRENT message id; --send --message=<id> pins that id. A server-side edit refuses draft_changed and prints a fresh preview. On decoded success mailbox transmits through messages.send (send class), then deletes the draft (write class). A repeated 401 after reminting is a concrete send credential rejection; only an indeterminate send reports draft_send_unknown and leaves the draft intact. mailbox never calls drafts.send.\n\n")
 	output.WriteString("A dry-run is the default: resolve the envelope first. " + sendWorkflow + " Reply and forward previews select the newest message unless --message selects one; --send requires --message so it pins the exact message within the named thread.\n\n")
 	output.WriteString("Refusal rules:\n")
 	for _, rule := range send.RuleDocs() {
@@ -325,6 +337,17 @@ func (cc *cmdCtx) start() (string, *auth.Source, *gmail.Client, int) {
 	return acct.Name, source, client, 0
 }
 
+func (cc *cmdCtx) acquireWrite(source *auth.Source) (*gmail.Client, int) {
+	if _, err := source.WriteToken(context.Background(), auth.BatchAcquirer(cc.cfg, cc.acct, auth.ClassWrite)); err != nil {
+		return nil, cc.writeRuntimeError(cc.acct.Name, source, err)
+	}
+	return gmail.NewClient(gmail.ClientConfig{
+		Read:    source.ReadCredentials(auth.BatchAcquirer(cc.cfg, cc.acct, auth.ClassRead)),
+		Write:   source.WriteCredentials(),
+		Account: cc.acct.Name,
+	}), 0
+}
+
 func (cc *cmdCtx) startWrite() (string, *auth.Source, *gmail.Client, int) {
 	if err := cc.loadConfig(); err != nil {
 		return "", nil, nil, cc.runtimeError("", nil, err)
@@ -441,6 +464,30 @@ func (cc *cmdCtx) needsCredential(err *auth.NeedsCredentialError) int {
 	output.Error.Config = err.ConfigPath
 	if writeErr := cc.writeMachine(output); writeErr != nil {
 		fmt.Fprintf(cc.stderr, "mailbox: write credential error output: %v\n", writeErr)
+	}
+	return 1
+}
+
+type cliErrorPayload struct {
+	Error struct {
+		Code    string `json:"code"`
+		Account string `json:"account"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func (cc *cmdCtx) commandError(account string, source *auth.Source, class auth.Class, code, message string) int {
+	cc.emitCredentialDiagnostic(source, class)
+	if cc.format() == FormatText {
+		fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(message))
+		return 1
+	}
+	output := cliErrorPayload{}
+	output.Error.Code = code
+	output.Error.Account = account
+	output.Error.Message = message
+	if err := cc.writeMachine(output); err != nil {
+		fmt.Fprintf(cc.stderr, "mailbox: write command error output: %v\n", err)
 	}
 	return 1
 }

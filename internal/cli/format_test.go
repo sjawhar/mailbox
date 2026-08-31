@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/render"
+	"github.com/sjawhar/mailbox/internal/send"
 	"github.com/sjawhar/mailbox/internal/toon/toontest"
 )
 
@@ -59,10 +60,14 @@ func TestToontestMirrorsMatchRealPayloads(t *testing.T) {
 		actionPayload{Account: "s1", Action: "s2", ThreadIDs: []string{"s3"}, OK: true},
 		filterActionPayload{Account: "s1", Action: "s2", Filter: "s3", Matched: 1, Attempted: 1, Succeeded: []string{"s1"}, Failed: []filterActionFailure{{ID: "s2", Status: 7, Reason: "s3"}}, OK: true},
 		attachmentListSample("s1", "s2", "s3"),
-		attachmentSavePayload{Account: "s1", File: "s2", Filename: "s3", Size: 7},
+		attachmentSavePayload{Account: "s1", Path: "s2", Filename: "s3", Size: 7, SHA256: "s1"},
+		draftsPayloadSample("s1", "s2", "s3"),
 		openPayload{Account: "s1", ThreadID: "s2", MessageID: "s3", File: "s1"},
 		errorEnvelopeSample("s1", "s2", "s3"),
+		cliErrorPayloadSample("s1", "s2", "s3"),
+		draftChangedPayloadSample("s1", "s2", "s3"),
 		usageErrorPayloadSample("s1", "s2"),
+		envelopePayloadSample("s1", "s2", "s3"),
 	}
 	mirrors := toontest.Shapes("s1", "s2", "s3")
 	if len(real) != len(mirrors) {
@@ -175,8 +180,21 @@ func statusSample(s1, s2, s3 string) statusOutput {
 func attachmentListSample(s1, s2, s3 string) attachmentListPayload {
 	return attachmentListPayload{
 		Account:     s1,
-		ThreadID:    s2,
-		Attachments: []render.Attachment{{N: 1, Filename: s3, MimeType: s1, Size: 7}},
+		Message:     s2,
+		Attachments: []attachmentRow{{Index: 7, Filename: s3, MIMEType: s1, Size: 7}},
+	}
+}
+
+func draftsPayloadSample(s1, s2, s3 string) draftsPayload {
+	return draftsPayload{
+		Account: s1,
+		Drafts: []draftRow{{
+			DraftID:  s2,
+			ThreadID: s3,
+			To:       s1,
+			Subject:  s2,
+			Updated:  s3,
+		}},
 	}
 }
 
@@ -189,11 +207,58 @@ func errorEnvelopeSample(s1, s2, s3 string) errorEnvelope {
 	return output
 }
 
+func cliErrorPayloadSample(s1, s2, s3 string) cliErrorPayload {
+	output := cliErrorPayload{}
+	output.Error.Code = s1
+	output.Error.Account = s2
+	output.Error.Message = s3
+	return output
+}
+
+func draftChangedPayloadSample(s1, s2, s3 string) draftChangedPayload {
+	output := draftChangedPayload{}
+	output.Error.Code = s1
+	output.Error.Account = s2
+	output.Error.Message = s3
+	output.Error.Pinned = s1
+	output.Error.Current = s2
+	output.Error.Fresh = envelopePayloadSample(s1, s2, s3)
+	return output
+}
+
 func usageErrorPayloadSample(s1, s2 string) usageErrorPayload {
 	output := usageErrorPayload{}
 	output.Error.Code = s1
 	output.Error.Message = s2
 	return output
+}
+
+func envelopePayloadSample(s1, s2, s3 string) send.EnvelopePayload {
+	return send.EnvelopePayload{
+		Account:    s1,
+		Mode:       s2,
+		ThreadID:   s3,
+		Message:    s1,
+		To:         []send.RecipientPayload{{Address: s1, Name: s2, Provenance: s3}},
+		Cc:         []send.RecipientPayload{{Address: s2, Name: s3, Provenance: s1}},
+		Bcc:        []send.RecipientPayload{{Address: s3, Name: s1, Provenance: s2}},
+		Subject:    s1,
+		BodyBytes:  7,
+		InReplyTo:  s2,
+		References: []string{s1, s3},
+		Forward:    &send.ForwardPayload{OriginalBytes: 7, Disclosure: s2},
+		Sendable:   true,
+		Sent:       &send.SentPayload{ID: s1, ThreadID: s2},
+		Scope:      s3,
+		Warning:    s1,
+		Attachments: []send.AttachmentPayload{{
+			Filename: s1,
+			Size:     7,
+			MIMEType: s2,
+			SHA256:   s3,
+		}},
+		DraftID: s3,
+	}
 }
 
 func TestNeedsCredentialDefaultsToTOON(t *testing.T) {
