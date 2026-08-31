@@ -81,6 +81,9 @@ Refusal rules:
   R4 (header_injection): A subject or recipient contains CR or LF.
   R5 (empty_body): The message body is empty.
   R6 (needs_explicit_recipient): Reply-To differs from From; provide --to or --cc.
+  R-A1 (attachment_unreadable): An --attach path does not exist or cannot be read.
+  R-A2 (attachment_empty): An --attach file is empty.
+  R-A3 (attachment_too_large): The final MIME message exceeds 25,000,000 bytes.
 
 ## Id semantics
 
@@ -108,3 +111,6 @@ Start with the dry run, copy its `--message` value, then add `--send` to transmi
 | R4 | header_injection | A subject or recipient contains CR or LF. |
 | R5 | empty_body | The message body is empty. |
 | R6 | needs_explicit_recipient | Reply-To differs from From; provide --to or --cc. |
+| R-A1 | attachment_unreadable | An --attach path does not exist or cannot be read. |
+| R-A2 | attachment_empty | An --attach file is empty. |
+| R-A3 | attachment_too_large | The final MIME message exceeds 25,000,000 bytes. |
