@@ -582,6 +582,7 @@ const (
 	ReasonNoConfig  CredentialReason = "no config file"
 	ReasonEnvUnset  CredentialReason = "declared environment variable is unset"
 	ReasonRecursion CredentialReason = "credential command recursion (MAILBOX_CREDENTIAL_DEPTH is set)"
+	ReasonRejected  CredentialReason = "Gmail rejected the credential"
 )
 
 // NeedsCredentialError describes an unavailable credential without exposing

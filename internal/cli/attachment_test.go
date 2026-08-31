@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -80,6 +81,91 @@ func TestAttachmentListIsMessageScopedZeroIndexed(t *testing.T) {
 	}
 	if _, err := toontest.Decode(strings.TrimSuffix(stdout, "\n")); err != nil {
 		t.Fatalf("decode attachment TOON: %v\n%s", err, stdout)
+	}
+}
+
+func TestAttachmentFetchesExternalAndInlinePartBodiesWithoutEmptyAttachmentLookup(t *testing.T) {
+	g := newGmailTestServer(t)
+	external := attachmentFixtureBytes("a-nameless")
+	inlineNamed := []byte("inline named bytes")
+	inlineDisposition := []byte("inline disposition bytes")
+	g.messages = map[string]map[string]any{
+		"m-part-shapes": {
+			"id": "m-part-shapes",
+			"payload": map[string]any{"parts": []map[string]any{
+				{
+					"mimeType": "application/octet-stream",
+					"body": map[string]any{
+						"attachmentId": "a-nameless",
+						"size":         len(external),
+					},
+				},
+				{
+					"filename": "inline.txt",
+					"mimeType": "text/plain",
+					"body": map[string]any{
+						"data": base64.RawURLEncoding.EncodeToString(inlineNamed),
+						"size": len(inlineNamed),
+					},
+				},
+				{
+					"mimeType": "application/octet-stream",
+					"headers": []map[string]any{
+						{"name": "Content-Disposition", "value": "attachment"},
+					},
+					"body": map[string]any{
+						"data": base64.RawURLEncoding.EncodeToString(inlineDisposition),
+						"size": len(inlineDisposition),
+					},
+				},
+			}},
+		},
+	}
+	g.attachmentBytes["a-nameless"] = external
+	rig := newReadRig(t, g)
+
+	code, stdout, stderr := rig.run(t, "attachment", "m-part-shapes", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("list = (%d, %q, %q), want success", code, stdout, stderr)
+	}
+	var listing struct {
+		Attachments []struct {
+			Index    int    `json:"index"`
+			Filename string `json:"filename"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &listing); err != nil {
+		t.Fatal(err)
+	}
+	if len(listing.Attachments) != 3 ||
+		listing.Attachments[0].Index != 0 || listing.Attachments[0].Filename != "attachment-0" ||
+		listing.Attachments[1].Index != 1 || listing.Attachments[1].Filename != "inline.txt" ||
+		listing.Attachments[2].Index != 2 || listing.Attachments[2].Filename != "attachment-2" {
+		t.Fatalf("listing = %+v, want all external and inline attachment forms", listing.Attachments)
+	}
+
+	t.Chdir(t.TempDir())
+	code, _, stderr = rig.run(t, "attachment", "m-part-shapes", "attachment-0", "--json")
+	if code != 0 || stderr != "" {
+		t.Fatalf("external fetch = (%d, %q), want success", code, stderr)
+	}
+	if got, err := os.ReadFile("attachment-0"); err != nil || !bytes.Equal(got, external) {
+		t.Fatalf("external bytes = %q, %v", got, err)
+	}
+	for _, tc := range []struct {
+		selector string
+		want     []byte
+	}{
+		{"inline.txt", inlineNamed},
+		{"attachment-2", inlineDisposition},
+	} {
+		code, stdout, stderr = rig.run(t, "attachment", "m-part-shapes", tc.selector, "-o", "-", "--json")
+		if code != 0 || stdout != string(tc.want) {
+			t.Fatalf("inline fetch %q = (%d, %q, %q), want exact inline bytes", tc.selector, code, stdout, stderr)
+		}
+	}
+	if got := strings.Join(g.attachmentRequestIDs, ","); got != "a-nameless" {
+		t.Fatalf("attachment requests = %q, want the external attachment only", got)
 	}
 }
 

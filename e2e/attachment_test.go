@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net/http"
 	"net/mail"
 	"os"
 	"path/filepath"
@@ -185,6 +186,10 @@ func TestCLIAttachmentDownloadFlow(t *testing.T) {
 	}
 	if len(listing.Attachments) != 2 || listing.Attachments[0].Index != 0 || listing.Attachments[0].Filename != "evil\u202e.pdf" || listing.Attachments[0].MIMEType != "application/pdf" || listing.Attachments[0].Size != int64(len(fixtureAttachmentBytes("a-evil"))) || listing.Attachments[1].Index != 1 || listing.Attachments[1].Filename != "report.pdf" {
 		t.Fatalf("attachment listing = %+v, want two canonical zero-based rows", listing.Attachments)
+	}
+	messageGets := callsTo(fixture.gmail, http.MethodGet, "/gmail/v1/users/me/messages/m-att")
+	if len(messageGets) != 1 || messageGets[0].Query != "format=full" {
+		t.Fatalf("attachment message calls = %+v, want one full-format read", messageGets)
 	}
 
 	code, stdout, stderr = runBinaryInDir(t, cwd, fixture.env, "attachment", "m-att", "0", "--json")

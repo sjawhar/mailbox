@@ -148,6 +148,96 @@ func TestDraftResumeDryRunReconstructsAndPinsCurrentMessageID(t *testing.T) {
 		}
 	}
 }
+func TestDraftResumeDoesNotFetchProfile(t *testing.T) {
+	g := newGmailTestServer(t)
+	configureResumableDraft(g)
+	rig := newDraftRig(t, g)
+
+	code, stdout, stderr := rig.run(t, "send", "--draft", "d1", "--json")
+	if code != 0 {
+		t.Fatalf("resume exit = %d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	if g.profileCalls != 0 {
+		t.Fatalf("profile calls = %d, want draft reconstruction to avoid the profile boundary", g.profileCalls)
+	}
+}
+
+func TestDraftResumePreflightsLocalAttachmentsBeforeRead(t *testing.T) {
+	g := newGmailTestServer(t)
+	rig := newDraftRig(t, g)
+	missing := filepath.Join(t.TempDir(), "missing.pdf")
+
+	code, stdout, stderr := rig.run(t, "send", "--draft", "d1", "--attach", missing, "--json")
+	if code != 1 || !strings.Contains(stdout, "attachment_unreadable") {
+		t.Fatalf("preflight = (%d, %q, %q), want attachment_unreadable", code, stdout, stderr)
+	}
+	if len(g.draftReadBearers) != 0 || g.profileCalls != 0 {
+		t.Fatalf("local refusal consumed read custody: draft reads=%v profile=%d", g.draftReadBearers, g.profileCalls)
+	}
+}
+
+func TestDraftResumeKeepsNamelessAndInlineCarriedPartsWithoutEmptyLookup(t *testing.T) {
+	g := newGmailTestServer(t)
+	configureResumableDraft(g)
+	g.setDraftAttachmentName("d1", "")
+	inline := []byte("inline carried bytes")
+	parts := g.draftPayload("d1")["parts"].([]map[string]any)
+	g.draftPayload("d1")["parts"] = append(parts, map[string]any{
+		"filename": "inline.txt",
+		"mimeType": "text/plain",
+		"body": map[string]any{
+			"data": base64.RawURLEncoding.EncodeToString(inline),
+			"size": len(inline),
+		},
+	})
+	rig := newDraftRig(t, g)
+
+	code, stdout, stderr := rig.run(t, "send", "--draft", "d1", "--json")
+	if code != 0 {
+		t.Fatalf("resume exit = %d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	var payload struct {
+		Attachments []struct {
+			Filename string `json:"filename"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Attachments) != 2 || payload.Attachments[0].Filename != "attachment-0" || payload.Attachments[1].Filename != "inline.txt" {
+		t.Fatalf("carried attachments = %+v, want nameless and inline parts", payload.Attachments)
+	}
+	if got := strings.Join(g.attachmentRequestIDs, ","); got != "a-d1" {
+		t.Fatalf("attachment requests = %q, want the external attachment only", got)
+	}
+}
+
+func TestDraftResumeCanonicalizesCarriedAndFreshAttachmentsInOneIndexSpace(t *testing.T) {
+	g := newGmailTestServer(t)
+	configureResumableDraft(g)
+	g.setDraftAttachmentName("d1", "")
+	rig := newDraftRig(t, g)
+	local := filepath.Join(t.TempDir(), "...")
+	if err := os.WriteFile(local, []byte("fresh bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := rig.run(t, "send", "--draft", "d1", "--attach", local, "--json")
+	if code != 0 {
+		t.Fatalf("resume exit = %d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	var payload struct {
+		Attachments []struct {
+			Filename string `json:"filename"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Attachments) != 2 || payload.Attachments[0].Filename != "attachment-0" || payload.Attachments[1].Filename != "attachment-1" {
+		t.Fatalf("attachment names = %+v, want final merged indexes", payload.Attachments)
+	}
+}
 
 func TestDraftResumeOverridesWinAndAttachAppends(t *testing.T) {
 	g := newGmailTestServer(t)
@@ -353,6 +443,33 @@ func TestDraftResumeSendTokenReacquisitionFailureIsConcrete(t *testing.T) {
 	}
 	if g.sendCalls() != 1 || g.draftDeletes() != 0 || !g.draftExists("d1") {
 		t.Fatalf("reacquisition custody: sends=%d deletes=%d exists=%v, want 1/0/true", g.sendCalls(), g.draftDeletes(), g.draftExists("d1"))
+	}
+}
+func TestDraftResumePersistentUnauthorizedIsConcreteSendCredentialError(t *testing.T) {
+	g := newGmailTestServer(t)
+	configureResumableDraft(g)
+	g.sendStatus = http.StatusUnauthorized
+	g.sendPersistentStatus = true
+	rig := newDraftRig(t, g)
+
+	code, stdout, stderr := rig.run(t, "send", "--draft", "d1", "--send", "--message", "m-d1", "--json")
+	if code != 1 || strings.Contains(stdout, "draft_send_unknown") {
+		t.Fatalf("persistent 401 = (%d, %q, %q), want a concrete send credential error", code, stdout, stderr)
+	}
+	var payload struct {
+		Error struct {
+			Code      string `json:"code"`
+			ConfigKey string `json:"config_key"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error.Code != "needs_send_credential" || payload.Error.ConfigKey != "accounts.work.send_credential_cmd" {
+		t.Fatalf("persistent 401 payload = %+v, want send config guidance", payload.Error)
+	}
+	if g.sendCalls() != 2 || g.draftDeletes() != 0 || !g.draftExists("d1") {
+		t.Fatalf("persistent 401 custody: sends=%d deletes=%d exists=%v, want rejected sends and intact draft", g.sendCalls(), g.draftDeletes(), g.draftExists("d1"))
 	}
 }
 

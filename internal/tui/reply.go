@@ -155,6 +155,10 @@ func (m app) updateReplyConfirmKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.surfaceError(err)
 			return m, nil
 		}
+		if refusal := send.OutboundSizeRefusal(mime, m.reply.envelope.Attachments); refusal != nil {
+			m.surfaceReplyRefusal(refusal)
+			return m, nil
+		}
 		m.abandonPrompt = false
 		m.pendingDraft = &pendingDraft{mime: mime, threadID: m.reply.threadID}
 		return m.startClassUnlock(auth.ClassWrite)

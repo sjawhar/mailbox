@@ -20,7 +20,7 @@ type draftSendOptions struct {
 	subjectSet, bodySet bool
 	attachPaths         []string
 	message             string
-	messageSet, sendNow bool
+	sendNow             bool
 }
 
 type draftChangedPayload struct {
@@ -35,14 +35,15 @@ type draftChangedPayload struct {
 }
 
 func runDraftSend(cc *cmdCtx, draftID string, opts draftSendOptions) int {
+	fresh, oversized, refusal := send.LoadAttachments(opts.attachPaths)
+	if refusal != nil {
+		return cc.renderSendRefusal("", nil, refusal)
+	}
+
 	ctx := context.Background()
 	account, source, client, code := cc.start()
 	if code != 0 {
 		return code
-	}
-	profile, err := client.GetProfile(ctx)
-	if err != nil {
-		return cc.runtimeError(account, source, err)
 	}
 	draft, err := client.GetDraft(ctx, draftID, "full")
 	if err != nil {
@@ -51,7 +52,7 @@ func runDraftSend(cc *cmdCtx, draftID string, opts draftSendOptions) int {
 		}
 		return cc.runtimeError(account, source, err)
 	}
-	request, threading, carried, refusal, err := reconstructDraft(ctx, client, draft, profile.EmailAddress)
+	request, threading, carried, refusal, err := reconstructDraft(ctx, client, draft)
 	if err != nil {
 		return cc.runtimeError(account, source, err)
 	}
@@ -59,16 +60,18 @@ func runDraftSend(cc *cmdCtx, draftID string, opts draftSendOptions) int {
 		return cc.renderSendRefusal(account, source, refusal)
 	}
 	applyDraftOverrides(&request, opts)
-	fresh, oversized, refusal := send.LoadAttachments(opts.attachPaths)
-	if refusal != nil {
-		return cc.renderSendRefusal(account, source, refusal)
-	}
 	envelope, refusal := send.ResolveDraft(request, threading)
 	if refusal != nil {
 		return cc.renderSendRefusal(account, source, refusal)
 	}
 	envelope.Attachments = carried
 	if oversized != nil {
+		if refusal := send.CanonicalizeAttachments(envelope.Attachments); refusal != nil {
+			return cc.renderSendRefusal(account, source, refusal)
+		}
+		if refusal := send.CanonicalizeAttachmentMeta(oversized, len(envelope.Attachments)); refusal != nil {
+			return cc.renderSendRefusal(account, source, refusal)
+		}
 		sizeRefusal, sizeErr := send.OversizeRefusal(envelope, nil, oversized)
 		if sizeErr != nil {
 			return cc.runtimeError(account, source, sizeErr)
@@ -76,11 +79,14 @@ func runDraftSend(cc *cmdCtx, draftID string, opts draftSendOptions) int {
 		return cc.renderSendRefusal(account, source, sizeRefusal)
 	}
 	envelope.Attachments = append(envelope.Attachments, fresh...)
+	if refusal := send.CanonicalizeAttachments(envelope.Attachments); refusal != nil {
+		return cc.renderSendRefusal(account, source, refusal)
+	}
 	envelope.TargetMessageID = draft.Message.ID
 	return cc.finishDraftSend(ctx, account, source, envelope, draftID, opts)
 }
 
-func reconstructDraft(ctx context.Context, client *gmail.Client, draft *gmail.Draft, self string) (send.Request, send.DraftThreading, []send.Attachment, *send.Refusal, error) {
+func reconstructDraft(ctx context.Context, client *gmail.Client, draft *gmail.Draft) (send.Request, send.DraftThreading, []send.Attachment, *send.Refusal, error) {
 	if draft == nil || draft.Message == nil {
 		return send.Request{}, send.DraftThreading{}, nil, nil, errors.New("gmail: draft response omitted its message")
 	}
@@ -103,7 +109,6 @@ func reconstructDraft(ctx context.Context, client *gmail.Client, draft *gmail.Dr
 		Bcc:     draftRecipients(draft.Message, "Bcc"),
 		Subject: draftHeader(draft.Message, "Subject"),
 		Body:    body,
-		Self:    self,
 	}
 	threading := send.DraftThreading{
 		ThreadID:   draft.Message.ThreadID,
@@ -112,7 +117,7 @@ func reconstructDraft(ctx context.Context, client *gmail.Client, draft *gmail.Dr
 	}
 	carried := make([]send.Attachment, 0, len(content.Attachments))
 	for index, attachment := range content.Attachments {
-		contents, attachmentErr := client.GetAttachment(ctx, draft.Message.ID, attachment.AttachmentID)
+		contents, attachmentErr := attachmentContents(ctx, client, attachment)
 		if attachmentErr != nil {
 			return send.Request{}, send.DraftThreading{}, nil, nil, attachmentErr
 		}
@@ -206,6 +211,15 @@ func (cc *cmdCtx) finishDraftSend(ctx context.Context, account string, source *a
 		if knownNotAccepted {
 			return cc.sendRuntimeError(account, sendSource, sendErr)
 		}
+		if gmail.IsStillUnauthorized(sendErr) {
+			return cc.needsCredential(&auth.NeedsCredentialError{
+				Account:    account,
+				Class:      auth.ClassSend,
+				ConfigKey:  cc.acct.Send.ConfigKey,
+				ConfigPath: cc.cfg.Path,
+				Reason:     auth.ReasonRejected,
+			})
+		}
 		var apiErr *gmail.APIError
 		if errors.As(sendErr, &apiErr) && apiErr.Status >= http.StatusBadRequest && apiErr.Status < http.StatusInternalServerError {
 			return cc.sendRuntimeError(account, sendSource, sendErr)
@@ -221,9 +235,10 @@ func (cc *cmdCtx) finishDraftSend(ctx context.Context, account string, source *a
 	return cc.renderDraftSent(account, sendSource, envelope, draftID, sent, warning)
 }
 
-// retryDraftSend re-acquires a send token only when no subsequent request can
-// be made with the expired slot. A failed re-acquisition remains a concrete
-// error because Gmail has not accepted a new request in that retry step.
+// retryDraftSend re-acquires a send token only after Gmail's explicit 401
+// rejection. That rejection proves non-acceptance, so one retry is safe; a
+// second 401 is concrete credential rejection, while all other send failures
+// remain indeterminate.
 func (cc *cmdCtx) retryDraftSend(source *auth.Source, action func() error) (error, bool) {
 	err := action()
 	if !errors.Is(err, auth.ErrExpiredSendToken) {
@@ -233,7 +248,11 @@ func (cc *cmdCtx) retryDraftSend(source *auth.Source, action func() error) (erro
 	if _, err = source.SendToken(context.Background(), auth.BatchAcquirer(cc.cfg, cc.acct, auth.ClassSend)); err != nil {
 		return err, true
 	}
-	return action(), false
+	if err := action(); errors.Is(err, auth.ErrExpiredSendToken) {
+		return gmail.ErrStillUnauthorized, false
+	} else {
+		return err, false
+	}
 }
 
 func (cc *cmdCtx) renderDraftDryRun(account string, source *auth.Source, envelope *send.Envelope, draftID string) int {

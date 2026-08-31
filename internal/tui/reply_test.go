@@ -307,6 +307,21 @@ func TestMidflightAbandonNeverTransmits(t *testing.T) {
 		t.Fatalf("late unlock completion was not discarded: status:%q sends:%d", model.status, len(api.sendCalls))
 	}
 }
+func TestAbandonSaveRefusesOversizedMIMEBeforeWriteUnlock(t *testing.T) {
+	thread := replyThread()
+	model, _ := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	model = confirmWithBody(t, model, strings.Repeat("x", send.MaxOutboundMessageBytes))
+
+	model, _ = update(t, model, key("esc"))
+	model, command := update(t, model, key("s"))
+	if command != nil || model.pendingDraft != nil || model.unlocking {
+		t.Fatalf("oversized save armed write activity: command=%t pending=%#v unlocking=%t", command != nil, model.pendingDraft, model.unlocking)
+	}
+	if !model.statusError || !strings.Contains(model.status, "attachment_too_large") {
+		t.Fatalf("oversized save status = %q, want the local R-A3 refusal", model.status)
+	}
+}
 
 func TestSendExpiryRetriesOnce(t *testing.T) {
 	thread := replyThread()

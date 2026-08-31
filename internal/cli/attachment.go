@@ -32,7 +32,7 @@ func runAttachment(cc *cmdCtx, args []string) int {
 	}
 	ctx := context.Background()
 	messageID := pos[0]
-	message, err := client.GetMessage(ctx, messageID)
+	message, err := client.GetMessageFull(ctx, messageID)
 	if err != nil {
 		if gmail.IsNotFound(err) {
 			return next.commandError(account, source, auth.ClassRead, "attachment_not_found",
@@ -53,7 +53,7 @@ func runAttachment(cc *cmdCtx, args []string) int {
 		return next.commandError(account, source, auth.ClassRead, "attachment_not_found",
 			fmt.Sprintf("message %s has no attachment %q; available: %s", messageID, pos[1], strings.Join(rowNames(rows), ", ")))
 	}
-	contents, err := client.GetAttachment(ctx, content.Attachments[index].MessageID, content.Attachments[index].AttachmentID)
+	contents, err := attachmentContents(ctx, client, content.Attachments[index])
 	if err != nil {
 		return next.runtimeError(account, source, err)
 	}
@@ -76,6 +76,13 @@ func runAttachment(cc *cmdCtx, args []string) int {
 		return next.runtimeError(account, source, wrapError("write attachment", err))
 	}
 	return next.attachmentSaved(account, source, filepath.Join(dir, base), base, int64(len(contents)), digest)
+}
+
+func attachmentContents(ctx context.Context, client *gmail.Client, attachment render.Attachment) ([]byte, error) {
+	if attachment.AttachmentID == "" {
+		return attachment.Inline, nil
+	}
+	return client.GetAttachment(ctx, attachment.MessageID, attachment.AttachmentID)
 }
 
 type attachmentRow struct {

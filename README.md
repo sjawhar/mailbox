@@ -276,7 +276,7 @@ For replies, mailbox derives recipients from `Reply-To` or `From`, plus the orig
 
 `--save-draft` completes the same recipient resolution, refusal checks, and MIME assembly as a send, then creates a Gmail draft instead of transmitting it. It is mutually exclusive with `--send`; reply and forward drafts retain their thread.
 
-`mailbox send --draft <draft-id>` resumes a Gmail draft through the same resolver and is a dry run by default. The preview prints the draft's current message ID; `mailbox send --draft <draft-id> --send --message=<id>` pins that ID before sending. A server-side edit changes the ID and refuses with `draft_changed`, including a fresh preview. On decoded send success, mailbox sends through `messages.send` and then deletes the draft. An indeterminate send reports `draft_send_unknown` and leaves the draft intact.
+`mailbox send --draft <draft-id>` resumes a Gmail draft through the same resolver and is a dry run by default. The preview prints the draft's current message ID; `mailbox send --draft <draft-id> --send --message=<id>` pins that ID before sending. A server-side edit changes the ID and refuses with `draft_changed`, including a fresh preview. On decoded send success, mailbox sends through `messages.send` and then deletes the draft. A repeated 401 after reminting is a concrete send credential rejection; only an indeterminate send reports `draft_send_unknown` and leaves the draft intact.
 
 ## Drafts
 

@@ -18,7 +18,7 @@ import (
 
 const defaultBaseURL = "https://gmail.googleapis.com"
 
-var errStillUnauthorized = errors.New("gmail: still unauthorized after re-minting credentials (check 'mailbox status')")
+var ErrStillUnauthorized = errors.New("gmail: still unauthorized after re-minting credentials (check 'mailbox status')")
 
 // Credentials supplies and invalidates Gmail access tokens.
 type Credentials interface {
@@ -131,6 +131,15 @@ func (c *Client) GetThread(ctx context.Context, id, format string) (*Thread, err
 func (c *Client) GetMessage(ctx context.Context, id string) (*Message, error) {
 	var message Message
 	if err := c.call(ctx, opMessagesGet, []string{id}, url.Values{"format": {"metadata"}}, nil, &message); err != nil {
+		return nil, err
+	}
+	return &message, nil
+}
+
+// GetMessageFull fetches a Gmail message with its complete payload part tree.
+func (c *Client) GetMessageFull(ctx context.Context, id string) (*Message, error) {
+	var message Message
+	if err := c.call(ctx, opMessagesGetFull, []string{id}, url.Values{"format": {"full"}}, nil, &message); err != nil {
 		return nil, err
 	}
 	return &message, nil
@@ -488,8 +497,14 @@ func (c *Client) do(ctx context.Context, creds Credentials, method, path string,
 	}
 }
 
+// IsStillUnauthorized reports an HTTP 401 outcome that Gmail proved did not
+// accept the request.
+func IsStillUnauthorized(err error) bool {
+	return errors.Is(err, ErrStillUnauthorized)
+}
+
 func stillUnauthorizedError() error {
-	return errStillUnauthorized
+	return ErrStillUnauthorized
 }
 
 const (

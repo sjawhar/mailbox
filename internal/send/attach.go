@@ -19,17 +19,21 @@ const MaxOutboundMessageBytes = 25_000_000
 
 // Attachment is one outbound MIME part. Filename is canonical and header-safe.
 type Attachment struct {
-	Filename string
-	MIMEType string
-	SHA256   string
-	Content  []byte
+	Filename      string
+	MIMEType      string
+	SHA256        string
+	Content       []byte
+	sourceName    string
+	sourceNameSet bool
 }
 
 // AttachmentMeta is report-only accounting for the oversize refusal path.
 type AttachmentMeta struct {
-	Filename string
-	MIMEType string
-	RawSize  int64
+	Filename      string
+	MIMEType      string
+	RawSize       int64
+	sourceName    string
+	sourceNameSet bool
 }
 
 // LoadAttachments reads every requested path once. Before the cumulative raw
@@ -72,9 +76,11 @@ func LoadAttachments(paths []string) (attachments []Attachment, oversized []Atta
 			}
 			for _, attachment := range attachments {
 				sweep = append(sweep, AttachmentMeta{
-					Filename: attachment.Filename,
-					MIMEType: attachment.MIMEType,
-					RawSize:  int64(len(attachment.Content)),
+					Filename:      attachment.Filename,
+					MIMEType:      attachment.MIMEType,
+					RawSize:       int64(len(attachment.Content)),
+					sourceName:    attachment.sourceName,
+					sourceNameSet: attachment.sourceNameSet,
 				})
 			}
 			sweep = append(sweep, meta)
@@ -124,9 +130,11 @@ func drainOpenAttachment(path string, index int, file *os.File, prefix []byte) (
 		return AttachmentMeta{}, refusalUnreadable(path, err)
 	}
 	return AttachmentMeta{
-		Filename: filename,
-		MIMEType: detectMIMEType(filename, head),
-		RawSize:  int64(len(prefix)) + int64(topped) + rest,
+		Filename:      filename,
+		MIMEType:      detectMIMEType(filename, head),
+		RawSize:       int64(len(prefix)) + int64(topped) + rest,
+		sourceName:    path,
+		sourceNameSet: true,
 	}, nil
 }
 
@@ -157,7 +165,13 @@ func drainMeta(path string, index int) (AttachmentMeta, *Refusal) {
 	if total == 0 {
 		return AttachmentMeta{}, refusal("R-A2", "attachment_empty", fmt.Sprintf("R-A2 attachment_empty: attachment %s is empty", render.SanitizeTerminal(path)))
 	}
-	return AttachmentMeta{Filename: filename, MIMEType: detectMIMEType(filename, head[:headLen]), RawSize: total}, nil
+	return AttachmentMeta{
+		Filename:      filename,
+		MIMEType:      detectMIMEType(filename, head[:headLen]),
+		RawSize:       total,
+		sourceName:    path,
+		sourceNameSet: true,
+	}, nil
 }
 
 func attachmentFilename(path string, index int) (string, *Refusal) {
@@ -184,11 +198,50 @@ func NewCarriedAttachment(name string, index int, content []byte) (Attachment, *
 	}
 	digest := sha256.Sum256(content)
 	return Attachment{
-		Filename: filename,
-		MIMEType: detectMIMEType(filename, content),
-		SHA256:   hex.EncodeToString(digest[:]),
-		Content:  content,
+		Filename:      filename,
+		MIMEType:      detectMIMEType(filename, content),
+		SHA256:        hex.EncodeToString(digest[:]),
+		Content:       content,
+		sourceName:    name,
+		sourceNameSet: true,
 	}, nil
+}
+
+// CanonicalizeAttachments assigns names in their final outbound order.
+func CanonicalizeAttachments(attachments []Attachment) *Refusal {
+	for index := range attachments {
+		name := attachments[index].Filename
+		if attachments[index].sourceNameSet {
+			name = attachments[index].sourceName
+		}
+		filename, filenameRefusal := attachmentFilename(name, index)
+		if filenameRefusal != nil {
+			return filenameRefusal
+		}
+		attachments[index].Filename = filename
+		attachments[index].MIMEType = detectMIMEType(filename, attachments[index].Content)
+	}
+	return nil
+}
+
+// CanonicalizeAttachmentMeta assigns names in the final outbound order for
+// attachments that were swept without retaining their contents.
+func CanonicalizeAttachmentMeta(attachments []AttachmentMeta, start int) *Refusal {
+	for index := range attachments {
+		name := attachments[index].Filename
+		if attachments[index].sourceNameSet {
+			name = attachments[index].sourceName
+		}
+		filename, filenameRefusal := attachmentFilename(name, start+index)
+		if filenameRefusal != nil {
+			return filenameRefusal
+		}
+		attachments[index].Filename = filename
+		if byExtension := mime.TypeByExtension(filepath.Ext(filename)); byExtension != "" {
+			attachments[index].MIMEType = byExtension
+		}
+	}
+	return nil
 }
 
 func detectMIMEType(name string, content []byte) string {

@@ -30,6 +30,7 @@ type Attachment struct {
 	Size         int64  `json:"size"`
 	MessageID    string `json:"-"`
 	AttachmentID string `json:"-"`
+	Inline       []byte `json:"-"`
 }
 
 // MessageContent holds the preferred decoded body and message attachments.
@@ -70,13 +71,21 @@ func ExtractContent(msg *gmail.Message) (*MessageContent, error) {
 				content.InlineParts[trimContentID(contentID)] = part
 				return nil
 			}
-			content.Attachments = append(content.Attachments, Attachment{
+			attachment := Attachment{
 				Filename:     part.Filename,
 				MimeType:     part.MimeType,
 				Size:         part.Body.Size,
 				MessageID:    msg.ID,
 				AttachmentID: part.Body.AttachmentID,
-			})
+			}
+			if attachment.AttachmentID == "" {
+				inline, decodeErr := decodePartData(part)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				attachment.Inline = inline
+			}
+			content.Attachments = append(content.Attachments, attachment)
 			return nil
 		}
 
@@ -108,7 +117,33 @@ func ExtractContent(msg *gmail.Message) (*MessageContent, error) {
 }
 
 func isAttachment(part *gmail.MessagePart) bool {
-	return part.Filename != "" && part.Body != nil && (part.Body.AttachmentID != "" || part.Body.Data != "")
+	if part.Body == nil {
+		return false
+	}
+	if part.Body.AttachmentID != "" {
+		return true
+	}
+	return part.Body.Data != "" && (part.Filename != "" || hasAttachmentDisposition(part))
+}
+
+func hasAttachmentDisposition(part *gmail.MessagePart) bool {
+	disposition, _, err := mime.ParseMediaType(partHeader(part, "Content-Disposition"))
+	return err == nil && strings.EqualFold(disposition, "attachment")
+}
+
+func decodePartData(part *gmail.MessagePart) ([]byte, error) {
+	if part.Body == nil || part.Body.Data == "" {
+		return nil, nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(part.Body.Data)
+	if err == nil {
+		return decoded, nil
+	}
+	decoded, err = base64.URLEncoding.DecodeString(part.Body.Data)
+	if err != nil {
+		return nil, fmt.Errorf("decode MIME part %q: %w", part.PartID, err)
+	}
+	return decoded, nil
 }
 
 func decodeTextPart(part *gmail.MessagePart) (string, error) {
@@ -117,15 +152,9 @@ func decodeTextPart(part *gmail.MessagePart) (string, error) {
 		return "", err
 	}
 
-	var decoded []byte
-	if part.Body != nil && part.Body.Data != "" {
-		decoded, err = base64.RawURLEncoding.DecodeString(part.Body.Data)
-		if err != nil {
-			decoded, err = base64.URLEncoding.DecodeString(part.Body.Data)
-			if err != nil {
-				return "", fmt.Errorf("decode MIME part %q: %w", part.PartID, err)
-			}
-		}
+	decoded, err := decodePartData(part)
+	if err != nil {
+		return "", err
 	}
 
 	if label == "" || strings.EqualFold(label, "utf-8") || strings.EqualFold(label, "us-ascii") {

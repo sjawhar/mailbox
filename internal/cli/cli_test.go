@@ -26,45 +26,48 @@ import (
 )
 
 type gmailTestServer struct {
-	t                  *testing.T
-	server             *httptest.Server
-	listQuery          url.Values
-	listCalls          int
-	batchRequests      []string
-	directRequests     []string
-	labels             []map[string]any
-	profile            map[string]any
-	thread             map[string]any
-	listPages          [][]string
-	listPageStatus     map[int]int
-	batchItemResponses map[string][]scriptedResponse
-	batchRequestStatus []int
-	batchCalls         int
-	batchWriteCalls    int
-	batchWriteIDs      [][]string
-	listIDs            []string
-	attachmentBytes    map[string][]byte
-	metadata           map[string]map[string]any
-	messages           map[string]map[string]any
-	rawMessages        map[string][]byte
-	sentBodies         []map[string]any
-	sendBearers        []string
-	draftCreates       []draftCreate
-	drafts             map[string]map[string]any
-	draftListIDs       []string
-	draftListMax       string
-	draftReadBearers   []string
-	draftDeleteBearers []string
-	sendStatus         int
-	draftDeleteStatus  int
-	sendGarbage        bool
-	readToken          string
-	writeToken         string
-	sendToken          string
-	rawMessageID       string
-	forbidden          bool
-	readForbidden      bool
-	readFailures       int
+	t                    *testing.T
+	server               *httptest.Server
+	listQuery            url.Values
+	listCalls            int
+	batchRequests        []string
+	directRequests       []string
+	labels               []map[string]any
+	profile              map[string]any
+	thread               map[string]any
+	listPages            [][]string
+	listPageStatus       map[int]int
+	batchItemResponses   map[string][]scriptedResponse
+	batchRequestStatus   []int
+	batchCalls           int
+	batchWriteCalls      int
+	batchWriteIDs        [][]string
+	listIDs              []string
+	attachmentBytes      map[string][]byte
+	metadata             map[string]map[string]any
+	messages             map[string]map[string]any
+	rawMessages          map[string][]byte
+	sentBodies           []map[string]any
+	sendBearers          []string
+	draftCreates         []draftCreate
+	drafts               map[string]map[string]any
+	draftListIDs         []string
+	draftListMax         string
+	draftReadBearers     []string
+	draftDeleteBearers   []string
+	sendStatus           int
+	sendPersistentStatus bool
+	profileCalls         int
+	attachmentRequestIDs []string
+	draftDeleteStatus    int
+	sendGarbage          bool
+	readToken            string
+	writeToken           string
+	sendToken            string
+	rawMessageID         string
+	forbidden            bool
+	readForbidden        bool
+	readFailures         int
 }
 type draftCreate struct {
 	Raw      string
@@ -237,7 +240,9 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if g.sendStatus != 0 && g.sendStatus != http.StatusOK {
 			status := g.sendStatus
-			g.sendStatus = 0
+			if !g.sendPersistentStatus {
+				g.sendStatus = 0
+			}
 			writeResponse(g.t, w, status, googleError(status, "sendFailed"))
 			return
 		}
@@ -269,6 +274,7 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"labels": g.labels})
 	case strings.Contains(r.URL.Path, "/attachments/"):
 		id := filepath.Base(r.URL.Path)
+		g.attachmentRequestIDs = append(g.attachmentRequestIDs, id)
 		g.draftReadBearers = append(g.draftReadBearers, r.Header.Get("Authorization"))
 		contents, ok := g.attachmentBytes[id]
 		if !ok {
@@ -277,6 +283,7 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"data": base64.RawURLEncoding.EncodeToString(contents)})
 	case r.URL.Path == "/gmail/v1/users/me/profile":
+		g.profileCalls++
 		writeResponse(g.t, w, http.StatusOK, g.profile)
 	case strings.HasSuffix(r.URL.Path, "/modify") || strings.HasSuffix(r.URL.Path, "/trash"):
 		body, err := io.ReadAll(r.Body)

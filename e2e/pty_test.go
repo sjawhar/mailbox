@@ -76,6 +76,7 @@ type capturedSend struct {
 type recordedCall struct {
 	Method string
 	Path   string
+	Query  string
 	Bearer string
 }
 
@@ -178,7 +179,7 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	mux.HandleFunc("/batch/gmail/v1", g.serveBatch)
 	mux.HandleFunc("/", g.serveUnknown)
 	g.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		g.record(recordedCall{Method: request.Method, Path: request.URL.Path, Bearer: request.Header.Get("Authorization")})
+		g.record(recordedCall{Method: request.Method, Path: request.URL.Path, Query: request.URL.RawQuery, Bearer: request.Header.Get("Authorization")})
 		mux.ServeHTTP(w, request)
 	}))
 	t.Cleanup(g.server.Close)
@@ -247,7 +248,27 @@ func (g *fakeGmail) serveMessage(w http.ResponseWriter, request *http.Request) {
 		http.NotFound(w, request)
 		return
 	}
+	if request.URL.Query().Get("format") == "metadata" {
+		message = fixtureMetadataMessage(message)
+	}
 	fmt.Fprint(w, message)
+}
+
+func fixtureMetadataMessage(message string) string {
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(message), &decoded); err != nil {
+		panic(fmt.Sprintf("decode fake Gmail message: %v", err))
+	}
+	payload, ok := decoded["payload"].(map[string]any)
+	if !ok {
+		panic("fake Gmail message has no payload")
+	}
+	decoded["payload"] = map[string]any{"headers": payload["headers"]}
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		panic(fmt.Sprintf("encode fake Gmail metadata message: %v", err))
+	}
+	return string(encoded)
 }
 
 func (g *fakeGmail) serveAttachment(w http.ResponseWriter, request *http.Request, messageID, attachmentID string) {
@@ -579,7 +600,7 @@ func fixtureHeaderList(values map[string]string) []map[string]string {
 }
 
 func (g *fakeGmail) serveUnknown(w http.ResponseWriter, request *http.Request) {
-	call := recordedCall{Method: request.Method, Path: request.URL.Path, Bearer: request.Header.Get("Authorization")}
+	call := recordedCall{Method: request.Method, Path: request.URL.Path, Query: request.URL.RawQuery, Bearer: request.Header.Get("Authorization")}
 	g.mu.Lock()
 	g.unknown = append(g.unknown, call)
 	g.mu.Unlock()

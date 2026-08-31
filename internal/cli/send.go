@@ -144,7 +144,6 @@ func runSend(cc *cmdCtx, args []string) int {
 			bodySet:     bodySet,
 			attachPaths: attachPaths,
 			message:     message,
-			messageSet:  messageSet,
 			sendNow:     *sendNow,
 		})
 	}
