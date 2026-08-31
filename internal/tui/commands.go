@@ -74,6 +74,13 @@ type sendDoneMsg struct {
 
 func (message sendDoneMsg) requestRef() asyncRequest { return message.request }
 
+type draftSavedMsg struct {
+	request asyncRequest
+	id      string
+}
+
+func (message draftSavedMsg) requestRef() asyncRequest { return message.request }
+
 type errMsg struct {
 	request asyncRequest
 	err     error
@@ -178,6 +185,16 @@ func sendCmd(request asyncRequest, raw []byte, threadID string) tea.Cmd {
 			return errMsg{request: request, err: err}
 		}
 		return sendDoneMsg{request: request, sent: sent}
+	}
+}
+
+func saveDraftCmd(request asyncRequest, raw []byte, threadID string) tea.Cmd {
+	return func() tea.Msg {
+		draft, err := request.ctx.api.CreateDraft(context.Background(), raw, threadID)
+		if err != nil {
+			return errMsg{request: request, err: err}
+		}
+		return draftSavedMsg{request: request, id: draft.ID}
 	}
 }
 

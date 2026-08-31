@@ -27,7 +27,11 @@ type fakeAPI struct {
 	modifyCalls   []modifyCall
 	trashCalls    [][]string
 	sendCalls     []sendCall
-	profileCalls  int
+	draftCreates  []struct {
+		raw      []byte
+		threadID string
+	}
+	profileCalls int
 
 	listErr     error
 	metadataErr error
@@ -177,6 +181,14 @@ func (f *fakeAPI) SendMessage(_ context.Context, raw []byte, threadID string) (*
 		return f.sent, nil
 	}
 	return &gmail.SentMessage{ID: "sent-message", ThreadID: threadID}, nil
+}
+
+func (f *fakeAPI) CreateDraft(_ context.Context, raw []byte, threadID string) (*gmail.Draft, error) {
+	f.draftCreates = append(f.draftCreates, struct {
+		raw      []byte
+		threadID string
+	}{raw: append([]byte(nil), raw...), threadID: threadID})
+	return &gmail.Draft{ID: "d-tui-1"}, nil
 }
 func testConfig() *auth.Config {
 	work := &auth.AccountConfig{Name: "work", Read: &auth.CredentialSource{Class: auth.ClassRead, Kind: auth.SourceEnv, EnvVar: "TEST_WORK", ConfigKey: "accounts.work.read_credential_env"}}

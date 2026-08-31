@@ -13,7 +13,7 @@ const ScissorsLine = "# ------------------------ >8 ------------------------"
 
 // CreateDraft verifies the mailbox-owned parent directory, then creates a
 // private compose directory and draft file within it.
-func CreateDraft(parent, envelopeBlock string) (dir, path string, err error) {
+func CreateDraft(parent, envelopeBlock, body string) (dir, path string, err error) {
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return "", "", fmt.Errorf("compose: create draft parent: %w", err)
 	}
@@ -53,7 +53,7 @@ func CreateDraft(parent, envelopeBlock string) (dir, path string, err error) {
 	}
 
 	path = filepath.Join(dir, "draft.md")
-	content := envelopeBlock + "\n" + ScissorsLine + "\n"
+	content := envelopeBlock + "\n" + ScissorsLine + "\n" + body
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return "", "", fmt.Errorf("compose: write draft: %w", err)
 	}

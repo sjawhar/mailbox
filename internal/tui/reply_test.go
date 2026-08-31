@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sjawhar/mailbox/internal/auth"
+	"github.com/sjawhar/mailbox/internal/compose"
 	"github.com/sjawhar/mailbox/internal/gmail"
 	"github.com/sjawhar/mailbox/internal/send"
 )
@@ -232,6 +233,7 @@ func TestEscAbandonsWithoutTransmit(t *testing.T) {
 	}
 	model = confirmWithBody(t, model, "Draft remains")
 	model, _ = update(t, model, key("esc"))
+	model, _ = update(t, model, key("esc"))
 	if model.view != threadView || model.pendingSend != nil {
 		t.Fatalf("escape from confirm = view:%v pending:%#v", model.view, model.pendingSend)
 	}
@@ -251,6 +253,7 @@ func TestEscAfterConfirmAbandonsPendingSend(t *testing.T) {
 	cancellations := 0
 	model.unlockCancel = func() { cancellations++ }
 
+	model, _ = update(t, model, key("esc"))
 	model, _ = update(t, model, key("esc"))
 	if model.view != threadView || model.unlocking || model.pendingSend != nil {
 		t.Fatalf("escape state = view:%v unlocking:%t pending:%#v", model.view, model.unlocking, model.pendingSend)
@@ -474,5 +477,91 @@ func replyMessage(id, threadID string, internalDate int64, from, to, cc, subject
 		ThreadID:     threadID,
 		InternalDate: internalDate,
 		Payload:      &gmail.MessagePart{Headers: headers},
+	}
+}
+
+func TestEscAtConfirmOffersAbandonPromptInsteadOfSilentShred(t *testing.T) {
+	thread := replyThread()
+	model, _ := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	model = confirmWithBody(t, model, "keep me")
+	model, _ = update(t, model, key("esc"))
+	if !model.abandonPrompt || model.view != replyConfirmView || model.reply.envelope == nil {
+		t.Fatalf("esc must prompt, not discard: prompt=%v view=%v env=%v", model.abandonPrompt, model.view, model.reply.envelope)
+	}
+	view := model.View()
+	for _, want := range []string{"d discard", "s save", "e keep editing"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("prompt line missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestAbandonPromptEscEnterAndDDiscardWithoutServerWrites(t *testing.T) {
+	for _, discard := range []string{"esc", "enter", "d"} {
+		thread := replyThread()
+		model, api := newTestApp([]*gmail.Thread{thread})
+		model.ctx.self = "me@example.test"
+		model = confirmWithBody(t, model, "discard me")
+		model, _ = update(t, model, key("esc"))
+		model, _ = update(t, model, key(discard))
+		if model.abandonPrompt || model.view != threadView || model.reply.envelope != nil {
+			t.Fatalf("%q must discard back to the thread view", discard)
+		}
+		if len(api.draftCreates) != 0 || len(api.sendCalls) != 0 {
+			t.Fatalf("%q wrote to the server: drafts=%d sends=%d", discard, len(api.draftCreates), len(api.sendCalls))
+		}
+	}
+}
+
+func TestAbandonPromptSavesDraftThroughWriteUnlockFence(t *testing.T) {
+	thread := replyThread()
+	model, api := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	unlocked := []auth.Class(nil)
+	model.ctx.unlock = func(_ context.Context, class auth.Class) (string, error) {
+		unlocked = append(unlocked, class)
+		return "", nil
+	}
+	model = confirmWithBody(t, model, "save me")
+	model, _ = update(t, model, key("esc"))
+	model, fence := update(t, model, key("s"))
+	if !model.unlocking || model.unlockClass != auth.ClassWrite || model.pendingDraft == nil {
+		t.Fatalf("s must arm a WRITE unlock with a pending draft: unlocking=%v class=%v", model.unlocking, model.unlockClass)
+	}
+	if len(api.draftCreates) != 0 {
+		t.Fatal("draft created before the unlock fence resolved (attribution-before-spawn violated)")
+	}
+	model = drainCommands(t, model, fence)
+	if len(unlocked) != 1 || unlocked[0] != auth.ClassWrite {
+		t.Fatalf("unlock classes = %v, want [write]", unlocked)
+	}
+	if len(api.draftCreates) != 1 || api.draftCreates[0].threadID != thread.ID {
+		t.Fatalf("draft creates = %+v, want one carrying the thread id", api.draftCreates)
+	}
+	if !strings.Contains(model.status, "draft saved") || model.view != threadView || model.pendingDraft != nil || model.abandonPrompt {
+		t.Fatalf("post-save state: status=%q view=%v", model.status, model.view)
+	}
+}
+
+func TestAbandonPromptEditReopensSeededEditor(t *testing.T) {
+	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+	t.Setenv("VISUAL", "true")
+	thread := replyThread()
+	model, _ := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	model = confirmWithBody(t, model, "seed body")
+	model, _ = update(t, model, key("esc"))
+	model, _ = update(t, model, key("e"))
+	if model.composeState.draftPath == "" {
+		t.Fatal("e must reopen the editor with a fresh scissors draft")
+	}
+	raw, err := os.ReadFile(model.composeState.draftPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, found := compose.ParseDraft(raw)
+	if !found || body != "seed body" {
+		t.Fatalf("reopened draft body = (%q, %v), want the current body below the scissors line", body, found)
 	}
 }

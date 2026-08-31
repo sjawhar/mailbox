@@ -43,7 +43,7 @@ func TestParseDraftPreservesCRLFBodyBytes(t *testing.T) {
 
 func TestCreateDraftCustody(t *testing.T) {
 	parent := filepath.Join(t.TempDir(), "compose")
-	dir, path, err := CreateDraft(parent, "To: a@b\nSubject: s\n")
+	dir, path, err := CreateDraft(parent, "To: a@b\nSubject: s\n", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestCreateDraftRefusesUnsafeParent(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := CreateDraft(link, ""); err == nil {
+	if _, _, err := CreateDraft(link, "", ""); err == nil {
 		t.Fatal("symlinked parent must be refused")
 	}
 	loose := filepath.Join(base, "loose")
@@ -91,7 +91,7 @@ func TestCreateDraftRefusesUnsafeParent(t *testing.T) {
 	if info, err := os.Stat(loose); err != nil || info.Mode().Perm() != 0o777 {
 		t.Fatalf("fixture mode = %v, %v — want 0777 before the custody check", info.Mode().Perm(), err)
 	}
-	if _, _, err := CreateDraft(loose, ""); err == nil {
+	if _, _, err := CreateDraft(loose, "", ""); err == nil {
 		t.Fatal("group/world-writable parent must be refused")
 	}
 }
@@ -101,7 +101,29 @@ func TestCreateDraftRefusesNonDirectoryParent(t *testing.T) {
 	if err := os.WriteFile(parent, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := CreateDraft(parent, ""); err == nil {
+	if _, _, err := CreateDraft(parent, "", ""); err == nil {
 		t.Fatal("non-directory parent must be refused")
+	}
+}
+
+func TestCreateDraftSeedsBodyByteIdentically(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "compose")
+	want := "seed\r\nbody\n"
+	dir, path, err := CreateDraft(parent, "To: a@b\nSubject: s\n", want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := RemoveDraft(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, found := ParseDraft(content)
+	if !found || body != want {
+		t.Fatalf("seeded draft body = (%q, %t), want (%q, true)", body, found, want)
 	}
 }
