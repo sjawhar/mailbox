@@ -14,10 +14,10 @@ import (
 func runSend(cc *cmdCtx, args []string) int {
 	cf := cc.flags("send")
 	var (
-		to, carbonCopy, blindCarbonCopy                       []string
-		attachPaths                                           []string
-		subject, body, reply, forward, message                string
-		subjectSet, bodySet, replySet, forwardSet, messageSet bool
+		to, carbonCopy, blindCarbonCopy                                 []string
+		attachPaths                                                     []string
+		subject, body, reply, forward, message, draft                   string
+		subjectSet, bodySet, replySet, forwardSet, messageSet, draftSet bool
 	)
 	cf.fs.Func("to", "recipient", func(value string) error {
 		to = append(to, value)
@@ -52,6 +52,10 @@ func runSend(cc *cmdCtx, args []string) int {
 		forward, forwardSet = value, true
 		return nil
 	})
+	cf.fs.Func("draft", "draft id", func(value string) error {
+		draft, draftSet = value, true
+		return nil
+	})
 	cf.fs.Func("message", "message id", func(value string) error {
 		message, messageSet = value, true
 		return nil
@@ -73,8 +77,17 @@ func runSend(cc *cmdCtx, args []string) int {
 	if replySet && forwardSet {
 		return next.failUsage(fmt.Errorf("--reply and --forward are mutually exclusive"))
 	}
+	if draftSet && replySet {
+		return next.failUsage(fmt.Errorf("--draft and --reply are mutually exclusive"))
+	}
+	if draftSet && forwardSet {
+		return next.failUsage(fmt.Errorf("--draft and --forward are mutually exclusive"))
+	}
 	if *saveDraft && *sendNow {
 		return next.failUsage(fmt.Errorf("--save-draft and --send are mutually exclusive"))
+	}
+	if draftSet && *saveDraft {
+		return next.failUsage(fmt.Errorf("--draft and --save-draft are mutually exclusive"))
 	}
 
 	mode, threadRef := send.ModeCompose, ""
@@ -84,7 +97,7 @@ func runSend(cc *cmdCtx, args []string) int {
 	case forwardSet:
 		mode, threadRef = send.ModeForward, forward
 	}
-	if mode == send.ModeCompose && !subjectSet {
+	if mode == send.ModeCompose && !subjectSet && !draftSet {
 		return next.failUsage(fmt.Errorf("compose requires --subject"))
 	}
 	if mode != send.ModeCompose && subjectSet {
@@ -93,14 +106,17 @@ func runSend(cc *cmdCtx, args []string) int {
 	if bodySet && bodyFile != "" {
 		return next.failUsage(fmt.Errorf("--body and --body-file are mutually exclusive"))
 	}
-	if !bodySet && bodyFile == "" {
+	if !bodySet && bodyFile == "" && !draftSet {
 		return next.failUsage(fmt.Errorf("send requires --body or --body-file"))
 	}
-	if mode == send.ModeCompose && messageSet {
+	if mode == send.ModeCompose && messageSet && !draftSet {
 		return next.failUsage(fmt.Errorf("--message is only valid with --reply or --forward"))
 	}
 	if *sendNow && mode != send.ModeCompose && (!messageSet || message == "") {
 		return next.failUsage(fmt.Errorf("--send requires --message=<id> on reply/forward: run the dry-run first and copy the message id it prints (target pinning)"))
+	}
+	if *sendNow && draftSet && (!messageSet || message == "") {
+		return next.failUsage(fmt.Errorf("--send requires --message=<id> on --draft: run the dry-run first and copy the current message id it prints (draft pinning)"))
 	}
 	switch {
 	case body == "-" && bodySet, bodyFile == "-":
@@ -115,6 +131,22 @@ func runSend(cc *cmdCtx, args []string) int {
 			return next.runtimeError("", nil, wrapError("read --body-file", err))
 		}
 		body = string(data)
+		bodySet = true
+	}
+	if draftSet {
+		return runDraftSend(next, draft, draftSendOptions{
+			to:          to,
+			cc:          carbonCopy,
+			bcc:         blindCarbonCopy,
+			subject:     subject,
+			body:        body,
+			subjectSet:  subjectSet,
+			bodySet:     bodySet,
+			attachPaths: attachPaths,
+			message:     message,
+			messageSet:  messageSet,
+			sendNow:     *sendNow,
+		})
 	}
 
 	ctx := context.Background()

@@ -82,6 +82,7 @@ Attachments:
 
 Drafts:
   --save-draft resolves recipients and refusals, renders markdown MIME and attachments, then creates a Gmail draft. It costs a write unlock and is mutually exclusive with --send.
+  --draft <draft-id> resumes a Gmail draft through the same validation and fresh attachment serialization. Its dry-run prints the draft's CURRENT message id; --send --message=<id> pins that id. A server-side edit refuses draft_changed and prints a fresh preview. On decoded success mailbox transmits through messages.send (send class), then deletes the draft (write class). An indeterminate send reports draft_send_unknown and leaves the draft intact. mailbox never calls drafts.send.
 
 A dry-run is the default: resolve the envelope first. Start with the dry run, copy its --message value, then add --send to transmit that exact target. Reply and forward previews select the newest message unless --message selects one; --send requires --message so it pins the exact message within the named thread.
 

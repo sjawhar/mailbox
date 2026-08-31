@@ -149,7 +149,8 @@ func sendCommandHelp() string {
 	output.WriteString("Attachments:\n")
 	output.WriteString("  --attach PATH is repeatable on compose, reply, and forward, including --save-draft and --draft resume. The dry-run reports each part's filename, size, mime_type, and sha256. The final message is capped at 25,000,000 bytes.\n\n")
 	output.WriteString("Drafts:\n")
-	output.WriteString("  --save-draft resolves recipients and refusals, renders markdown MIME and attachments, then creates a Gmail draft. It costs a write unlock and is mutually exclusive with --send.\n\n")
+	output.WriteString("  --save-draft resolves recipients and refusals, renders markdown MIME and attachments, then creates a Gmail draft. It costs a write unlock and is mutually exclusive with --send.\n")
+	output.WriteString("  --draft <draft-id> resumes a Gmail draft through the same validation and fresh attachment serialization. Its dry-run prints the draft's CURRENT message id; --send --message=<id> pins that id. A server-side edit refuses draft_changed and prints a fresh preview. On decoded success mailbox transmits through messages.send (send class), then deletes the draft (write class). An indeterminate send reports draft_send_unknown and leaves the draft intact. mailbox never calls drafts.send.\n\n")
 	output.WriteString("A dry-run is the default: resolve the envelope first. " + sendWorkflow + " Reply and forward previews select the newest message unless --message selects one; --send requires --message so it pins the exact message within the named thread.\n\n")
 	output.WriteString("Refusal rules:\n")
 	for _, rule := range send.RuleDocs() {

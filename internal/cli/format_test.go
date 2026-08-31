@@ -65,6 +65,7 @@ func TestToontestMirrorsMatchRealPayloads(t *testing.T) {
 		openPayload{Account: "s1", ThreadID: "s2", MessageID: "s3", File: "s1"},
 		errorEnvelopeSample("s1", "s2", "s3"),
 		cliErrorPayloadSample("s1", "s2", "s3"),
+		draftChangedPayloadSample("s1", "s2", "s3"),
 		usageErrorPayloadSample("s1", "s2"),
 		envelopePayloadSample("s1", "s2", "s3"),
 	}
@@ -211,6 +212,17 @@ func cliErrorPayloadSample(s1, s2, s3 string) cliErrorPayload {
 	output.Error.Code = s1
 	output.Error.Account = s2
 	output.Error.Message = s3
+	return output
+}
+
+func draftChangedPayloadSample(s1, s2, s3 string) draftChangedPayload {
+	output := draftChangedPayload{}
+	output.Error.Code = s1
+	output.Error.Account = s2
+	output.Error.Message = s3
+	output.Error.Pinned = s1
+	output.Error.Current = s2
+	output.Error.Fresh = envelopePayloadSample(s1, s2, s3)
 	return output
 }
 

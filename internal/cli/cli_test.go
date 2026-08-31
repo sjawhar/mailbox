@@ -48,20 +48,24 @@ type gmailTestServer struct {
 	messages           map[string]map[string]any
 	rawMessages        map[string][]byte
 	sentBodies         []map[string]any
+	sendBearers        []string
 	draftCreates       []draftCreate
 	drafts             map[string]map[string]any
 	draftListIDs       []string
 	draftListMax       string
 	draftReadBearers   []string
+	draftDeleteBearers []string
 	sendStatus         int
+	draftDeleteStatus  int
+	sendGarbage        bool
 	readToken          string
+	writeToken         string
+	sendToken          string
 	rawMessageID       string
 	forbidden          bool
 	readForbidden      bool
 	readFailures       int
-	writeToken         string
 }
-
 type draftCreate struct {
 	Raw      string
 	ThreadID string
@@ -102,8 +106,10 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	g.t.Helper()
 	// Write commands use the configured write credential for every request.
 	if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
-		if (g.readToken == "" || got != "Bearer "+g.readToken) && (g.writeToken == "" || got != "Bearer "+g.writeToken) {
-			g.t.Fatalf("Authorization = %q, want test token", got)
+		if (g.readToken == "" || got != "Bearer "+g.readToken) &&
+			(g.writeToken == "" || got != "Bearer "+g.writeToken) &&
+			(g.sendToken == "" || got != "Bearer "+g.sendToken) {
+			g.t.Fatalf("Authorization = %q, want a configured fixture token", got)
 		}
 	}
 	if r.URL.Path == "/batch/gmail/v1" {
@@ -178,8 +184,8 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/drafts/") && r.Method == http.MethodGet:
 		id := strings.TrimPrefix(r.URL.Path, "/gmail/v1/users/me/drafts/")
 		g.draftReadBearers = append(g.draftReadBearers, r.Header.Get("Authorization"))
-		if r.URL.Query().Get("format") != "metadata" {
-			g.t.Fatalf("draft format = %q, want metadata", r.URL.Query().Get("format"))
+		if format := r.URL.Query().Get("format"); format != "metadata" && format != "full" {
+			g.t.Fatalf("draft format = %q, want metadata or full", format)
 		}
 		draft, ok := g.drafts[id]
 		if !ok {
@@ -187,6 +193,15 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeResponse(g.t, w, http.StatusOK, draft)
+	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/drafts/") && r.Method == http.MethodDelete:
+		id := strings.TrimPrefix(r.URL.Path, "/gmail/v1/users/me/drafts/")
+		g.draftDeleteBearers = append(g.draftDeleteBearers, r.Header.Get("Authorization"))
+		if g.draftDeleteStatus != 0 && g.draftDeleteStatus != http.StatusOK {
+			writeResponse(g.t, w, g.draftDeleteStatus, googleError(g.draftDeleteStatus, "deleteFailed"))
+			return
+		}
+		delete(g.drafts, id)
+		writeResponse(g.t, w, http.StatusOK, map[string]any{})
 	case r.URL.Path == "/gmail/v1/users/me/drafts" && r.Method == http.MethodPost:
 		var body struct {
 			Message struct {
@@ -212,6 +227,14 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 			g.t.Fatalf("decode sent message body: %v", err)
 		}
 		g.sentBodies = append(g.sentBodies, body)
+		g.sendBearers = append(g.sendBearers, r.Header.Get("Authorization"))
+		if g.sendGarbage {
+			g.sendGarbage = false
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "not-json")
+			return
+		}
 		if g.sendStatus != 0 && g.sendStatus != http.StatusOK {
 			status := g.sendStatus
 			g.sendStatus = 0
@@ -246,6 +269,7 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		writeResponse(g.t, w, http.StatusOK, map[string]any{"labels": g.labels})
 	case strings.Contains(r.URL.Path, "/attachments/"):
 		id := filepath.Base(r.URL.Path)
+		g.draftReadBearers = append(g.draftReadBearers, r.Header.Get("Authorization"))
 		contents, ok := g.attachmentBytes[id]
 		if !ok {
 			writeResponse(g.t, w, http.StatusNotFound, googleError(http.StatusNotFound, "notFound"))
@@ -507,6 +531,104 @@ func configureDraftListing(g *gmailTestServer) {
 			},
 		},
 	}
+}
+
+func (g *gmailTestServer) draftMessage(id string) map[string]any {
+	g.t.Helper()
+	draft, ok := g.drafts[id]
+	if !ok {
+		g.t.Fatalf("fixture draft %q does not exist", id)
+	}
+	message, ok := draft["message"].(map[string]any)
+	if !ok {
+		g.t.Fatalf("fixture draft %q has no message", id)
+	}
+	return message
+}
+
+func (g *gmailTestServer) draftPayload(id string) map[string]any {
+	g.t.Helper()
+	payload, ok := g.draftMessage(id)["payload"].(map[string]any)
+	if !ok {
+		g.t.Fatalf("fixture draft %q has no payload", id)
+	}
+	return payload
+}
+
+func (g *gmailTestServer) rotateDraft(id string) {
+	g.t.Helper()
+	message := g.draftMessage(id)
+	current, ok := message["id"].(string)
+	if !ok {
+		g.t.Fatalf("fixture draft %q message has no id", id)
+	}
+	message["id"] = current + "r"
+}
+
+func (g *gmailTestServer) armSendGarbage() {
+	g.sendGarbage = true
+}
+
+func (g *gmailTestServer) sendCalls() int {
+	return len(g.sentBodies)
+}
+
+func (g *gmailTestServer) draftDeletes() int {
+	return len(g.draftDeleteBearers)
+}
+
+func (g *gmailTestServer) draftExists(id string) bool {
+	_, ok := g.drafts[id]
+	return ok
+}
+
+func (g *gmailTestServer) sendRequestBearers() []string {
+	return g.sendBearers
+}
+
+func (g *gmailTestServer) draftDeleteRequestBearers() []string {
+	return g.draftDeleteBearers
+}
+
+func (g *gmailTestServer) setDraftHeader(id, name, value string) {
+	g.t.Helper()
+	headers, ok := g.draftPayload(id)["headers"].([]map[string]any)
+	if !ok {
+		g.t.Fatalf("fixture draft %q has no headers", id)
+	}
+	for _, header := range headers {
+		if strings.EqualFold(header["name"].(string), name) {
+			header["value"] = value
+			return
+		}
+	}
+	g.draftPayload(id)["headers"] = append(headers, map[string]any{"name": name, "value": value})
+}
+
+func (g *gmailTestServer) setDraftSubject(id, value string) {
+	g.setDraftHeader(id, "Subject", value)
+}
+
+func (g *gmailTestServer) setDraftAttachmentName(id, value string) {
+	g.t.Helper()
+	parts, ok := g.draftPayload(id)["parts"].([]map[string]any)
+	if !ok || len(parts) < 2 {
+		g.t.Fatalf("fixture draft %q has no carried attachment", id)
+	}
+	parts[1]["filename"] = value
+}
+
+func (g *gmailTestServer) setDraftBody(id, value string) {
+	g.t.Helper()
+	parts, ok := g.draftPayload(id)["parts"].([]map[string]any)
+	if !ok || len(parts) == 0 {
+		g.t.Fatalf("fixture draft %q has no text part", id)
+	}
+	body, ok := parts[0]["body"].(map[string]any)
+	if !ok {
+		g.t.Fatalf("fixture draft %q text part has no body", id)
+	}
+	body["data"] = base64.RawURLEncoding.EncodeToString([]byte(value))
 }
 
 func attachmentFixtureBytes(id string) []byte {
@@ -1428,6 +1550,10 @@ func TestCommandHelpDocumentsReadSearchAndSend(t *testing.T) {
 		"dry-run",
 		"--message",
 		"--send",
+		"--draft <draft-id>",
+		"draft_changed",
+		"draft_send_unknown",
+		"drafts.send",
 		"R1",
 		"R2",
 		"R3",
