@@ -320,7 +320,10 @@ func (g *fakeGmail) serveDraftList(w http.ResponseWriter, request *http.Request)
 	drafts := make([]map[string]any, 0, max)
 	for index := len(g.draftOrder) - 1; index >= 0 && len(drafts) < max; index-- {
 		id := g.draftOrder[index]
-		draft := g.drafts[id]
+		draft, ok := g.drafts[id]
+		if !ok {
+			continue
+		}
 		drafts = append(drafts, map[string]any{
 			"id": id,
 			"message": map[string]any{
