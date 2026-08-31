@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/mail"
 	"net/textproto"
@@ -24,12 +25,17 @@ func BuildMIME(env *Envelope, original []byte, boundary string) ([]byte, error) 
 		if original == nil {
 			return nil, errors.New("send: forward original is required")
 		}
-		return buildForwardMIME(env, original, boundary, "")
-	}
-	if original != nil {
+	} else if original != nil {
 		return nil, errors.New("send: original is only valid for forwards")
 	}
-	return buildAlternativeMIME(env, boundary)
+	if len(env.Attachments) == 0 {
+		if env.Mode == ModeForward {
+			return buildForwardMIME(env, original, boundary, "")
+		}
+		return buildAlternativeMIME(env, boundary)
+	}
+	message, _, err := buildMixedMIME(env, original, boundary, "")
+	return message, err
 }
 
 func buildAlternativeMIME(env *Envelope, boundary string) ([]byte, error) {
@@ -99,45 +105,89 @@ func alternativeBody(markdown, boundary string) ([]byte, string, error) {
 }
 
 func buildForwardMIME(env *Envelope, original []byte, boundary, alternativeBoundary string) ([]byte, error) {
+	message, _, err := buildMixedMIME(env, original, boundary, alternativeBoundary)
+	return message, err
+}
+
+func buildMixedMIME(env *Envelope, original []byte, boundary, alternativeBoundary string) ([]byte, string, error) {
 	var out bytes.Buffer
 	writer := multipart.NewWriter(&out)
 	if boundary != "" {
 		if err := writer.SetBoundary(boundary); err != nil {
-			return nil, fmt.Errorf("send: multipart boundary: %w", err)
+			return nil, "", fmt.Errorf("send: multipart boundary: %w", err)
 		}
 	}
 
 	if err := writeRecipientHeaders(&out, env); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	writeHeader(&out, "Subject", env.Subject)
+	if env.Mode == ModeReply {
+		if env.InReplyTo != "" {
+			writeHeader(&out, "In-Reply-To", env.InReplyTo)
+		}
+		if len(env.References) > 0 {
+			writeHeader(&out, "References", strings.Join(env.References, " "))
+		}
+	}
 	writeHeader(&out, "MIME-Version", "1.0")
 	writeHeader(&out, "Content-Type", `multipart/mixed; boundary="`+writer.Boundary()+`"`)
 	out.WriteString("\r\n")
 
 	bodyContent, bodyContentType, err := alternativeBody(env.Body, alternativeBoundary)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	bodyPart, err := writer.CreatePart(textproto.MIMEHeader{"Content-Type": {bodyContentType}})
 	if err != nil {
-		return nil, fmt.Errorf("send: create alternative MIME part: %w", err)
+		return nil, "", fmt.Errorf("send: create alternative MIME part: %w", err)
 	}
 	if _, err := bodyPart.Write(bodyContent); err != nil {
-		return nil, fmt.Errorf("send: write alternative MIME part: %w", err)
+		return nil, "", fmt.Errorf("send: write alternative MIME part: %w", err)
 	}
-
-	originalPart, err := writer.CreatePart(originalPartHeader())
-	if err != nil {
-		return nil, fmt.Errorf("send: create original MIME part: %w", err)
+	if original != nil {
+		originalPart, err := writer.CreatePart(originalPartHeader())
+		if err != nil {
+			return nil, "", fmt.Errorf("send: create original MIME part: %w", err)
+		}
+		if err := writeBase64(originalPart, original); err != nil {
+			return nil, "", fmt.Errorf("send: encode original MIME part: %w", err)
+		}
 	}
-	if err := writeBase64(originalPart, original); err != nil {
-		return nil, fmt.Errorf("send: encode original MIME part: %w", err)
+	for _, attachment := range env.Attachments {
+		part, err := writer.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {attachment.MIMEType},
+			"Content-Disposition":       {mime.FormatMediaType("attachment", map[string]string{"filename": attachment.Filename})},
+			"Content-Transfer-Encoding": {"base64"},
+		})
+		if err != nil {
+			return nil, "", fmt.Errorf("send: create attachment part: %w", err)
+		}
+		if err := writeBase64(part, attachment.Content); err != nil {
+			return nil, "", fmt.Errorf("send: encode attachment part: %w", err)
+		}
 	}
 	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("send: close multipart MIME: %w", err)
+		return nil, "", fmt.Errorf("send: close multipart MIME: %w", err)
 	}
-	return out.Bytes(), nil
+	return out.Bytes(), writer.Boundary(), nil
+}
+
+func buildMixedBase(env *Envelope, original []byte, boundary string) ([]byte, string, error) {
+	if env == nil {
+		return nil, "", errors.New("send: MIME envelope is required")
+	}
+	if err := validateHeaderValues(env); err != nil {
+		return nil, "", err
+	}
+	if env.Mode == ModeForward {
+		if original == nil {
+			return nil, "", errors.New("send: forward original is required")
+		}
+	} else if original != nil {
+		return nil, "", errors.New("send: original is only valid for forwards")
+	}
+	return buildMixedMIME(env, original, boundary, "")
 }
 
 func writeRecipientHeaders(out *bytes.Buffer, env *Envelope) error {
@@ -219,6 +269,11 @@ func validateHeaderValues(env *Envelope) error {
 			if strings.ContainsAny(recipient.Address, "\r\n") || strings.ContainsAny(recipient.Display, "\r\n") {
 				return errors.New("send: header value contains CR or LF")
 			}
+		}
+	}
+	for _, attachment := range env.Attachments {
+		if strings.ContainsAny(attachment.Filename, "\r\n") || strings.ContainsAny(attachment.MIMEType, "\r\n") {
+			return errors.New("send: header value contains CR or LF")
 		}
 	}
 	return nil

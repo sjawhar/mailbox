@@ -27,24 +27,35 @@ type SentPayload struct {
 	ThreadID string `json:"threadId"`
 }
 
+// AttachmentPayload is the machine-readable report for an outbound attachment.
+// Its body is intentionally omitted; only the resolved metadata is exposed.
+type AttachmentPayload struct {
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
+	MIMEType string `json:"mime_type"`
+	SHA256   string `json:"sha256"`
+}
+
 // EnvelopePayload is the shared JSON and TOON shape for a resolved or sent envelope.
 type EnvelopePayload struct {
-	Account    string             `json:"account"`
-	Mode       string             `json:"mode"`
-	ThreadID   string             `json:"threadId,omitempty"`
-	Message    string             `json:"message,omitempty"`
-	To         []RecipientPayload `json:"to"`
-	Cc         []RecipientPayload `json:"cc"`
-	Bcc        []RecipientPayload `json:"bcc"`
-	Subject    string             `json:"subject"`
-	BodyBytes  int                `json:"bodyBytes"`
-	InReplyTo  string             `json:"inReplyTo,omitempty"`
-	References []string           `json:"references,omitempty"`
-	Forward    *ForwardPayload    `json:"forward,omitempty"`
-	Sendable   bool               `json:"sendable"`
-	Sent       *SentPayload       `json:"sent,omitempty"`
-	Scope      string             `json:"scope,omitempty"`
-	Warning    string             `json:"warning,omitempty"`
+	Account     string              `json:"account"`
+	Mode        string              `json:"mode"`
+	ThreadID    string              `json:"threadId,omitempty"`
+	Message     string              `json:"message,omitempty"`
+	To          []RecipientPayload  `json:"to"`
+	Cc          []RecipientPayload  `json:"cc"`
+	Bcc         []RecipientPayload  `json:"bcc"`
+	Subject     string              `json:"subject"`
+	BodyBytes   int                 `json:"bodyBytes"`
+	InReplyTo   string              `json:"inReplyTo,omitempty"`
+	References  []string            `json:"references,omitempty"`
+	Forward     *ForwardPayload     `json:"forward,omitempty"`
+	Sendable    bool                `json:"sendable"`
+	Sent        *SentPayload        `json:"sent,omitempty"`
+	Scope       string              `json:"scope,omitempty"`
+	Warning     string              `json:"warning,omitempty"`
+	Attachments []AttachmentPayload `json:"attachments,omitempty"`
+	DraftID     string              `json:"draft_id,omitempty"`
 }
 
 // RefusalPayload is the shared JSON and TOON shape for a send refusal.
@@ -69,6 +80,9 @@ func RuleDocs() []struct{ Rule, Code, Doc string } {
 		{Rule: "R4", Code: "header_injection", Doc: "A subject or recipient contains CR or LF."},
 		{Rule: "R5", Code: "empty_body", Doc: "The message body is empty."},
 		{Rule: "R6", Code: "needs_explicit_recipient", Doc: "Reply-To differs from From; provide --to or --cc."},
+		{Rule: "R-A1", Code: "attachment_unreadable", Doc: "An --attach path does not exist or cannot be read."},
+		{Rule: "R-A2", Code: "attachment_empty", Doc: "An --attach file is empty."},
+		{Rule: "R-A3", Code: "attachment_too_large", Doc: "The final MIME message exceeds 25,000,000 bytes."},
 	}
 }
 
@@ -94,6 +108,10 @@ func RenderText(w io.Writer, account string, env *Envelope, forwardOriginalBytes
 	renderRecipientRows(w, "bcc", env.Bcc)
 	fmt.Fprintf(w, "subject: %s\n", VisibleOneLine(env.Subject))
 	fmt.Fprintf(w, "body: %d bytes\n", len([]byte(env.Body)))
+	for _, attachment := range env.Attachments {
+		fmt.Fprintf(w, "attachment: %s (%d bytes, %s) sha256=%s\n",
+			VisibleOneLine(attachment.Filename), len(attachment.Content), VisibleOneLine(attachment.MIMEType), attachment.SHA256)
+	}
 	if env.InReplyTo != "" {
 		fmt.Fprintf(w, "in-reply-to: %s\n", VisibleOneLine(env.InReplyTo))
 	}
@@ -133,6 +151,17 @@ func Payload(account string, env *Envelope, forwardBytes int) EnvelopePayload {
 		InReplyTo:  env.InReplyTo,
 		References: env.References,
 		Sendable:   true,
+	}
+	if len(env.Attachments) > 0 {
+		payload.Attachments = make([]AttachmentPayload, len(env.Attachments))
+		for i, attachment := range env.Attachments {
+			payload.Attachments[i] = AttachmentPayload{
+				Filename: attachment.Filename,
+				Size:     int64(len(attachment.Content)),
+				MIMEType: attachment.MIMEType,
+				SHA256:   attachment.SHA256,
+			}
+		}
 	}
 	if env.Mode == ModeForward {
 		payload.Forward = &ForwardPayload{
