@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/render"
+	"github.com/sjawhar/mailbox/internal/send"
 	"github.com/sjawhar/mailbox/internal/toon/toontest"
 )
 
@@ -63,6 +64,7 @@ func TestToontestMirrorsMatchRealPayloads(t *testing.T) {
 		openPayload{Account: "s1", ThreadID: "s2", MessageID: "s3", File: "s1"},
 		errorEnvelopeSample("s1", "s2", "s3"),
 		usageErrorPayloadSample("s1", "s2"),
+		envelopePayloadSample("s1", "s2", "s3"),
 	}
 	mirrors := toontest.Shapes("s1", "s2", "s3")
 	if len(real) != len(mirrors) {
@@ -194,6 +196,34 @@ func usageErrorPayloadSample(s1, s2 string) usageErrorPayload {
 	output.Error.Code = s1
 	output.Error.Message = s2
 	return output
+}
+
+func envelopePayloadSample(s1, s2, s3 string) send.EnvelopePayload {
+	return send.EnvelopePayload{
+		Account:    s1,
+		Mode:       s2,
+		ThreadID:   s3,
+		Message:    s1,
+		To:         []send.RecipientPayload{{Address: s1, Name: s2, Provenance: s3}},
+		Cc:         []send.RecipientPayload{{Address: s2, Name: s3, Provenance: s1}},
+		Bcc:        []send.RecipientPayload{{Address: s3, Name: s1, Provenance: s2}},
+		Subject:    s1,
+		BodyBytes:  7,
+		InReplyTo:  s2,
+		References: []string{s1, s3},
+		Forward:    &send.ForwardPayload{OriginalBytes: 7, Disclosure: s2},
+		Sendable:   true,
+		Sent:       &send.SentPayload{ID: s1, ThreadID: s2},
+		Scope:      s3,
+		Warning:    s1,
+		Attachments: []send.AttachmentPayload{{
+			Filename: s1,
+			Size:     7,
+			MIMEType: s2,
+			SHA256:   s3,
+		}},
+		DraftID: s3,
+	}
 }
 
 func TestNeedsCredentialDefaultsToTOON(t *testing.T) {

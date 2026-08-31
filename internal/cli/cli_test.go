@@ -48,6 +48,7 @@ type gmailTestServer struct {
 	messages           map[string]map[string]any
 	rawMessages        map[string][]byte
 	sentBodies         []map[string]any
+	draftCreates       []draftCreate
 	sendStatus         int
 	readToken          string
 	rawMessageID       string
@@ -55,6 +56,12 @@ type gmailTestServer struct {
 	readForbidden      bool
 	readFailures       int
 	writeToken         string
+}
+
+type draftCreate struct {
+	Raw      string
+	ThreadID string
+	Bearer   string
 }
 
 type scriptedResponse struct {
@@ -156,6 +163,25 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		default:
 			writeResponse(g.t, w, http.StatusOK, message)
 		}
+	case r.URL.Path == "/gmail/v1/users/me/drafts" && r.Method == http.MethodPost:
+		var body struct {
+			Message struct {
+				Raw      string `json:"raw"`
+				ThreadID string `json:"threadId"`
+			} `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			g.t.Fatalf("decode draft body: %v", err)
+		}
+		g.draftCreates = append(g.draftCreates, draftCreate{
+			Raw:      body.Message.Raw,
+			ThreadID: body.Message.ThreadID,
+			Bearer:   r.Header.Get("Authorization"),
+		})
+		writeResponse(g.t, w, http.StatusOK, map[string]any{
+			"id":      "d-1",
+			"message": map[string]any{"id": "m-d-1", "threadId": body.Message.ThreadID},
+		})
 	case r.URL.Path == "/gmail/v1/users/me/messages/send" && r.Method == http.MethodPost:
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

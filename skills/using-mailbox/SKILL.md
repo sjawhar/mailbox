@@ -21,7 +21,7 @@ Use `mailbox` for one-shot Gmail triage commands. Run `mailbox <command> --help`
 | `label` | `mailbox label [--filter NAME] [--text\|--json] <add\|rm> <label> [<thread>...]` | add or remove a label |
 | `attachment` | `mailbox attachment [-o PATH] [--text\|--json] <thread> [attachment]` | list or save attachments |
 | `status` | `mailbox status [--text\|--json]` | show configured account status |
-| `send` | `mailbox send [options]` | compose, reply, or forward mail (dry-run by default) |
+| `send` | `mailbox send [--attach PATH]... [--save-draft\|--send] [options]` | compose, reply, or forward mail (dry-run by default) |
 
 ### `inbox`
 
@@ -71,6 +71,12 @@ Compose:
   mailbox send --forward=<thread-id> --to a@x --body TEXT [--message=<id>]  # forward
 
 The body comes from exactly one of: --body TEXT, --body - (stdin), or --body-file PATH (- for stdin) — file input suits agent-drafted content.
+
+Attachments:
+  --attach PATH is repeatable on compose, reply, and forward, including --save-draft and --draft resume. The dry-run reports each part's filename, size, mime_type, and sha256. The final message is capped at 25,000,000 bytes.
+
+Drafts:
+  --save-draft resolves recipients and refusals, renders markdown MIME and attachments, then creates a Gmail draft. It costs a write unlock and is mutually exclusive with --send.
 
 A dry-run is the default: resolve the envelope first. Start with the dry run, copy its --message value, then add --send to transmit that exact target. Reply and forward previews select the newest message unless --message selects one; --send requires --message so it pins the exact message within the named thread.
 

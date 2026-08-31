@@ -125,7 +125,7 @@ func commandSpecs() []commandSpec {
 		{
 			name:        "send",
 			description: "compose, reply, or forward mail (dry-run by default)",
-			usage:       "mailbox send [options]",
+			usage:       "mailbox send [--attach PATH]... [--save-draft|--send] [options]",
 			help:        sendCommandHelp(),
 			run:         runSend,
 		},
@@ -139,6 +139,10 @@ func sendCommandHelp() string {
 	output.WriteString("  mailbox send --reply=<thread-id>  --body TEXT [--message=<id>] [--to ...] # reply\n")
 	output.WriteString("  mailbox send --forward=<thread-id> --to a@x --body TEXT [--message=<id>]  # forward\n\n")
 	output.WriteString("The body comes from exactly one of: --body TEXT, --body - (stdin), or --body-file PATH (- for stdin) — file input suits agent-drafted content.\n\n")
+	output.WriteString("Attachments:\n")
+	output.WriteString("  --attach PATH is repeatable on compose, reply, and forward, including --save-draft and --draft resume. The dry-run reports each part's filename, size, mime_type, and sha256. The final message is capped at 25,000,000 bytes.\n\n")
+	output.WriteString("Drafts:\n")
+	output.WriteString("  --save-draft resolves recipients and refusals, renders markdown MIME and attachments, then creates a Gmail draft. It costs a write unlock and is mutually exclusive with --send.\n\n")
 	output.WriteString("A dry-run is the default: resolve the envelope first. " + sendWorkflow + " Reply and forward previews select the newest message unless --message selects one; --send requires --message so it pins the exact message within the named thread.\n\n")
 	output.WriteString("Refusal rules:\n")
 	for _, rule := range send.RuleDocs() {
@@ -323,6 +327,17 @@ func (cc *cmdCtx) start() (string, *auth.Source, *gmail.Client, int) {
 	source := auth.NewSource(cc.cfg, acct)
 	client := gmail.NewClient(gmail.ClientConfig{Read: source.ReadCredentials(auth.BatchAcquirer(cc.cfg, acct, auth.ClassRead)), Account: acct.Name})
 	return acct.Name, source, client, 0
+}
+
+func (cc *cmdCtx) acquireWrite(source *auth.Source) (*gmail.Client, int) {
+	if _, err := source.WriteToken(context.Background(), auth.BatchAcquirer(cc.cfg, cc.acct, auth.ClassWrite)); err != nil {
+		return nil, cc.writeRuntimeError(cc.acct.Name, source, err)
+	}
+	return gmail.NewClient(gmail.ClientConfig{
+		Read:    source.ReadCredentials(auth.BatchAcquirer(cc.cfg, cc.acct, auth.ClassRead)),
+		Write:   source.WriteCredentials(),
+		Account: cc.acct.Name,
+	}), 0
 }
 
 func (cc *cmdCtx) startWrite() (string, *auth.Source, *gmail.Client, int) {
