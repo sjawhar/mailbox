@@ -4,9 +4,9 @@ import "time"
 
 // Shapes returns one fully-populated instance per mailbox payload shape:
 // listing, read thread, status, action result, attachment list, attachment
-// save, open, credential error envelope, usage error envelope, and send
-// envelope. These mirror internal/cli's unexported JSON payloads; its contract
-// test pins them field-for-field.
+// save, drafts listing, open, credential error envelope, usage error envelope,
+// and send envelope. These mirror internal/cli's unexported JSON payloads; its
+// contract test pins them field-for-field.
 func Shapes(s1, s2, s3 string) []any {
 	return []any{
 		listingPayload{Account: s1, Filter: s2, Threads: []threadRow{{N: 1, ID: s2, Subject: s3, From: s1, Date: s2, Snippet: s3, Unread: true, Labels: []string{s1}}}},
@@ -44,6 +44,7 @@ func Shapes(s1, s2, s3 string) []any {
 		filterActionPayload{Account: s1, Action: s2, Filter: s3, Matched: 1, Attempted: 1, Succeeded: []string{s1}, Failed: []filterActionFailure{{ID: s2, Status: 7, Reason: s3}}, OK: true},
 		attachmentListPayload{Account: s1, Message: s2, Attachments: []attachmentRow{{Index: 7, Filename: s3, MIMEType: s1, Size: 7}}},
 		attachmentSavePayload{Account: s1, Path: s2, Filename: s3, Size: 7, SHA256: s1},
+		draftsPayload{Account: s1, Drafts: []draftRow{{DraftID: s2, ThreadID: s3, To: s1, Subject: s2, Updated: s3}}},
 		openPayload{Account: s1, ThreadID: s2, MessageID: s3, File: s1},
 		errorEnvelope{Error: errorDetail{Code: s1, Account: s2, ConfigKey: s3, Config: s1}},
 		cliErrorPayload{Error: cliErrorDetail{Code: s1, Account: s2, Message: s3}},
@@ -203,6 +204,19 @@ type attachmentSavePayload struct {
 	Filename string `json:"filename"`
 	Size     int64  `json:"size"`
 	SHA256   string `json:"sha256"`
+}
+
+type draftsPayload struct {
+	Account string     `json:"account"`
+	Drafts  []draftRow `json:"drafts"`
+}
+
+type draftRow struct {
+	DraftID  string `json:"draft_id"`
+	ThreadID string `json:"thread_id"`
+	To       string `json:"to"`
+	Subject  string `json:"subject"`
+	Updated  string `json:"updated"`
 }
 
 type openPayload struct {

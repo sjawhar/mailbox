@@ -116,6 +116,13 @@ func commandSpecs() []commandSpec {
 			run:         runAttachment,
 		},
 		{
+			name:        "drafts",
+			description: "list Gmail drafts",
+			usage:       "mailbox drafts [--max N] [--text|--json]",
+			help:        "Lists Gmail server-side drafts newest-first: draft_id, thread_id, to, subject, updated. --max sets 1–500 rows (default 25). Listing is read-class (no unlock). Resume one with 'mailbox send --draft <draft_id>'.",
+			run:         runDrafts,
+		},
+		{
 			name:        "status",
 			description: "show configured account status",
 			usage:       "mailbox status [--text|--json]",

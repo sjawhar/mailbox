@@ -61,6 +61,7 @@ func TestToontestMirrorsMatchRealPayloads(t *testing.T) {
 		filterActionPayload{Account: "s1", Action: "s2", Filter: "s3", Matched: 1, Attempted: 1, Succeeded: []string{"s1"}, Failed: []filterActionFailure{{ID: "s2", Status: 7, Reason: "s3"}}, OK: true},
 		attachmentListSample("s1", "s2", "s3"),
 		attachmentSavePayload{Account: "s1", Path: "s2", Filename: "s3", Size: 7, SHA256: "s1"},
+		draftsPayloadSample("s1", "s2", "s3"),
 		openPayload{Account: "s1", ThreadID: "s2", MessageID: "s3", File: "s1"},
 		errorEnvelopeSample("s1", "s2", "s3"),
 		cliErrorPayloadSample("s1", "s2", "s3"),
@@ -180,6 +181,19 @@ func attachmentListSample(s1, s2, s3 string) attachmentListPayload {
 		Account:     s1,
 		Message:     s2,
 		Attachments: []attachmentRow{{Index: 7, Filename: s3, MIMEType: s1, Size: 7}},
+	}
+}
+
+func draftsPayloadSample(s1, s2, s3 string) draftsPayload {
+	return draftsPayload{
+		Account: s1,
+		Drafts: []draftRow{{
+			DraftID:  s2,
+			ThreadID: s3,
+			To:       s1,
+			Subject:  s2,
+			Updated:  s3,
+		}},
 	}
 }
 

@@ -49,6 +49,10 @@ type gmailTestServer struct {
 	rawMessages        map[string][]byte
 	sentBodies         []map[string]any
 	draftCreates       []draftCreate
+	drafts             map[string]map[string]any
+	draftListIDs       []string
+	draftListMax       string
+	draftReadBearers   []string
 	sendStatus         int
 	readToken          string
 	rawMessageID       string
@@ -163,6 +167,26 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 		default:
 			writeResponse(g.t, w, http.StatusOK, message)
 		}
+	case r.URL.Path == "/gmail/v1/users/me/drafts" && r.Method == http.MethodGet:
+		g.draftListMax = r.URL.Query().Get("maxResults")
+		drafts := make([]map[string]any, len(g.draftListIDs))
+		g.draftReadBearers = append(g.draftReadBearers, r.Header.Get("Authorization"))
+		for i, id := range g.draftListIDs {
+			drafts[i] = map[string]any{"id": id}
+		}
+		writeResponse(g.t, w, http.StatusOK, map[string]any{"drafts": drafts})
+	case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/drafts/") && r.Method == http.MethodGet:
+		id := strings.TrimPrefix(r.URL.Path, "/gmail/v1/users/me/drafts/")
+		g.draftReadBearers = append(g.draftReadBearers, r.Header.Get("Authorization"))
+		if r.URL.Query().Get("format") != "metadata" {
+			g.t.Fatalf("draft format = %q, want metadata", r.URL.Query().Get("format"))
+		}
+		draft, ok := g.drafts[id]
+		if !ok {
+			writeResponse(g.t, w, http.StatusNotFound, googleError(http.StatusNotFound, "notFound"))
+			return
+		}
+		writeResponse(g.t, w, http.StatusOK, draft)
 	case r.URL.Path == "/gmail/v1/users/me/drafts" && r.Method == http.MethodPost:
 		var body struct {
 			Message struct {
@@ -448,6 +472,40 @@ func configureAttachmentMessage(g *gmailTestServer) {
 	g.attachmentBytes = map[string][]byte{
 		"a-evil": attachmentFixtureBytes("a-evil"),
 		"a-ok":   attachmentFixtureBytes("a-ok"),
+	}
+}
+
+func configureDraftListing(g *gmailTestServer) {
+	g.draftListIDs = []string{"d-old", "d-new"}
+	g.drafts = map[string]map[string]any{
+		"d-old": {
+			"id": "d-old",
+			"message": map[string]any{
+				"id":           "m-old",
+				"threadId":     "t-old",
+				"internalDate": "1000",
+				"payload": map[string]any{
+					"headers": []map[string]any{
+						{"name": "To", "value": "A <a@example.test>"},
+						{"name": "Subject", "value": "old"},
+					},
+				},
+			},
+		},
+		"d-new": {
+			"id": "d-new",
+			"message": map[string]any{
+				"id":           "m-new",
+				"threadId":     "t-new",
+				"internalDate": "2000",
+				"payload": map[string]any{
+					"headers": []map[string]any{
+						{"name": "To", "value": "\x1b]0;pwn\x07\x1bP+q\x1b\\ \u202eevil\r\ninjected\tcol <e@example.test>"},
+						{"name": "Subject", "value": "new"},
+					},
+				},
+			},
+		},
 	}
 }
 

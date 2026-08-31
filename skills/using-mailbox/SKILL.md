@@ -20,6 +20,7 @@ Use `mailbox` for one-shot Gmail triage commands. Run `mailbox <command> --help`
 | `mark` | `mailbox mark [--filter NAME] [--text\|--json] <read\|unread> [<thread>...]` | mark threads read or unread |
 | `label` | `mailbox label [--filter NAME] [--text\|--json] <add\|rm> <label> [<thread>...]` | add or remove a label |
 | `attachment` | `mailbox attachment [-o PATH\|-o -] [--text\|--json] <message-id> [filename\|index]` | list or fetch message attachments |
+| `drafts` | `mailbox drafts [--max N] [--text\|--json]` | list Gmail drafts |
 | `status` | `mailbox status [--text\|--json]` | show configured account status |
 | `send` | `mailbox send [--attach PATH]... [--save-draft\|--send] [options]` | compose, reply, or forward mail (dry-run by default) |
 
@@ -58,6 +59,10 @@ Adds or removes one Gmail label on one or more threads, or every inbox thread ma
 ### `attachment`
 
 Lists a message's attachments from 'read' output, or fetches one. Listings use zero-based indexes and sanitized filenames; select an exact listed filename or zero-based index. Downloads never overwrite existing files (attachment_exists); use -o to choose another file or directory. -o - streams raw bytes to stdout and writes status to stderr, without machine-format wrapping.
+
+### `drafts`
+
+Lists Gmail server-side drafts newest-first: draft_id, thread_id, to, subject, updated. --max sets 1–500 rows (default 25). Listing is read-class (no unlock). Resume one with 'mailbox send --draft <draft_id>'.
 
 ### `status`
 
