@@ -1669,6 +1669,120 @@ func TestInvalidGlobalFlagRemainsUsageError(t *testing.T) {
 	}
 }
 
+func TestCommandUsageErrorsPrintTheirOwnHelp(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		diagnostic string
+		usage      string
+		help       string
+	}{
+		{
+			name:       "send positional",
+			args:       []string{"send", "reply", "t123"},
+			diagnostic: "send requires 0 argument(s)",
+			usage:      "usage: mailbox send [--attach PATH]... [--save-draft|--send] [options]",
+			help:       "Compose:",
+		},
+		{
+			name:       "attachment selector count",
+			args:       []string{"attachment", "m1", "report.pdf", "extra"},
+			diagnostic: "attachment requires 1 to 2 argument(s)",
+			usage:      "usage: mailbox attachment [-o PATH|-o -] [--text|--json] <message-id> [filename|index]",
+			help:       "Listings use zero-based indexes",
+		},
+		{
+			name:       "drafts positional",
+			args:       []string{"drafts", "extra"},
+			diagnostic: "drafts requires 0 argument(s)",
+			usage:      "usage: mailbox drafts [--max N] [--text|--json]",
+			help:       "Lists Gmail server-side drafts newest-first",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := Run(c.args, &stdout, &stderr); code != 2 {
+				t.Fatalf("Run(%v) = %d, want 2", c.args, code)
+			}
+
+			got := stderr.String()
+			if !strings.Contains(got, "mailbox: "+c.diagnostic) {
+				t.Fatalf("stderr = %q, want diagnostic %q", got, c.diagnostic)
+			}
+			if !strings.Contains(got, c.usage) {
+				t.Fatalf("stderr = %q, want command usage %q", got, c.usage)
+			}
+			if !strings.Contains(got, c.help) {
+				t.Fatalf("stderr = %q, want command help %q", got, c.help)
+			}
+			if strings.Contains(got, "global flags:") {
+				t.Fatalf("stderr must not include global help: %q", got)
+			}
+
+			wantHelp := commandHelp(t, c.args[0])
+			gotHelp := strings.TrimPrefix(got, "mailbox: "+c.diagnostic+"\n")
+			if gotHelp != wantHelp {
+				t.Fatalf("stderr help = %q, want %q", gotHelp, wantHelp)
+			}
+		})
+	}
+}
+
+func TestMintUsageErrorPrintsHiddenCommandUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"__mint"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("Run(__mint) = %d, want 2", code)
+	}
+
+	got := stderr.String()
+	const wantDiagnostic = "mailbox: __mint requires --env VAR\n"
+	const wantUsage = "usage: mailbox __mint --env VAR\n"
+	if !strings.HasPrefix(got, wantDiagnostic+wantUsage) {
+		t.Fatalf("stderr = %q, want diagnostic and command usage", got)
+	}
+	if strings.Contains(got, "global flags:") {
+		t.Fatalf("stderr must not include global help: %q", got)
+	}
+}
+
+func TestGlobalHelpOmitsMint(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("Run(--help) = %d, want 0", code)
+	}
+	if strings.Contains(stdout.String(), "__mint") {
+		t.Fatalf("global help must omit __mint: %q", stdout.String())
+	}
+}
+
+func TestCommandUsageErrorsKeepMachineEnvelope(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"--json", "send", "reply", "t123"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("Run(--json send reply t123) = %d, want 2", code)
+	}
+	const wantEnvelope = "{\"error\":{\"code\":\"usage\",\"message\":\"send requires 0 argument(s)\"}}\n"
+	if got := stdout.String(); got != wantEnvelope {
+		t.Fatalf("JSON usage envelope = %q, want %q", got, wantEnvelope)
+	}
+	if !strings.Contains(stderr.String(), "usage: mailbox send [--attach PATH]... [--save-draft|--send] [options]") {
+		t.Fatalf("stderr = %q, want send help", stderr.String())
+	}
+}
+
+func TestUnknownCommandUsageErrorKeepsGlobalHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"definitely-not-a-command"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("Run(unknown command) = %d, want 2", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "mailbox: unknown command \"definitely-not-a-command\"") {
+		t.Fatalf("stderr = %q, want unknown-command diagnostic", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "usage: mailbox [--account NAME] [--json] [--text] <command> [options]") || !strings.Contains(got, "global flags:") {
+		t.Fatalf("stderr = %q, want global help", got)
+	}
+}
+
 func TestUsageErrorsEmitMachineEnvelope(t *testing.T) {
 	cases := []struct {
 		args    []string
