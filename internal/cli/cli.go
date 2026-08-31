@@ -28,6 +28,7 @@ type cmdCtx struct {
 	cfg         *auth.Config
 	filterFlag  string
 	acct        *auth.AccountConfig
+	command     *commandSpec
 }
 
 type commandSpec struct {
@@ -36,6 +37,10 @@ type commandSpec struct {
 	usage       string
 	help        string
 	run         func(*cmdCtx, []string) int
+}
+
+var mintCommandSpec = commandSpec{
+	usage: "mailbox __mint --env VAR",
 }
 
 const idSemantics = "ids: mailbox ids are THREAD ids everywhere; the exceptions are 'send --message' and 'attachment', which take message ids (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing."
@@ -236,6 +241,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return cc.failUsage(nil)
 	}
 	if rest[0] == "__mint" {
+		cc.command = &mintCommandSpec
 		return runMint(cc, rest[1:])
 	}
 	if rest[0] == "help" {
@@ -246,6 +252,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	if !found {
 		return cc.failUsage(fmt.Errorf("unknown command %q", rest[0]))
 	}
+	cc.command = &command
 	return command.run(cc, rest[1:])
 }
 
@@ -531,7 +538,11 @@ func (cc *cmdCtx) failUsage(err error) int {
 	if err != nil {
 		fmt.Fprintf(cc.stderr, "mailbox: %v\n", err)
 	}
-	usage(cc.stderr)
+	if cc.command != nil {
+		printCommandHelp(cc.stderr, *cc.command)
+	} else {
+		usage(cc.stderr)
+	}
 	if cc.format() != FormatText {
 		payload := usageErrorPayload{}
 		payload.Error.Code = "usage"
