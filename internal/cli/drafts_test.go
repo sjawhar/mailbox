@@ -57,8 +57,11 @@ func TestDraftsListsNewestFirstInAllFormats(t *testing.T) {
 	if _, err := toontest.Decode(strings.TrimSuffix(stdout, "\n")); err != nil {
 		t.Fatalf("TOON decode: %v\n%s", err, stdout)
 	}
-	if len(g.draftReadBearers) != 6 {
-		t.Fatalf("draft read requests = %d, want list plus two metadata fetches per format", len(g.draftReadBearers))
+	if g.batchCalls != 2 {
+		t.Fatalf("draft metadata batch requests = %d, want one per listing", g.batchCalls)
+	}
+	if len(g.draftReadBearers) != 4 {
+		t.Fatalf("draft read requests = %d, want list plus metadata batch per format", len(g.draftReadBearers))
 	}
 	for _, bearer := range g.draftReadBearers {
 		if bearer != "Bearer "+g.readToken {
@@ -193,7 +196,7 @@ func TestDraftsBinaryFixtureOutputsAllFormats(t *testing.T) {
 		t.Fatalf("mailbox drafts --text = (%d, %q, %q), want success", code, stdout, stderr)
 	}
 	const wantText = "draft_id\tthread_id\tto\tsubject\tupdated\n" +
-		"d-new\tt-new\t \u202eevil␍␊injected␉col <e@example.test>\tnew\t1970-01-01T00:00:02Z\n" +
+		"d-new\tt-new\t evil␍␊injected␉col <e@example.test>\tnew\t1970-01-01T00:00:02Z\n" +
 		"d-old\tt-old\tA <a@example.test>\told\t1970-01-01T00:00:01Z\n"
 	if stdout != wantText {
 		t.Fatalf("binary text = %q, want %q", stdout, wantText)

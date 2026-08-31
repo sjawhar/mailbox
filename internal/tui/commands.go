@@ -257,17 +257,14 @@ func saveAttachmentCmd(request asyncRequest, attachment render.Attachment) tea.C
 		if err != nil {
 			return errMsg{request: request, err: err}
 		}
-		contents := attachment.Inline
-		if attachment.AttachmentID != "" {
-			contents, err = request.ctx.api.GetAttachment(context.Background(), attachment.MessageID, attachment.AttachmentID)
-			if err != nil {
-				return errMsg{
-					request: request,
-					err:     err,
-					retry: func(retry asyncRequest) tea.Cmd {
-						return saveAttachmentCmd(retry, attachment)
-					},
-				}
+		contents, err := render.ResolveAttachmentBytes(context.Background(), request.ctx.api, attachment)
+		if err != nil {
+			return errMsg{
+				request: request,
+				err:     err,
+				retry: func(retry asyncRequest) tea.Cmd {
+					return saveAttachmentCmd(retry, attachment)
+				},
 			}
 		}
 		name, _ := render.CanonicalFilename(attachment.Filename, attachment.N-1)

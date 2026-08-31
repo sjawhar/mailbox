@@ -804,10 +804,30 @@ type batchHTTPResponse struct {
 }
 
 func (g *fakeGmail) batchResponse(outer, inner *http.Request) batchHTTPResponse {
-	const prefix = "/gmail/v1/users/me/threads/"
-	threadPath := strings.TrimPrefix(inner.URL.Path, prefix)
+	const threadPrefix = "/gmail/v1/users/me/threads/"
+	const draftPrefix = "/gmail/v1/users/me/drafts/"
+	threadPath := strings.TrimPrefix(inner.URL.Path, threadPrefix)
 	switch {
-	case inner.Method == http.MethodGet && strings.HasPrefix(inner.URL.Path, prefix):
+	case inner.Method == http.MethodGet && strings.HasPrefix(inner.URL.Path, draftPrefix):
+		g.recordReadAuth(outer)
+		id := strings.TrimPrefix(inner.URL.Path, draftPrefix)
+		g.mu.Lock()
+		draft, ok := g.drafts[id]
+		if !ok {
+			g.mu.Unlock()
+			return batchHTTPResponse{status: http.StatusNotFound, body: `{"error":{"message":"not found"}}`}
+		}
+		response, err := g.draftResponseLocked(id, draft, false)
+		g.mu.Unlock()
+		if err != nil {
+			return batchHTTPResponse{status: http.StatusInternalServerError, body: `{"error":{"message":"invalid draft MIME"}}`}
+		}
+		body, err := json.Marshal(response)
+		if err != nil {
+			panic(err)
+		}
+		return batchHTTPResponse{status: http.StatusOK, body: string(body)}
+	case inner.Method == http.MethodGet && strings.HasPrefix(inner.URL.Path, threadPrefix):
 		g.recordReadAuth(outer)
 		thread, ok := g.threads[threadPath]
 		if !ok {
@@ -1118,7 +1138,16 @@ func (s *tmuxSession) WaitFor(text string, timeout time.Duration) string {
 	return pane
 }
 
+// WaitForStable waits until a complete terminal frame contains text.
 func (s *tmuxSession) WaitForStable(text string, timeout time.Duration) string {
+	return s.WaitForStableCondition("containing "+fmt.Sprintf("%q", text), timeout, func(pane string) bool {
+		return strings.Contains(pane, text)
+	})
+}
+
+// WaitForStableCondition waits for a complete terminal frame matching matches.
+// Timeout failures retain the raw pane so PTY races can be diagnosed.
+func (s *tmuxSession) WaitForStableCondition(description string, timeout time.Duration, matches func(string) bool) string {
 	s.t.Helper()
 	const stableFor = 300 * time.Millisecond
 	deadline := time.Now().Add(timeout)
@@ -1129,12 +1158,12 @@ func (s *tmuxSession) WaitForStable(text string, timeout time.Duration) string {
 		if pane != previous {
 			previous = pane
 			lastChange = time.Now()
-		} else if strings.Contains(pane, text) && time.Since(lastChange) >= stableFor {
+		} else if matches(pane) && time.Since(lastChange) >= stableFor {
 			return pane
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	s.t.Fatalf("timed out waiting for a stable pane containing %q; last pane:\n%s", text, s.Capture())
+	s.t.Fatalf("timed out waiting for a stable pane %s; last pane:\n%s", description, s.Capture())
 	return ""
 }
 

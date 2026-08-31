@@ -333,6 +333,13 @@ func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, req)
 	}
 
+	for _, request := range requests {
+		if request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/gmail/v1/users/me/drafts/") && request.URL.Query().Get("format") == "metadata" {
+			g.draftReadBearers = append(g.draftReadBearers, r.Header.Get("Authorization"))
+			break
+		}
+	}
+
 	writeIDs := make([]string, 0, len(requests))
 	for _, request := range requests {
 		if request.Method == http.MethodPost {
@@ -357,7 +364,16 @@ func (g *gmailTestServer) handleBatch(w http.ResponseWriter, r *http.Request) {
 	for i, request := range requests {
 		status, body := http.StatusOK, `{}`
 		var responseHeaders string
-		if request.Method == http.MethodGet && strings.Contains(request.URL.RawQuery, "format=metadata") {
+		if request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/gmail/v1/users/me/drafts/") && request.URL.Query().Get("format") == "metadata" {
+			id := filepath.Base(request.URL.Path)
+			draft, ok := g.drafts[id]
+			if !ok {
+				status = http.StatusNotFound
+				body = string(mustJSON(g.t, googleError(http.StatusNotFound, "notFound")))
+			} else {
+				body = string(mustJSON(g.t, draft))
+			}
+		} else if request.Method == http.MethodGet && strings.Contains(request.URL.RawQuery, "format=metadata") {
 			id := filepath.Base(request.URL.Path)
 			metadata := metadataThread(id)
 			if g.metadata != nil && g.metadata[id] != nil {

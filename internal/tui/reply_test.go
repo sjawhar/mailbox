@@ -323,6 +323,21 @@ func TestAbandonSaveRefusesOversizedMIMEBeforeWriteUnlock(t *testing.T) {
 	}
 }
 
+func TestConfirmSendRefusesOversizedMIMEBeforeSendUnlock(t *testing.T) {
+	thread := replyThread()
+	model, _ := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	model = confirmWithBody(t, model, strings.Repeat("x", send.MaxOutboundMessageBytes))
+
+	model, command := update(t, model, key(keyConfirmSend))
+	if command != nil || model.pendingSend != nil || model.unlocking {
+		t.Fatalf("oversized send armed send activity: command=%t pending=%#v unlocking=%t", command != nil, model.pendingSend, model.unlocking)
+	}
+	if !model.statusError || !strings.Contains(model.status, "attachment_too_large") {
+		t.Fatalf("oversized send status = %q, want local R-A3 refusal", model.status)
+	}
+}
+
 func TestSendExpiryRetriesOnce(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})

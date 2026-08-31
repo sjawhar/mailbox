@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
-	"strings"
 
 	"github.com/sjawhar/mailbox/internal/auth"
 	"github.com/sjawhar/mailbox/internal/gmail"
@@ -35,15 +34,14 @@ type draftChangedPayload struct {
 }
 
 func runDraftSend(cc *cmdCtx, draftID string, opts draftSendOptions) int {
-	fresh, oversized, refusal := send.LoadAttachments(opts.attachPaths)
-	if refusal != nil {
-		return cc.renderSendRefusal("", nil, refusal)
-	}
-
 	ctx := context.Background()
 	account, source, client, code := cc.start()
 	if code != 0 {
 		return code
+	}
+	fresh, oversized, refusal := send.LoadAttachments(opts.attachPaths)
+	if refusal != nil {
+		return cc.renderSendRefusal(account, source, refusal)
 	}
 	draft, err := client.GetDraft(ctx, draftID, "full")
 	if err != nil {
@@ -96,7 +94,7 @@ func reconstructDraft(ctx context.Context, client *gmail.Client, draft *gmail.Dr
 	}
 
 	body := content.Text
-	if !hasDraftPlainText(draft.Message.Payload) {
+	if body == "" {
 		rendered, renderErr := render.RenderBody(content, render.Options{}, 1)
 		if renderErr != nil {
 			return send.Request{}, send.DraftThreading{}, nil, nil, renderErr
@@ -117,7 +115,7 @@ func reconstructDraft(ctx context.Context, client *gmail.Client, draft *gmail.Dr
 	}
 	carried := make([]send.Attachment, 0, len(content.Attachments))
 	for index, attachment := range content.Attachments {
-		contents, attachmentErr := attachmentContents(ctx, client, attachment)
+		contents, attachmentErr := render.ResolveAttachmentBytes(ctx, client, attachment)
 		if attachmentErr != nil {
 			return send.Request{}, send.DraftThreading{}, nil, nil, attachmentErr
 		}
@@ -128,21 +126,6 @@ func reconstructDraft(ctx context.Context, client *gmail.Client, draft *gmail.Dr
 		carried = append(carried, carriedAttachment)
 	}
 	return request, threading, carried, nil, nil
-}
-
-func hasDraftPlainText(part *gmail.MessagePart) bool {
-	if part == nil {
-		return false
-	}
-	if len(part.Parts) == 0 {
-		return strings.EqualFold(part.MimeType, "text/plain")
-	}
-	for _, child := range part.Parts {
-		if hasDraftPlainText(child) {
-			return true
-		}
-	}
-	return false
 }
 
 func draftRecipients(message *gmail.Message, name string) []string {

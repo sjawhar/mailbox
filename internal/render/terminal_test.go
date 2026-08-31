@@ -55,3 +55,10 @@ func TestRenderTerminalMarkdownSanitizesBeforeGlamour(t *testing.T) {
 		t.Fatalf("RenderTerminalMarkdown() = %q, want body retained", output)
 	}
 }
+
+func TestSanitizeTerminalRemovesBidiControls(t *testing.T) {
+	input := "report\u202efdp.exe\u2066hidden\u2069\u200f"
+	if got := SanitizeTerminal(input); got != "reportfdp.exehidden" {
+		t.Fatalf("SanitizeTerminal(%q) = %q, want bidi controls removed before terminal display", input, got)
+	}
+}

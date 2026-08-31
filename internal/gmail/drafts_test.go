@@ -93,6 +93,48 @@ func TestGetDraftOmitsEmptyFormat(t *testing.T) {
 	}
 }
 
+func TestGetDraftsMetadataUsesReadBatchAndPreservesInputOrder(t *testing.T) {
+	ids := []string{"d0", "d1", "d2"}
+	var requests int
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		parts := readBatchRequest(t, r)
+		if len(parts) != len(ids) {
+			t.Fatalf("batch parts = %d, want %d", len(parts), len(ids))
+		}
+		for index, id := range ids {
+			part := parts[index]
+			if got, want := part.request.Method, http.MethodGet; got != want {
+				t.Fatalf("part %d method = %q, want %q", index, got, want)
+			}
+			if got, want := part.request.URL.Path, "/gmail/v1/users/me/drafts/"+id; got != want {
+				t.Fatalf("part %d path = %q, want %q", index, got, want)
+			}
+			if got := part.request.URL.Query().Get("format"); got != "metadata" {
+				t.Fatalf("part %d format = %q, want metadata", index, got)
+			}
+		}
+		writeBatchResponse(t, w, []batchResponsePart{
+			{index: 2, status: http.StatusOK, body: `{"id":"d2","message":{"id":"m2","threadId":"t2"}}`},
+			{index: 1, status: http.StatusOK, body: `{"id":"d1","message":{"id":"m1","threadId":"t1"}}`},
+			{index: 0, status: http.StatusOK, body: `{"id":"d0","message":{"id":"m0","threadId":"t0"}}`},
+		})
+	}, "token")
+
+	drafts, err := client.GetDraftsMetadata(context.Background(), ids)
+	if err != nil {
+		t.Fatalf("GetDraftsMetadata: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("batch POSTs = %d, want 1", requests)
+	}
+	for index, id := range ids {
+		if drafts[index].ID != id {
+			t.Fatalf("drafts[%d].ID = %q, want %q", index, drafts[index].ID, id)
+		}
+	}
+}
+
 func TestDeleteDraftUsesWriteCredentialsAndDeleteMethod(t *testing.T) {
 	client := newTestClientWithConfig(t, func(w http.ResponseWriter, r *http.Request) {
 		requireRequest(t, r, http.MethodDelete, "/gmail/v1/users/me/drafts/d1", "write-token")

@@ -144,9 +144,11 @@ func TestTUISelectAllArchive(t *testing.T) {
 	session := startFilterTUI(t, fixture)
 
 	session.SendKeys("v")
+	session.WaitForStable("space toggle", 15*time.Second)
 	session.SendKeys("a")
+	session.WaitForStable(">* A <a@example.test>", 15*time.Second)
 	session.SendKeys("e")
-	session.WaitFor("archive completed", 15*time.Second)
+	session.WaitForStable("archive completed", 15*time.Second)
 	if got := fixture.gmail.recordedModified(); !sameStrings(got, []string{"t1", "t2"}) {
 		t.Fatalf("archived thread ids = %q, want [t1 t2]", got)
 	}
@@ -158,23 +160,20 @@ func TestTUIFilterCycleShowsName(t *testing.T) {
 	session := startFilterTUI(t, fixture)
 
 	session.SendKeys("f")
-	session.WaitFor("filter: github", 15*time.Second)
-	pane, found := session.findText("GitHub notification", 15*time.Second)
-	if !found {
-		t.Fatalf("timed out waiting for the GitHub filter row; batch requests=%q; last pane:\n%s", fixture.gmail.recordedBatchRequests(), pane)
-	}
-	if strings.Contains(pane, "PTY smoke") {
-		t.Fatalf("filtered pane still shows an unfiltered fixture row:\n%s", pane)
-	}
+	session.WaitForStableCondition("showing only the github filter row", 15*time.Second, func(pane string) bool {
+		return strings.Contains(pane, "filter: github") &&
+			strings.Contains(pane, "GitHub notification") &&
+			!strings.Contains(pane, "PTY smoke") &&
+			!strings.Contains(pane, "Second PTY smoke")
+	})
 	if !containsListIDMetadataRequest(fixture.gmail.recordedBatchRequests(), "t-gh") {
 		t.Fatalf("GitHub filter never hydrated t-gh with List-ID metadata; batch requests=%q", fixture.gmail.recordedBatchRequests())
 	}
 
 	session.SendKeys("f")
-	pane = session.WaitFor("PTY smoke", 15*time.Second)
-	if strings.Contains(pane, "filter: github") {
-		t.Fatalf("plain inbox still shows github filter after cycling back:\n%s", pane)
-	}
+	session.WaitForStableCondition("showing the unfiltered inbox", 15*time.Second, func(pane string) bool {
+		return strings.Contains(pane, "PTY smoke") && !strings.Contains(pane, "filter: github")
+	})
 }
 
 func TestTUIHashTrashesCursorRow(t *testing.T) {

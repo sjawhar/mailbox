@@ -1,6 +1,7 @@
 package render
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path"
@@ -27,6 +28,21 @@ func CanonicalFilename(name string, index int) (clean string, hadControl bool) {
 		clean = fmt.Sprintf("attachment-%d", index)
 	}
 	return clean, hadControl
+}
+
+// AttachmentSource provides the Gmail attachment bytes for externally stored
+// MIME parts.
+type AttachmentSource interface {
+	GetAttachment(context.Context, string, string) ([]byte, error)
+}
+
+// ResolveAttachmentBytes returns inline MIME data directly, or fetches an
+// externally stored attachment through the read-configured Gmail source.
+func ResolveAttachmentBytes(ctx context.Context, source AttachmentSource, attachment Attachment) ([]byte, error) {
+	if attachment.AttachmentID == "" {
+		return attachment.Inline, nil
+	}
+	return source.GetAttachment(ctx, attachment.MessageID, attachment.AttachmentID)
 }
 
 // SaveAttachment creates basename inside dir through a directory descriptor:

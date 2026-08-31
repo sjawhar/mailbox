@@ -67,7 +67,7 @@ func ExtractContent(msg *gmail.Message) (*MessageContent, error) {
 		}
 
 		if isAttachment(part) {
-			if contentID := partHeader(part, "Content-ID"); contentID != "" && strings.HasPrefix(strings.ToLower(part.MimeType), "image/") {
+			if contentID := partHeader(part, "Content-ID"); contentID != "" && strings.HasPrefix(strings.ToLower(part.MimeType), "image/") && !isExplicitAttachment(part) {
 				content.InlineParts[trimContentID(contentID)] = part
 				return nil
 			}
@@ -124,6 +124,10 @@ func isAttachment(part *gmail.MessagePart) bool {
 		return true
 	}
 	return part.Body.Data != "" && (part.Filename != "" || hasAttachmentDisposition(part))
+}
+
+func isExplicitAttachment(part *gmail.MessagePart) bool {
+	return hasAttachmentDisposition(part) || (part.Body != nil && part.Filename != "" && part.Body.AttachmentID != "")
 }
 
 func hasAttachmentDisposition(part *gmail.MessagePart) bool {

@@ -1,6 +1,7 @@
 package render
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -146,5 +147,31 @@ func TestSaveAttachmentParentSwapBetweenOpenAndCreateCannotEscape(t *testing.T) 
 	}
 	if _, err := os.Stat(filepath.Join(dir+".moved", "report.pdf")); err != nil {
 		t.Fatalf("create did not land in the pinned directory: %v", err)
+	}
+}
+
+type attachmentSourceFunc func(context.Context, string, string) ([]byte, error)
+
+func (f attachmentSourceFunc) GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error) {
+	return f(ctx, messageID, attachmentID)
+}
+
+func TestResolveAttachmentBytesUsesInlineDataOrGmailAttachment(t *testing.T) {
+	calls := 0
+	source := attachmentSourceFunc(func(_ context.Context, messageID, attachmentID string) ([]byte, error) {
+		calls++
+		if messageID != "m1" || attachmentID != "a1" {
+			t.Fatalf("GetAttachment(%q, %q), want m1/a1", messageID, attachmentID)
+		}
+		return []byte("external bytes"), nil
+	})
+
+	inline, err := ResolveAttachmentBytes(context.Background(), source, Attachment{Inline: []byte("inline bytes")})
+	if err != nil || string(inline) != "inline bytes" || calls != 0 {
+		t.Fatalf("inline bytes = %q, %v; fetch calls = %d, want inline data without fetch", inline, err, calls)
+	}
+	external, err := ResolveAttachmentBytes(context.Background(), source, Attachment{MessageID: "m1", AttachmentID: "a1"})
+	if err != nil || string(external) != "external bytes" || calls != 1 {
+		t.Fatalf("external bytes = %q, %v; fetch calls = %d, want one Gmail fetch", external, err, calls)
 	}
 }

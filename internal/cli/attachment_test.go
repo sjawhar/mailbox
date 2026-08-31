@@ -71,7 +71,7 @@ func TestAttachmentListIsMessageScopedZeroIndexed(t *testing.T) {
 	if code != 0 || stderr != "" {
 		t.Fatalf("text list = (%d, %q, %q), want success", code, stdout, stderr)
 	}
-	if got, want := stdout, "index\tfilename\tmime\tsize\n0\tevil\u202e.pdf\tapplication/pdf\t22\n1\treport.pdf\tapplication/pdf\t20\n"; got != want {
+	if got, want := stdout, "index\tfilename\tmime\tsize\n0\tevil.pdf\tapplication/pdf\t22\n1\treport.pdf\tapplication/pdf\t20\n"; got != want {
 		t.Fatalf("text listing = %q, want %q", got, want)
 	}
 
@@ -89,6 +89,7 @@ func TestAttachmentFetchesExternalAndInlinePartBodiesWithoutEmptyAttachmentLooku
 	external := attachmentFixtureBytes("a-nameless")
 	inlineNamed := []byte("inline named bytes")
 	inlineDisposition := []byte("inline disposition bytes")
+	cidExternal := []byte("image attachment bytes")
 	g.messages = map[string]map[string]any{
 		"m-part-shapes": {
 			"id": "m-part-shapes",
@@ -118,10 +119,23 @@ func TestAttachmentFetchesExternalAndInlinePartBodiesWithoutEmptyAttachmentLooku
 						"size": len(inlineDisposition),
 					},
 				},
+				{
+					"filename": "photo.png",
+					"mimeType": "image/png",
+					"headers": []map[string]any{
+						{"name": "Content-ID", "value": "<photo>"},
+						{"name": "Content-Disposition", "value": `attachment; filename="photo.png"`},
+					},
+					"body": map[string]any{
+						"attachmentId": "a-image",
+						"size":         len(cidExternal),
+					},
+				},
 			}},
 		},
 	}
 	g.attachmentBytes["a-nameless"] = external
+	g.attachmentBytes["a-image"] = cidExternal
 	rig := newReadRig(t, g)
 
 	code, stdout, stderr := rig.run(t, "attachment", "m-part-shapes", "--json")
@@ -137,10 +151,11 @@ func TestAttachmentFetchesExternalAndInlinePartBodiesWithoutEmptyAttachmentLooku
 	if err := json.Unmarshal([]byte(stdout), &listing); err != nil {
 		t.Fatal(err)
 	}
-	if len(listing.Attachments) != 3 ||
+	if len(listing.Attachments) != 4 ||
 		listing.Attachments[0].Index != 0 || listing.Attachments[0].Filename != "attachment-0" ||
 		listing.Attachments[1].Index != 1 || listing.Attachments[1].Filename != "inline.txt" ||
-		listing.Attachments[2].Index != 2 || listing.Attachments[2].Filename != "attachment-2" {
+		listing.Attachments[2].Index != 2 || listing.Attachments[2].Filename != "attachment-2" ||
+		listing.Attachments[3].Index != 3 || listing.Attachments[3].Filename != "photo.png" {
 		t.Fatalf("listing = %+v, want all external and inline attachment forms", listing.Attachments)
 	}
 
@@ -158,14 +173,15 @@ func TestAttachmentFetchesExternalAndInlinePartBodiesWithoutEmptyAttachmentLooku
 	}{
 		{"inline.txt", inlineNamed},
 		{"attachment-2", inlineDisposition},
+		{"photo.png", cidExternal},
 	} {
 		code, stdout, stderr = rig.run(t, "attachment", "m-part-shapes", tc.selector, "-o", "-", "--json")
 		if code != 0 || stdout != string(tc.want) {
-			t.Fatalf("inline fetch %q = (%d, %q, %q), want exact inline bytes", tc.selector, code, stdout, stderr)
+			t.Fatalf("part fetch %q = (%d, %q, %q), want exact bytes", tc.selector, code, stdout, stderr)
 		}
 	}
-	if got := strings.Join(g.attachmentRequestIDs, ","); got != "a-nameless" {
-		t.Fatalf("attachment requests = %q, want the external attachment only", got)
+	if got := strings.Join(g.attachmentRequestIDs, ","); got != "a-nameless,a-image" {
+		t.Fatalf("attachment requests = %q, want external attachment requests only", got)
 	}
 }
 

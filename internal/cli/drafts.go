@@ -54,21 +54,25 @@ func runDrafts(cc *cmdCtx, args []string) int {
 	if err != nil {
 		return next.runtimeError(account, source, err)
 	}
-	listed := make([]listedDraft, 0, len(drafts))
-	for _, draft := range drafts {
-		metadata, err := client.GetDraft(ctx, draft.ID, "metadata")
-		if err != nil {
-			return next.runtimeError(account, source, err)
-		}
+	ids := make([]string, len(drafts))
+	for index, draft := range drafts {
+		ids[index] = draft.ID
+	}
+	metadata, err := client.GetDraftsMetadata(ctx, ids)
+	if err != nil {
+		return next.runtimeError(account, source, err)
+	}
+	listed := make([]listedDraft, 0, len(metadata))
+	for index, draft := range metadata {
 		listed = append(listed, listedDraft{
 			row: draftRow{
-				DraftID:  draft.ID,
-				ThreadID: metadata.Message.ThreadID,
-				To:       draftHeader(metadata.Message, "To"),
-				Subject:  draftHeader(metadata.Message, "Subject"),
-				Updated:  time.UnixMilli(metadata.Message.InternalDate).UTC().Format(time.RFC3339),
+				DraftID:  drafts[index].ID,
+				ThreadID: draft.Message.ThreadID,
+				To:       draftHeader(draft.Message, "To"),
+				Subject:  draftHeader(draft.Message, "Subject"),
+				Updated:  time.UnixMilli(draft.Message.InternalDate).UTC().Format(time.RFC3339),
 			},
-			internalDate: metadata.Message.InternalDate,
+			internalDate: draft.Message.InternalDate,
 		})
 	}
 	sort.Slice(listed, func(i, j int) bool {

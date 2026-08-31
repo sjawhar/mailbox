@@ -243,3 +243,34 @@ func TestAttachmentJSONShape(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractContentExplicitImageWithContentIDIsAttachment(t *testing.T) {
+	message := &gmail.Message{ID: "m1", Payload: &gmail.MessagePart{
+		MimeType: "multipart/mixed",
+		Parts: []*gmail.MessagePart{
+			{
+				Filename: "photo.png",
+				MimeType: "image/png",
+				Headers: []gmail.Header{
+					{Name: "Content-ID", Value: "<photo>"},
+					{Name: "Content-Disposition", Value: `attachment; filename="photo.png"`},
+				},
+				Body: &gmail.PartBody{AttachmentID: "a-photo", Size: 123},
+			},
+			{
+				Filename: "logo.png",
+				MimeType: "image/png",
+				Headers:  []gmail.Header{{Name: "Content-ID", Value: "<logo>"}},
+				Body:     &gmail.PartBody{AttachmentID: "a-logo", Size: 456},
+			},
+		},
+	}}
+
+	content, err := ExtractContent(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content.Attachments) != 2 || content.Attachments[0].AttachmentID != "a-photo" || content.Attachments[1].AttachmentID != "a-logo" {
+		t.Fatalf("attachments = %#v, inline = %#v; want explicit attachments available for download", content.Attachments, content.InlineParts)
+	}
+}

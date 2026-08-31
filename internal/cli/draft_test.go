@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -171,8 +172,61 @@ func TestDraftResumePreflightsLocalAttachmentsBeforeRead(t *testing.T) {
 	if code != 1 || !strings.Contains(stdout, "attachment_unreadable") {
 		t.Fatalf("preflight = (%d, %q, %q), want attachment_unreadable", code, stdout, stderr)
 	}
+	var payload struct {
+		Error struct {
+			Account string `json:"account"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error.Account != "work" {
+		t.Fatalf("preflight account = %q, want resolved account", payload.Error.Account)
+	}
 	if len(g.draftReadBearers) != 0 || g.profileCalls != 0 {
 		t.Fatalf("local refusal consumed read custody: draft reads=%v profile=%d", g.draftReadBearers, g.profileCalls)
+	}
+}
+
+func TestDraftResumeHTMLOnlyBodyWithTextAttachmentUsesHTMLBody(t *testing.T) {
+	g := newGmailTestServer(t)
+	configureResumableDraft(g)
+	html := "<p>html draft body</p>"
+	g.draftPayload("d1")["parts"] = []map[string]any{
+		{
+			"mimeType": "text/html",
+			"body": map[string]any{
+				"data": base64.RawURLEncoding.EncodeToString([]byte(html)),
+				"size": len(html),
+			},
+		},
+		{
+			"filename": "note.txt",
+			"mimeType": "text/plain",
+			"body": map[string]any{
+				"data": base64.RawURLEncoding.EncodeToString([]byte("attachment bytes")),
+				"size": len("attachment bytes"),
+			},
+		},
+	}
+	rig := newDraftRig(t, g)
+
+	code, stdout, stderr := rig.run(t, "send", "--draft", "d1", "--send", "--message", "m-d1", "--json")
+	if code != 0 {
+		t.Fatalf("resume HTML-only draft with text attachment = exit %d stdout=%q stderr=%q; want send success", code, stdout, stderr)
+	}
+	if g.sendCalls() != 1 {
+		t.Fatalf("send calls = %d, want one", g.sendCalls())
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(g.sentBodies[0]["raw"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(base64.StdEncoding.EncodeToString([]byte("html draft body\n")))) {
+		t.Fatalf("sent MIME = %q, want reconstructed HTML body", raw)
+	}
+	if !bytes.Contains(raw, []byte(`filename=note.txt`)) {
+		t.Fatalf("sent MIME = %q, want text attachment", raw)
 	}
 }
 
@@ -509,7 +563,7 @@ func TestDraftResumeTextModeSanitizesEveryResultPath(t *testing.T) {
 	hostile := "\x1b]0;pwn\x07\x1bP+q\x1b\\ \u202eevil"
 	assertCleanTerminal := func(t *testing.T, label, output string) {
 		t.Helper()
-		if strings.ContainsRune(output, 0x1b) || strings.ContainsRune(output, 0x07) {
+		if strings.ContainsRune(output, 0x1b) || strings.ContainsRune(output, 0x07) || strings.ContainsRune(output, 0x202e) {
 			t.Fatalf("%s leaked a terminal escape/control byte: %q", label, output)
 		}
 	}
