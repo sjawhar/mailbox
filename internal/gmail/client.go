@@ -111,7 +111,7 @@ func (c *Client) ListThreads(ctx context.Context, opts ListOptions) (*ThreadList
 	}
 
 	var threads ThreadList
-	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, "/gmail/v1/users/me/threads", query, nil, &threads), "gmail.readonly"); err != nil {
+	if err := c.call(ctx, opThreadsList, nil, query, nil, &threads); err != nil {
 		return nil, err
 	}
 	return &threads, nil
@@ -121,7 +121,7 @@ func (c *Client) ListThreads(ctx context.Context, opts ListOptions) (*ThreadList
 func (c *Client) GetThread(ctx context.Context, id, format string) (*Thread, error) {
 	var thread Thread
 	query := url.Values{"format": {format}}
-	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, "/gmail/v1/users/me/threads/"+url.PathEscape(id), query, nil, &thread), "gmail.readonly"); err != nil {
+	if err := c.call(ctx, opThreadsGet, []string{id}, query, nil, &thread); err != nil {
 		return nil, err
 	}
 	return &thread, nil
@@ -130,8 +130,7 @@ func (c *Client) GetThread(ctx context.Context, id, format string) (*Thread, err
 // GetMessage fetches a Gmail message with all metadata headers.
 func (c *Client) GetMessage(ctx context.Context, id string) (*Message, error) {
 	var message Message
-	path := "/gmail/v1/users/me/messages/" + url.PathEscape(id)
-	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, path, url.Values{"format": {"metadata"}}, nil, &message), "gmail.readonly"); err != nil {
+	if err := c.call(ctx, opMessagesGet, []string{id}, url.Values{"format": {"metadata"}}, nil, &message); err != nil {
 		return nil, err
 	}
 	return &message, nil
@@ -140,8 +139,7 @@ func (c *Client) GetMessage(ctx context.Context, id string) (*Message, error) {
 // GetMessageRaw fetches a Gmail message with its complete raw content.
 func (c *Client) GetMessageRaw(ctx context.Context, id string) (*Message, error) {
 	var message Message
-	path := "/gmail/v1/users/me/messages/" + url.PathEscape(id)
-	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, path, url.Values{"format": {"raw"}}, nil, &message), "gmail.readonly"); err != nil {
+	if err := c.call(ctx, opMessagesGet, []string{id}, url.Values{"format": {"raw"}}, nil, &message); err != nil {
 		return nil, err
 	}
 	return &message, nil
@@ -156,23 +154,23 @@ func (c *Client) GetThreadsMetadata(ctx context.Context, ids []string) ([]*Threa
 		for _, id := range ids[start:end] {
 			items = append(items, batchItem{
 				id:     id,
-				method: http.MethodGet,
-				path:   "/gmail/v1/users/me/threads/" + url.PathEscape(id),
+				method: routes[opThreadsGet].method,
+				path:   routePath(opThreadsGet, []string{id}),
 				query: url.Values{
 					"format":          {"metadata"},
 					"metadataHeaders": {"From", "To", "Cc", "Subject", "Date", "List-ID"},
 				},
 			})
 		}
-		results, failures, err := c.doBatch(ctx, c.read, items)
+		results, failures, err := c.doBatch(ctx, opThreadsGet, items)
 		if err != nil {
 			if len(failures) > 0 {
 				err = fmt.Errorf("%w; prior terminal batch failures: %s", err, newBatchFailure(failures))
 			}
-			return nil, c.scopeMapped(err, "gmail.readonly")
+			return nil, err
 		}
 		if len(failures) > 0 {
-			return nil, c.scopeMapped(newBatchFailure(failures), "gmail.readonly")
+			return nil, c.batchScopeMapped(opThreadsGet, newBatchFailure(failures))
 		}
 		for _, result := range results {
 			var thread Thread
@@ -190,16 +188,15 @@ func (c *Client) ModifyThreads(ctx context.Context, ids, addLabelIDs, removeLabe
 	if len(ids) == 0 {
 		return nil
 	}
-	creds := c.write
 	body := modifyThreadRequest{
 		AddLabelIDs:    nonNilStrings(addLabelIDs),
 		RemoveLabelIDs: nonNilStrings(removeLabelIDs),
 	}
 	if len(ids) == 1 {
-		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/modify", nil, body, nil), "gmail.modify")
+		return c.call(ctx, opThreadsModify, []string{ids[0]}, nil, body, nil)
 	}
-	receipts, err := c.batchThreadReceipts(ctx, creds, ids, "/modify", body)
-	return c.scopeMapped(receiptsError(receipts, err), "gmail.modify")
+	receipts, err := c.batchThreadReceipts(ctx, opThreadsModify, ids, body)
+	return c.batchScopeMapped(opThreadsModify, receiptsError(receipts, err))
 }
 
 // TrashThreads moves ids to Gmail trash.
@@ -207,12 +204,11 @@ func (c *Client) TrashThreads(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	creds := c.write
 	if len(ids) == 1 {
-		return c.scopeMapped(c.do(ctx, creds, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil), "gmail.modify")
+		return c.call(ctx, opThreadsTrash, []string{ids[0]}, nil, nil, nil)
 	}
-	receipts, err := c.batchThreadReceipts(ctx, creds, ids, "/trash", nil)
-	return c.scopeMapped(receiptsError(receipts, err), "gmail.modify")
+	receipts, err := c.batchThreadReceipts(ctx, opThreadsTrash, ids, nil)
+	return c.batchScopeMapped(opThreadsTrash, receiptsError(receipts, err))
 }
 
 // ModifyThreadsReceipts adds and removes labels and returns per-thread outcomes.
@@ -226,10 +222,10 @@ func (c *Client) ModifyThreadsReceipts(ctx context.Context, ids, addLabelIDs, re
 	}
 	ids = uniqueIDs(ids)
 	if len(ids) == 1 {
-		return c.singleWriteReceipt(ids[0], c.scopeMapped(c.do(ctx, c.write, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/modify", nil, body, nil), "gmail.modify"))
+		return c.singleWriteReceipt(ids[0], c.call(ctx, opThreadsModify, []string{ids[0]}, nil, body, nil))
 	}
-	receipts, err := c.batchThreadReceipts(ctx, c.write, ids, "/modify", body)
-	return receipts, c.scopeMapped(err, "gmail.modify")
+	receipts, err := c.batchThreadReceipts(ctx, opThreadsModify, ids, body)
+	return receipts, err
 }
 
 // TrashThreadsReceipts moves ids to Gmail trash and returns per-thread outcomes.
@@ -239,10 +235,10 @@ func (c *Client) TrashThreadsReceipts(ctx context.Context, ids []string) (WriteR
 	}
 	ids = uniqueIDs(ids)
 	if len(ids) == 1 {
-		return c.singleWriteReceipt(ids[0], c.scopeMapped(c.do(ctx, c.write, http.MethodPost, "/gmail/v1/users/me/threads/"+url.PathEscape(ids[0])+"/trash", nil, nil, nil), "gmail.modify"))
+		return c.singleWriteReceipt(ids[0], c.call(ctx, opThreadsTrash, []string{ids[0]}, nil, nil, nil))
 	}
-	receipts, err := c.batchThreadReceipts(ctx, c.write, ids, "/trash", nil)
-	return receipts, c.scopeMapped(err, "gmail.modify")
+	receipts, err := c.batchThreadReceipts(ctx, opThreadsTrash, ids, nil)
+	return receipts, err
 }
 
 // SendMessage sends a base64url-encoded MIME message using the send credentials.
@@ -255,7 +251,7 @@ func (c *Client) SendMessage(ctx context.Context, raw []byte, threadID string) (
 		Raw:      base64.RawURLEncoding.EncodeToString(raw),
 		ThreadID: threadID,
 	}
-	if err := c.scopeMapped(c.do(ctx, c.send, http.MethodPost, "/gmail/v1/users/me/messages/send", nil, body, &sent), "gmail.send"); err != nil {
+	if err := c.call(ctx, opMessagesSend, nil, nil, body, &sent); err != nil {
 		return nil, err
 	}
 	return &sent, nil
@@ -266,7 +262,7 @@ func (c *Client) ListLabels(ctx context.Context) ([]Label, error) {
 	var response struct {
 		Labels []Label `json:"labels"`
 	}
-	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, "/gmail/v1/users/me/labels", nil, nil, &response), "gmail.readonly"); err != nil {
+	if err := c.call(ctx, opLabelsList, nil, nil, nil, &response); err != nil {
 		return nil, err
 	}
 	return response.Labels, nil
@@ -277,8 +273,7 @@ func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID stri
 	var response struct {
 		Data string `json:"data"`
 	}
-	path := "/gmail/v1/users/me/messages/" + url.PathEscape(messageID) + "/attachments/" + url.PathEscape(attachmentID)
-	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, path, nil, nil, &response), "gmail.readonly"); err != nil {
+	if err := c.call(ctx, opAttachmentsGet, []string{messageID, attachmentID}, nil, nil, &response); err != nil {
 		return nil, err
 	}
 
@@ -296,7 +291,7 @@ func (c *Client) GetAttachment(ctx context.Context, messageID, attachmentID stri
 // GetProfile returns the current Gmail profile.
 func (c *Client) GetProfile(ctx context.Context) (*Profile, error) {
 	var profile Profile
-	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, "/gmail/v1/users/me/profile", nil, nil, &profile), "gmail.readonly"); err != nil {
+	if err := c.call(ctx, opProfileGet, nil, nil, nil, &profile); err != nil {
 		return nil, err
 	}
 	return &profile, nil
@@ -313,8 +308,7 @@ func (c *Client) ResolveThreadID(ctx context.Context, id string) (string, error)
 	var message struct {
 		ThreadID string `json:"threadId"`
 	}
-	path := "/gmail/v1/users/me/messages/" + url.PathEscape(id)
-	if err := c.scopeMapped(c.do(ctx, c.read, http.MethodGet, path, url.Values{"format": {"minimal"}}, nil, &message), "gmail.readonly"); err != nil {
+	if err := c.call(ctx, opMessagesGet, []string{id}, url.Values{"format": {"minimal"}}, nil, &message); err != nil {
 		if IsNotFound(err) {
 			return "", fmt.Errorf("no thread or message with id '%s' in account", id)
 		}
@@ -363,7 +357,7 @@ func uniqueIDs(ids []string) []string {
 	return unique
 }
 
-func (c *Client) batchThreadReceipts(ctx context.Context, creds Credentials, ids []string, suffix string, body any) (WriteReceipts, error) {
+func (c *Client) batchThreadReceipts(ctx context.Context, op operation, ids []string, body any) (WriteReceipts, error) {
 	var receipts WriteReceipts
 	for start := 0; start < len(ids); start += maxBatchParts {
 		end := min(start+maxBatchParts, len(ids))
@@ -371,12 +365,12 @@ func (c *Client) batchThreadReceipts(ctx context.Context, creds Credentials, ids
 		for _, id := range ids[start:end] {
 			items = append(items, batchItem{
 				id:     id,
-				method: http.MethodPost,
-				path:   "/gmail/v1/users/me/threads/" + url.PathEscape(id) + suffix,
+				method: routes[op].method,
+				path:   routePath(op, []string{id}),
 				body:   body,
 			})
 		}
-		results, failures, err := c.doBatch(ctx, creds, items)
+		results, failures, err := c.doBatch(ctx, op, items)
 		failedIDs := make(map[string]struct{}, len(failures))
 		for _, failure := range failures {
 			failedIDs[failure.id] = struct{}{}

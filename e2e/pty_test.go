@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
 	"net/textproto"
 	"os"
 	"os/exec"
@@ -72,22 +73,49 @@ type capturedSend struct {
 	ThreadID string
 }
 
+type recordedCall struct {
+	Method string
+	Path   string
+	Bearer string
+}
+
+type fixtureDraft struct {
+	MessageID string
+	ThreadID  string
+	Subject   string
+	Raw       []byte
+}
+
+type fixtureAttachment struct {
+	Filename string
+	MimeType string
+	Contents []byte
+}
+
 type fakeGmail struct {
-	mu            sync.Mutex
-	readAuths     []string
-	writeAuths    []string
-	sendAuths     []string
-	sent          []capturedSend
-	batchRequests []string
-	modified      []string
-	trashed       []string
-	listPages     [][]string
-	listDelay     time.Duration
-	threads       map[string]string
-	messages      map[string]string
-	rawMessages   map[string][]byte
-	server        *httptest.Server
-	token         *httptest.Server
+	mu                sync.Mutex
+	readAuths         []string
+	writeAuths        []string
+	sendAuths         []string
+	sent              []capturedSend
+	batchRequests     []string
+	modified          []string
+	trashed           []string
+	calls             []recordedCall
+	unknown           []recordedCall
+	listPages         [][]string
+	listDelay         time.Duration
+	threads           map[string]string
+	messages          map[string]string
+	rawMessages       map[string][]byte
+	drafts            map[string]*fixtureDraft
+	draftOrder        []string
+	draftDeleteStatus int
+	attachments       map[string][]byte
+	sendGarbage       bool
+	sendStatus        int
+	server            *httptest.Server
+	token             *httptest.Server
 }
 
 func newFakeGmail(t *testing.T) *fakeGmail {
@@ -103,6 +131,7 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	github := fakeMessageWithHeaders("t-gh", "GitHub notification", githubHeaders)
 	githubTwo := fakeMessageWithHeaders("t-gh-2", "GitHub notification two", githubHeaders)
 	githubThree := fakeMessageWithHeaders("t-gh-3", "GitHub notification three", githubHeaders)
+	attachment := fakeAttachmentMessage()
 	g := &fakeGmail{
 		threads: map[string]string{
 			"t1":     fakeThread("t1", t1),
@@ -111,6 +140,7 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 			"t-gh":   fakeThread("t-gh", github),
 			"t-gh-2": fakeThread("t-gh-2", githubTwo),
 			"t-gh-3": fakeThread("t-gh-3", githubThree),
+			"t-att":  fakeThread("t-att", attachment),
 		},
 		messages: map[string]string{
 			"m-t1":     t1,
@@ -119,12 +149,15 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 			"m-t-gh":   github,
 			"m-t-gh-2": githubTwo,
 			"m-t-gh-3": githubThree,
+			"m-att":    attachment,
 		},
 		rawMessages: map[string][]byte{
 			"m-t1": []byte("From: A <a@example.test>\r\nTo: B <b@example.test>\r\nSubject: PTY smoke\r\n\r\noriginal"),
 			"m-t2": []byte("From: A <a@example.test>\r\nTo: B <b@example.test>\r\nSubject: Second PTY smoke\r\n\r\noriginal"),
 			"m-t3": []byte("From: Self <work@example.test>\r\nTo: Self <work@example.test>\r\nSubject: self-only\r\n\r\noriginal"),
 		},
+		drafts:      make(map[string]*fixtureDraft),
+		attachments: make(map[string][]byte),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/gmail/v1/users/me/threads", g.serveThreadList)
@@ -136,46 +169,18 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 		g.recordReadAuth(request)
 		fmt.Fprint(w, `{"emailAddress":"work@example.test"}`)
 	})
-	mux.HandleFunc("/gmail/v1/users/me/messages/send", func(w http.ResponseWriter, request *http.Request) {
-		var body struct {
-			Raw      string `json:"raw"`
-			ThreadID string `json:"threadId"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid send request", http.StatusBadRequest)
-			return
-		}
-		raw, err := base64.RawURLEncoding.DecodeString(body.Raw)
-		if err != nil {
-			http.Error(w, "invalid raw message", http.StatusBadRequest)
-			return
-		}
-		g.recordSendAuth(request)
-		g.recordSend(request, raw, body.ThreadID)
-		fmt.Fprint(w, `{"id":"sent-e2e-1","threadId":"t1"}`)
-	})
-	mux.HandleFunc("/gmail/v1/users/me/messages/", func(w http.ResponseWriter, request *http.Request) {
-		g.recordReadAuth(request)
-		id := strings.TrimPrefix(request.URL.Path, "/gmail/v1/users/me/messages/")
-		if request.URL.Query().Get("format") == "raw" {
-			raw, ok := g.rawMessages[id]
-			if !ok {
-				http.NotFound(w, request)
-				return
-			}
-			fmt.Fprintf(w, `{"id":%q,"threadId":%q,"raw":%q}`, id, strings.TrimPrefix(id, "m-"), base64.RawURLEncoding.EncodeToString(raw))
-			return
-		}
-		message, ok := g.messages[id]
-		if !ok {
-			http.NotFound(w, request)
-			return
-		}
-		fmt.Fprint(w, message)
-	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/send", g.serveMessageSend)
+	mux.HandleFunc("/gmail/v1/users/me/messages/", g.serveMessage)
+	mux.HandleFunc("/gmail/v1/users/me/drafts", g.serveDrafts)
+	mux.HandleFunc("/gmail/v1/users/me/drafts/send", g.serveDraftsSend)
+	mux.HandleFunc("/gmail/v1/users/me/drafts/", g.serveDraft)
 	mux.HandleFunc("/gmail/v1/users/me/threads/", g.serveThread)
 	mux.HandleFunc("/batch/gmail/v1", g.serveBatch)
-	g.server = httptest.NewServer(mux)
+	mux.HandleFunc("/", g.serveUnknown)
+	g.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		g.record(recordedCall{Method: request.Method, Path: request.URL.Path, Bearer: request.Header.Get("Authorization")})
+		mux.ServeHTTP(w, request)
+	}))
 	t.Cleanup(g.server.Close)
 	g.token = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"access_token":"pty-mut-tok","expires_in":3600}`)
@@ -184,6 +189,464 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	return g
 }
 
+func (g *fakeGmail) serveMessageSend(w http.ResponseWriter, request *http.Request) {
+	var body struct {
+		Raw      string `json:"raw"`
+		ThreadID string `json:"threadId"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid send request", http.StatusBadRequest)
+		return
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(body.Raw)
+	if err != nil {
+		http.Error(w, "invalid raw message", http.StatusBadRequest)
+		return
+	}
+	g.recordSendAuth(request)
+	g.recordSend(request, raw, body.ThreadID)
+
+	g.mu.Lock()
+	garbage := g.sendGarbage
+	status := g.sendStatus
+	g.sendGarbage = false
+	g.sendStatus = 0
+	g.mu.Unlock()
+	if garbage {
+		fmt.Fprint(w, "not-json")
+		return
+	}
+	if status != 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprintf(w, `{"error":{"code":%d,"message":"armed send status"}}`, status)
+		return
+	}
+	fmt.Fprint(w, `{"id":"sent-e2e-1","threadId":"t1"}`)
+}
+
+func (g *fakeGmail) serveMessage(w http.ResponseWriter, request *http.Request) {
+	g.recordReadAuth(request)
+	const prefix = "/gmail/v1/users/me/messages/"
+	path := strings.TrimPrefix(request.URL.Path, prefix)
+	if messageID, attachmentID, found := strings.Cut(path, "/attachments/"); found {
+		g.serveAttachment(w, request, messageID, attachmentID)
+		return
+	}
+	if request.URL.Query().Get("format") == "raw" {
+		raw, ok := g.rawMessages[path]
+		if !ok {
+			http.NotFound(w, request)
+			return
+		}
+		fmt.Fprintf(w, `{"id":%q,"threadId":%q,"raw":%q}`, path, strings.TrimPrefix(path, "m-"), base64.RawURLEncoding.EncodeToString(raw))
+		return
+	}
+	message, ok := g.messages[path]
+	if !ok {
+		http.NotFound(w, request)
+		return
+	}
+	fmt.Fprint(w, message)
+}
+
+func (g *fakeGmail) serveAttachment(w http.ResponseWriter, request *http.Request, messageID, attachmentID string) {
+	if messageID != "m-att" && !strings.HasPrefix(messageID, "m-d-e2e-") {
+		http.NotFound(w, request)
+		return
+	}
+	contents, ok := g.attachmentContents(attachmentID)
+	if !ok {
+		http.NotFound(w, request)
+		return
+	}
+	fmt.Fprintf(w, `{"data":%q}`, base64.RawURLEncoding.EncodeToString(contents))
+}
+
+func (g *fakeGmail) serveDrafts(w http.ResponseWriter, request *http.Request) {
+	switch request.Method {
+	case http.MethodGet:
+		g.recordReadAuth(request)
+		g.serveDraftList(w, request)
+	case http.MethodPost:
+		g.recordWriteAuth(request)
+		g.serveDraftCreate(w, request)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (g *fakeGmail) serveDraft(w http.ResponseWriter, request *http.Request) {
+	const prefix = "/gmail/v1/users/me/drafts/"
+	path := strings.TrimPrefix(request.URL.Path, prefix)
+	if draftID, update := strings.CutSuffix(path, "/update"); update {
+		if request.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		g.rotateDraft(w, request, draftID)
+		return
+	}
+	switch request.Method {
+	case http.MethodGet:
+		g.recordReadAuth(request)
+		g.serveDraftGet(w, request, path)
+	case http.MethodDelete:
+		g.recordWriteAuth(request)
+		g.serveDraftDelete(w, request, path)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (g *fakeGmail) serveDraftsSend(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	fmt.Fprint(w, `{"error":{"code":500,"message":"drafts.send is prohibited by the fixture"}}`)
+}
+
+func (g *fakeGmail) serveDraftList(w http.ResponseWriter, request *http.Request) {
+	max := len(g.draftOrder)
+	if raw := request.URL.Query().Get("maxResults"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			http.Error(w, "invalid maxResults", http.StatusBadRequest)
+			return
+		}
+		max = min(max, parsed)
+	}
+
+	g.mu.Lock()
+	drafts := make([]map[string]any, 0, max)
+	for index := len(g.draftOrder) - 1; index >= 0 && len(drafts) < max; index-- {
+		id := g.draftOrder[index]
+		draft := g.drafts[id]
+		drafts = append(drafts, map[string]any{
+			"id": id,
+			"message": map[string]any{
+				"id":       draft.MessageID,
+				"threadId": draft.ThreadID,
+			},
+		})
+	}
+	g.mu.Unlock()
+	if err := json.NewEncoder(w).Encode(map[string]any{"drafts": drafts}); err != nil {
+		panic(err)
+	}
+}
+
+func (g *fakeGmail) serveDraftCreate(w http.ResponseWriter, request *http.Request) {
+	var body struct {
+		Message struct {
+			Raw      string `json:"raw"`
+			ThreadID string `json:"threadId"`
+		} `json:"message"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid draft request", http.StatusBadRequest)
+		return
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(body.Message.Raw)
+	if err != nil {
+		http.Error(w, "invalid draft raw message", http.StatusBadRequest)
+		return
+	}
+	headers, _, _, err := fixtureDraftParts(raw)
+	if err != nil {
+		http.Error(w, "invalid draft MIME", http.StatusBadRequest)
+		return
+	}
+
+	g.mu.Lock()
+	number := len(g.draftOrder) + 1
+	id := fmt.Sprintf("d-e2e-%d", number)
+	draft := &fixtureDraft{
+		MessageID: fmt.Sprintf("m-d-e2e-%d", number),
+		ThreadID:  body.Message.ThreadID,
+		Subject:   headers["Subject"],
+		Raw:       append([]byte(nil), raw...),
+	}
+	g.drafts[id] = draft
+	g.draftOrder = append(g.draftOrder, id)
+	response, err := g.draftResponseLocked(id, draft, true)
+	g.mu.Unlock()
+	if err != nil {
+		http.Error(w, "invalid draft MIME", http.StatusInternalServerError)
+		return
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		panic(err)
+	}
+}
+
+func (g *fakeGmail) serveDraftGet(w http.ResponseWriter, request *http.Request, id string) {
+	g.mu.Lock()
+	draft, ok := g.drafts[id]
+	if !ok {
+		g.mu.Unlock()
+		http.NotFound(w, request)
+		return
+	}
+	response, err := g.draftResponseLocked(id, draft, request.URL.Query().Get("format") != "metadata")
+	g.mu.Unlock()
+	if err != nil {
+		http.Error(w, "invalid draft MIME", http.StatusInternalServerError)
+		return
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		panic(err)
+	}
+}
+
+func (g *fakeGmail) serveDraftDelete(w http.ResponseWriter, request *http.Request, id string) {
+	g.mu.Lock()
+	status := g.draftDeleteStatus
+	_, ok := g.drafts[id]
+	if status == 0 && ok {
+		delete(g.drafts, id)
+	}
+	g.mu.Unlock()
+	if !ok {
+		http.NotFound(w, request)
+		return
+	}
+	if status != 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprintf(w, `{"error":{"code":%d,"message":"armed draft delete status"}}`, status)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (g *fakeGmail) rotateDraft(w http.ResponseWriter, request *http.Request, id string) {
+	g.mu.Lock()
+	draft, ok := g.drafts[id]
+	if ok {
+		draft.MessageID += "r"
+	}
+	g.mu.Unlock()
+	if !ok {
+		http.NotFound(w, request)
+		return
+	}
+	fmt.Fprint(w, `{}`)
+}
+
+func (g *fakeGmail) draftResponseLocked(id string, draft *fixtureDraft, full bool) (map[string]any, error) {
+	headers, text, attachments, err := fixtureDraftParts(draft.Raw)
+	if err != nil {
+		return nil, err
+	}
+	headers["Subject"] = draft.Subject
+	headers["Message-ID"] = "<" + draft.MessageID + "@example.test>"
+	parts := make([]any, 0, len(attachments)+1)
+	textBody := map[string]any{"size": len([]byte(text))}
+	if full {
+		textBody["data"] = base64.RawURLEncoding.EncodeToString([]byte(text))
+	}
+	parts = append(parts, map[string]any{
+		"partId":   "0",
+		"mimeType": "text/plain",
+		"filename": "",
+		"body":     textBody,
+	})
+	for index, attachment := range attachments {
+		attachmentID := fmt.Sprintf("%s-a-%d", id, index)
+		g.attachments[attachmentID] = append([]byte(nil), attachment.Contents...)
+		parts = append(parts, map[string]any{
+			"partId":   strconv.Itoa(index + 1),
+			"mimeType": attachment.MimeType,
+			"filename": attachment.Filename,
+			"headers": fixtureHeaderList(map[string]string{
+				"Content-Type": attachment.MimeType,
+			}),
+			"body": map[string]any{
+				"attachmentId": attachmentID,
+				"size":         len(attachment.Contents),
+			},
+		})
+	}
+	return map[string]any{
+		"id": id,
+		"message": map[string]any{
+			"id":           draft.MessageID,
+			"threadId":     draft.ThreadID,
+			"internalDate": fmt.Sprintf("%d", 1788000000000+int64(len(g.draftOrder))),
+			"payload": map[string]any{
+				"partId":   "",
+				"mimeType": "multipart/mixed",
+				"headers":  fixtureHeaderList(headers),
+				"parts":    parts,
+			},
+		},
+	}, nil
+}
+
+func fixtureDraftParts(raw []byte) (map[string]string, string, []fixtureAttachment, error) {
+	message, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return nil, "", nil, err
+	}
+	headers := make(map[string]string)
+	for _, name := range []string{"To", "Subject", "In-Reply-To", "References"} {
+		if value := message.Header.Get(name); value != "" {
+			headers[name] = value
+		}
+	}
+	var text string
+	var attachments []fixtureAttachment
+	if err := walkFixtureMIME(message.Header, message.Body, &text, &attachments); err != nil {
+		return nil, "", nil, err
+	}
+	return headers, text, attachments, nil
+}
+
+func walkFixtureMIME(header interface{ Get(string) string }, body io.Reader, text *string, attachments *[]fixtureAttachment) error {
+	mediaType := "text/plain"
+	params := map[string]string{}
+	if contentType := header.Get("Content-Type"); contentType != "" {
+		parsed, parsedParams, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			return err
+		}
+		mediaType = parsed
+		params = parsedParams
+	}
+	if strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return errors.New("multipart draft without a boundary")
+		}
+		reader := multipart.NewReader(body, boundary)
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if err := walkFixtureMIME(part.Header, part, text, attachments); err != nil {
+				return err
+			}
+		}
+	}
+
+	contents, err := fixtureMIMEPartBytes(body, header.Get("Content-Transfer-Encoding"))
+	if err != nil {
+		return err
+	}
+	disposition, dispositionParams, err := mime.ParseMediaType(header.Get("Content-Disposition"))
+	if err != nil && header.Get("Content-Disposition") != "" {
+		return err
+	}
+	if filename := dispositionParams["filename"]; filename != "" || strings.EqualFold(disposition, "attachment") {
+		*attachments = append(*attachments, fixtureAttachment{
+			Filename: filename,
+			MimeType: mediaType,
+			Contents: contents,
+		})
+		return nil
+	}
+	if *text == "" && strings.EqualFold(mediaType, "text/plain") {
+		*text = string(contents)
+	}
+	return nil
+}
+
+func fixtureMIMEPartBytes(body io.Reader, transferEncoding string) ([]byte, error) {
+	if strings.EqualFold(strings.TrimSpace(transferEncoding), "base64") {
+		return io.ReadAll(base64.NewDecoder(base64.StdEncoding, body))
+	}
+	return io.ReadAll(body)
+}
+
+func fixtureHeaderList(values map[string]string) []map[string]string {
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	headers := make([]map[string]string, 0, len(names))
+	for _, name := range names {
+		headers = append(headers, map[string]string{"name": name, "value": values[name]})
+	}
+	return headers
+}
+
+func (g *fakeGmail) serveUnknown(w http.ResponseWriter, request *http.Request) {
+	call := recordedCall{Method: request.Method, Path: request.URL.Path, Bearer: request.Header.Get("Authorization")}
+	g.mu.Lock()
+	g.unknown = append(g.unknown, call)
+	g.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	fmt.Fprint(w, `{"error":{"code":500,"message":"unknown fixture endpoint"}}`)
+}
+
+func fixtureAttachmentBytes(id string) []byte {
+	return []byte("fixture-bytes-" + id)
+}
+
+func (g *fakeGmail) attachmentContents(id string) ([]byte, bool) {
+	g.mu.Lock()
+	contents, ok := g.attachments[id]
+	g.mu.Unlock()
+	if ok {
+		return append([]byte(nil), contents...), true
+	}
+	switch id {
+	case "a-evil", "a-ok":
+		return fixtureAttachmentBytes(id), true
+	default:
+		return nil, false
+	}
+}
+
+func fakeAttachmentMessage() string {
+	attachmentPart := func(partID, filename, attachmentID string) map[string]any {
+		contents := fixtureAttachmentBytes(attachmentID)
+		return map[string]any{
+			"partId":   partID,
+			"mimeType": "application/pdf",
+			"filename": filename,
+			"headers": fixtureHeaderList(map[string]string{
+				"Content-Disposition": `attachment; filename="` + filename + `"`,
+				"Content-Type":        "application/pdf",
+			}),
+			"body": map[string]any{
+				"attachmentId": attachmentID,
+				"size":         len(contents),
+			},
+		}
+	}
+	message := map[string]any{
+		"id":           "m-att",
+		"threadId":     "t-att",
+		"internalDate": "1788000000000",
+		"labelIds":     []string{"INBOX"},
+		"payload": map[string]any{
+			"partId":   "",
+			"mimeType": "multipart/mixed",
+			"headers": fixtureHeaderList(map[string]string{
+				"From":       "A <a@example.test>",
+				"Message-ID": "<m-att@example.test>",
+				"Subject":    "Attachments",
+				"To":         "B <b@example.test>",
+			}),
+			"parts": []any{
+				attachmentPart("0", "../../evil\u202e.pdf", "a-evil"),
+				attachmentPart("1", "report.pdf", "a-ok"),
+			},
+		},
+	}
+	encoded, err := json.Marshal(message)
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
 func (g *fakeGmail) serveThreadList(w http.ResponseWriter, request *http.Request) {
 	g.recordReadAuth(request)
 	g.mu.Lock()
@@ -444,6 +907,47 @@ func (g *fakeGmail) recordSend(request *http.Request, raw []byte, threadID strin
 	defer g.mu.Unlock()
 	g.sent = append(g.sent, capturedSend{Auth: request.Header.Get("Authorization"), Raw: append([]byte(nil), raw...), ThreadID: threadID})
 }
+func (g *fakeGmail) record(call recordedCall) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.calls = append(g.calls, call)
+}
+
+func (g *fakeGmail) armSendGarbage() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sendGarbage = true
+	g.sendStatus = 0
+}
+
+func (g *fakeGmail) armSendStatus(status int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.sendGarbage = false
+	g.sendStatus = status
+}
+
+func (g *fakeGmail) setDraftSubject(id, subject string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	draft, ok := g.drafts[id]
+	if !ok {
+		panic("fixture draft not found: " + id)
+	}
+	draft.Subject = subject
+}
+
+func (g *fakeGmail) recordedCalls() []recordedCall {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]recordedCall(nil), g.calls...)
+}
+
+func (g *fakeGmail) unknownCalls() []recordedCall {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]recordedCall(nil), g.unknown...)
+}
 
 func (g *fakeGmail) recordedReadAuths() []string {
 	g.mu.Lock()
@@ -662,7 +1166,14 @@ func shortTempDir(t *testing.T) string {
 // runBinary executes the built mailbox on the batch surface with only env.
 func runBinary(t *testing.T, env map[string]string, args ...string) (int, string, string) {
 	t.Helper()
+	return runBinaryInDir(t, "", env, args...)
+}
+
+// runBinaryInDir executes the built mailbox with dir as its working directory.
+func runBinaryInDir(t *testing.T, dir string, env map[string]string, args ...string) (int, string, string) {
+	t.Helper()
 	command := exec.Command(buildMailbox(t), args...)
+	command.Dir = dir
 	command.Env = environment(env)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -677,6 +1188,56 @@ func runBinary(t *testing.T, env map[string]string, args ...string) (int, string
 	}
 	t.Fatalf("run mailbox %q: %v", args, err)
 	return -1, "", ""
+}
+
+type draftFixture struct {
+	sendFixture
+	writeHelper        string
+	writeSpawnFile     string
+	writeSpawnPaneFile string
+}
+
+func newDraftFixture(t *testing.T) *draftFixture {
+	t.Helper()
+	send := newSendFixture(t, true)
+	writeHelper := filepath.Join(send.stubs, "write-helper")
+	writeSpawnFile := filepath.Join(send.stubs, "write-spawns")
+	writeSpawnPaneFile := filepath.Join(send.stubs, "write-spawn-pane")
+	writeExecutable(t, writeHelper, `#!/bin/sh
+if [ -n "$PTY_TMUX_BIN" ]; then
+  "$PTY_TMUX_BIN" -S "$PTY_TMUX_SOCKET" capture-pane -p -t "$PTY_TMUX_SESSION" > "$WRITE_PANE_FILE" 2>&1
+fi
+printf 'spawn\n' >> "$WRITE_SPAWN_FILE"
+sleep 2
+printf '%s\n' "$WRITE_CANARY"
+`)
+	config := writeE2EConfig(t, send.stubs, `default_account = "work"
+[accounts.work]
+read_credential_env = "PTY_READ_OAUTH"
+write_credential_cmd = ["write-helper"]
+write_interactive = true
+write_label = "write approval"
+send_credential_cmd = ["send-helper"]
+send_interactive = true
+send_label = "hardware key touch"
+credential_env_passthrough = ["SEND_SPAWN_FILE", "SEND_PANE_FILE", "WRITE_SPAWN_FILE", "WRITE_PANE_FILE", "PTY_TMUX_BIN", "PTY_TMUX_SOCKET", "PTY_TMUX_SESSION"]
+write_credential_env_passthrough = ["WRITE_CANARY"]
+send_credential_env_passthrough = ["SEND_CANARY"]
+`)
+	send.env["MAILBOX_CONFIG"] = config
+	send.env["WRITE_CANARY"] = writeCanary()
+	send.env["WRITE_SPAWN_FILE"] = writeSpawnFile
+	send.env["WRITE_PANE_FILE"] = writeSpawnPaneFile
+	return &draftFixture{
+		sendFixture:        *send,
+		writeHelper:        writeHelper,
+		writeSpawnFile:     writeSpawnFile,
+		writeSpawnPaneFile: writeSpawnPaneFile,
+	}
+}
+
+func writeCanary() string {
+	return strings.Join([]string{"canary", "write", "token", "value", "1234567890abcdef"}, "-")
 }
 
 func environment(env map[string]string) []string {
