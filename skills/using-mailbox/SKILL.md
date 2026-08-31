@@ -19,7 +19,7 @@ Use `mailbox` for one-shot Gmail triage commands. Run `mailbox <command> --help`
 | `trash` | `mailbox trash [--filter NAME] [--text\|--json] [<thread>...]` | move threads to trash |
 | `mark` | `mailbox mark [--filter NAME] [--text\|--json] <read\|unread> [<thread>...]` | mark threads read or unread |
 | `label` | `mailbox label [--filter NAME] [--text\|--json] <add\|rm> <label> [<thread>...]` | add or remove a label |
-| `attachment` | `mailbox attachment [-o PATH] [--text\|--json] <thread> [attachment]` | list or save attachments |
+| `attachment` | `mailbox attachment [-o PATH\|-o -] [--text\|--json] <message-id> [filename\|index]` | list or fetch message attachments |
 | `status` | `mailbox status [--text\|--json]` | show configured account status |
 | `send` | `mailbox send [--attach PATH]... [--save-draft\|--send] [options]` | compose, reply, or forward mail (dry-run by default) |
 
@@ -57,7 +57,7 @@ Adds or removes one Gmail label on one or more threads, or every inbox thread ma
 
 ### `attachment`
 
-Lists a thread's attachments, or saves one numbered attachment; -o selects the output file or directory.
+Lists a message's attachments from 'read' output, or fetches one. Listings use zero-based indexes and sanitized filenames; select an exact listed filename or zero-based index. Downloads never overwrite existing files (attachment_exists); use -o to choose another file or directory. -o - streams raw bytes to stdout and writes status to stderr, without machine-format wrapping.
 
 ### `status`
 
@@ -93,7 +93,7 @@ Refusal rules:
 
 ## Id semantics
 
-ids: mailbox ids are THREAD ids everywhere; the one exception is 'send --message', which names a message WITHIN the given thread (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing.
+ids: mailbox ids are THREAD ids everywhere; the exceptions are 'send --message' and 'attachment', which take message ids (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing.
 
 ## Output formats
 

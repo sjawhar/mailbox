@@ -60,9 +60,10 @@ func TestToontestMirrorsMatchRealPayloads(t *testing.T) {
 		actionPayload{Account: "s1", Action: "s2", ThreadIDs: []string{"s3"}, OK: true},
 		filterActionPayload{Account: "s1", Action: "s2", Filter: "s3", Matched: 1, Attempted: 1, Succeeded: []string{"s1"}, Failed: []filterActionFailure{{ID: "s2", Status: 7, Reason: "s3"}}, OK: true},
 		attachmentListSample("s1", "s2", "s3"),
-		attachmentSavePayload{Account: "s1", File: "s2", Filename: "s3", Size: 7},
+		attachmentSavePayload{Account: "s1", Path: "s2", Filename: "s3", Size: 7, SHA256: "s1"},
 		openPayload{Account: "s1", ThreadID: "s2", MessageID: "s3", File: "s1"},
 		errorEnvelopeSample("s1", "s2", "s3"),
+		cliErrorPayloadSample("s1", "s2", "s3"),
 		usageErrorPayloadSample("s1", "s2"),
 		envelopePayloadSample("s1", "s2", "s3"),
 	}
@@ -177,8 +178,8 @@ func statusSample(s1, s2, s3 string) statusOutput {
 func attachmentListSample(s1, s2, s3 string) attachmentListPayload {
 	return attachmentListPayload{
 		Account:     s1,
-		ThreadID:    s2,
-		Attachments: []render.Attachment{{N: 1, Filename: s3, MimeType: s1, Size: 7}},
+		Message:     s2,
+		Attachments: []attachmentRow{{Index: 7, Filename: s3, MIMEType: s1, Size: 7}},
 	}
 }
 
@@ -188,6 +189,14 @@ func errorEnvelopeSample(s1, s2, s3 string) errorEnvelope {
 	output.Error.Account = s2
 	output.Error.ConfigKey = s3
 	output.Error.Config = s1
+	return output
+}
+
+func cliErrorPayloadSample(s1, s2, s3 string) cliErrorPayload {
+	output := cliErrorPayload{}
+	output.Error.Code = s1
+	output.Error.Account = s2
+	output.Error.Message = s3
 	return output
 }
 

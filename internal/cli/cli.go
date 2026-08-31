@@ -38,7 +38,7 @@ type commandSpec struct {
 	run         func(*cmdCtx, []string) int
 }
 
-const idSemantics = "ids: mailbox ids are THREAD ids everywhere; the one exception is 'send --message', which names a message WITHIN the given thread (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing."
+const idSemantics = "ids: mailbox ids are THREAD ids everywhere; the exceptions are 'send --message' and 'attachment', which take message ids (message ids appear in 'read' output). All-digit arguments are refs into the last 'inbox'/'search' listing."
 
 const jsonFlagHelp = "machine-readable JSON output (stable)"
 
@@ -110,9 +110,9 @@ func commandSpecs() []commandSpec {
 		},
 		{
 			name:        "attachment",
-			description: "list or save attachments",
-			usage:       "mailbox attachment [-o PATH] [--text|--json] <thread> [attachment]",
-			help:        "Lists a thread's attachments, or saves one numbered attachment; -o selects the output file or directory.",
+			description: "list or fetch message attachments",
+			usage:       "mailbox attachment [-o PATH|-o -] [--text|--json] <message-id> [filename|index]",
+			help:        "Lists a message's attachments from 'read' output, or fetches one. Listings use zero-based indexes and sanitized filenames; select an exact listed filename or zero-based index. Downloads never overwrite existing files (attachment_exists); use -o to choose another file or directory. -o - streams raw bytes to stdout and writes status to stderr, without machine-format wrapping.",
 			run:         runAttachment,
 		},
 		{
@@ -456,6 +456,30 @@ func (cc *cmdCtx) needsCredential(err *auth.NeedsCredentialError) int {
 	output.Error.Config = err.ConfigPath
 	if writeErr := cc.writeMachine(output); writeErr != nil {
 		fmt.Fprintf(cc.stderr, "mailbox: write credential error output: %v\n", writeErr)
+	}
+	return 1
+}
+
+type cliErrorPayload struct {
+	Error struct {
+		Code    string `json:"code"`
+		Account string `json:"account"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func (cc *cmdCtx) commandError(account string, source *auth.Source, class auth.Class, code, message string) int {
+	cc.emitCredentialDiagnostic(source, class)
+	if cc.format() == FormatText {
+		fmt.Fprintf(cc.stderr, "mailbox: %s\n", render.SanitizeTerminal(message))
+		return 1
+	}
+	output := cliErrorPayload{}
+	output.Error.Code = code
+	output.Error.Account = account
+	output.Error.Message = message
+	if err := cc.writeMachine(output); err != nil {
+		fmt.Fprintf(cc.stderr, "mailbox: write command error output: %v\n", err)
 	}
 	return 1
 }

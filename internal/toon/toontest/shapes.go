@@ -42,10 +42,11 @@ func Shapes(s1, s2, s3 string) []any {
 		},
 		actionPayload{Account: s1, Action: s2, ThreadIDs: []string{s3}, OK: true},
 		filterActionPayload{Account: s1, Action: s2, Filter: s3, Matched: 1, Attempted: 1, Succeeded: []string{s1}, Failed: []filterActionFailure{{ID: s2, Status: 7, Reason: s3}}, OK: true},
-		attachmentListPayload{Account: s1, ThreadID: s2, Attachments: []attachment{{N: 1, Filename: s3, MimeType: s1, Size: 7}}},
-		attachmentSavePayload{Account: s1, File: s2, Filename: s3, Size: 7},
+		attachmentListPayload{Account: s1, Message: s2, Attachments: []attachmentRow{{Index: 7, Filename: s3, MIMEType: s1, Size: 7}}},
+		attachmentSavePayload{Account: s1, Path: s2, Filename: s3, Size: 7, SHA256: s1},
 		openPayload{Account: s1, ThreadID: s2, MessageID: s3, File: s1},
 		errorEnvelope{Error: errorDetail{Code: s1, Account: s2, ConfigKey: s3, Config: s1}},
+		cliErrorPayload{Error: cliErrorDetail{Code: s1, Account: s2, Message: s3}},
 		usageErrorPayload{Error: usageErrorDetail{Code: s1, Message: s2}},
 		envelopePayload{
 			Account:    s1,
@@ -184,16 +185,24 @@ type filterActionFailure struct {
 }
 
 type attachmentListPayload struct {
-	Account     string       `json:"account"`
-	ThreadID    string       `json:"threadId"`
-	Attachments []attachment `json:"attachments"`
+	Account     string          `json:"account"`
+	Message     string          `json:"message"`
+	Attachments []attachmentRow `json:"attachments"`
+}
+
+type attachmentRow struct {
+	Index    int    `json:"index"`
+	Filename string `json:"filename"`
+	MIMEType string `json:"mime_type"`
+	Size     int64  `json:"size"`
 }
 
 type attachmentSavePayload struct {
 	Account  string `json:"account"`
-	File     string `json:"file"`
+	Path     string `json:"path"`
 	Filename string `json:"filename"`
 	Size     int64  `json:"size"`
+	SHA256   string `json:"sha256"`
 }
 
 type openPayload struct {
@@ -212,6 +221,16 @@ type errorDetail struct {
 	Account   string `json:"account"`
 	ConfigKey string `json:"config_key"`
 	Config    string `json:"config"`
+}
+
+type cliErrorPayload struct {
+	Error cliErrorDetail `json:"error"`
+}
+
+type cliErrorDetail struct {
+	Code    string `json:"code"`
+	Account string `json:"account"`
+	Message string `json:"message"`
 }
 
 type usageErrorPayload struct {
