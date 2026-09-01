@@ -297,6 +297,28 @@ func TestModifyThreadsBatch(t *testing.T) {
 	}
 }
 
+func TestModifyThreadsDeduplicatesIDsBeforeBatchMutation(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		parts := readBatchRequest(t, r)
+		if got, want := len(parts), 2; got != want {
+			t.Fatalf("batch parts = %d, want %d", got, want)
+		}
+		for index, want := range []string{"t1", "t2"} {
+			if got := strings.TrimSuffix(strings.TrimPrefix(parts[index].request.URL.Path, "/gmail/v1/users/me/threads/"), "/modify"); got != want {
+				t.Fatalf("part %d thread id = %q, want %q", index, got, want)
+			}
+		}
+		writeBatchResponse(t, w, []batchResponsePart{
+			{index: 0, status: http.StatusNoContent},
+			{index: 1, status: http.StatusNoContent},
+		})
+	}, "token")
+
+	if err := client.ModifyThreads(context.Background(), []string{"t1", "t2", "t1"}, nil, nil); err != nil {
+		t.Fatalf("ModifyThreads: %v", err)
+	}
+}
+
 func TestTrashThreadsBatch(t *testing.T) {
 	ids := []string{"t0", "t1", "t2"}
 	var requests int

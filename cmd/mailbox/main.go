@@ -63,9 +63,3 @@ func dispatch(args []string, stdout, stderr io.Writer, terminal bool) int {
 	}
 	return 0
 }
-
-// bare reports whether the shared top-level grammar contains no subcommand.
-func bare(args []string) bool {
-	flags, rest, err := cli.ParseTopLevel(args)
-	return err == nil && !flags.Help && len(rest) == 0
-}

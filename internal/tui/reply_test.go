@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -219,6 +220,141 @@ func TestConfirmSendRunsThroughClassSendUnlock(t *testing.T) {
 
 	if unlockCalls != 1 || len(api.sendCalls) != 1 || !strings.Contains(model.status, "sent — thread updated") {
 		t.Fatalf("send result = unlocks:%d sends:%d status:%q", unlockCalls, len(api.sendCalls), model.status)
+	}
+}
+
+func TestConfirmSendIgnoresSecondYWhileFirstSendInFlight(t *testing.T) {
+	thread := replyThread()
+	model, api := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	model = confirmWithBody(t, model, "Send only once")
+
+	model, fence := update(t, model, key(keyConfirmSend))
+	armed := runCmd(t, fence)
+	model, acquire := update(t, model, armed)
+	model, sendCommand := update(t, model, runCmd(t, acquire))
+	pending := model.pendingSend
+	status := model.status
+
+	if pending == nil || model.unlocking {
+		t.Fatalf("first send state = pending:%#v unlocking:%t", pending, model.unlocking)
+	}
+
+	model, second := update(t, model, key(keyConfirmSend))
+
+	if second != nil {
+		t.Fatalf("second y returned command %v while send is in flight", second)
+	}
+	if model.unlocking || model.pendingSend != pending {
+		t.Fatalf("second y re-armed send state: unlocking=%t pending=%#v", model.unlocking, model.pendingSend)
+	}
+	if model.status != status {
+		t.Fatalf("second y changed status from %q to %q", status, model.status)
+	}
+
+	model, _ = update(t, model, runCmd(t, sendCommand))
+	if len(api.sendCalls) != 1 {
+		t.Fatalf("send calls = %d, want exactly one", len(api.sendCalls))
+	}
+}
+
+func TestSendInFlightKeepsConfirmControlsInert(t *testing.T) {
+	thread := replyThread()
+	model, api := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	model = confirmWithBody(t, model, "Send only once")
+
+	model, fence := update(t, model, key(keyConfirmSend))
+	armed := runCmd(t, fence)
+	model, acquire := update(t, model, armed)
+	model, sendCommand := update(t, model, runCmd(t, acquire))
+	pending := model.pendingSend
+
+	model, escape := update(t, model, key("esc"))
+	model, save := update(t, model, key("s"))
+	if escape != nil || save != nil || model.abandonPrompt || model.pendingDraft != nil || model.unlocking || model.pendingSend != pending {
+		t.Errorf("controls changed send state: esc:%v save:%v prompt:%t draft:%#v unlocking:%t pending:%#v", escape, save, model.abandonPrompt, model.pendingDraft, model.unlocking, model.pendingSend)
+	}
+
+	model, followup := update(t, model, runCmd(t, sendCommand))
+	if followup == nil || model.pendingSend != nil || model.pendingDraft != nil || model.unlocking || model.abandonPrompt || model.view != threadView {
+		t.Errorf("send completion state = followup:%v pending:%#v draft:%#v unlocking:%t prompt:%t view:%v", followup != nil, model.pendingSend, model.pendingDraft, model.unlocking, model.abandonPrompt, model.view)
+	}
+	if len(api.sendCalls) != 1 || !strings.Contains(model.View(), "sent — thread updated") {
+		t.Errorf("send completion not visible: calls:%d view:%q", len(api.sendCalls), model.View())
+	}
+}
+
+func TestSendCompletionDuringUnrelatedUnlockCleansReplyFlowWithoutStealingSurface(t *testing.T) {
+	thread := replyThread()
+	model, _ := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	model = confirmWithBody(t, model, "Send completion")
+
+	model, fence := update(t, model, key(keyConfirmSend))
+	armed := runCmd(t, fence)
+	model, acquire := update(t, model, armed)
+	model, sendCommand := update(t, model, runCmd(t, acquire))
+	completion := runCmd(t, sendCommand)
+	unlockRequest := model.beginRequest(unlockOperation)
+	model.unlocking = true
+	model.unlockClass = auth.ClassWrite
+	model.loading = true
+	model.status = "waiting for write approval"
+	model.statusError = false
+
+	model, command := update(t, model, completion)
+	if command != nil {
+		t.Errorf("send completion returned command %v while unlock owns the surface", command)
+	}
+	if model.pendingSend != nil || model.pendingDraft != nil || model.reply != (replyModel{}) || model.composeState != (composeState{}) || model.abandonPrompt {
+		t.Errorf("send completion leaked compose flow: send:%#v draft:%#v reply:%#v compose:%#v prompt:%t", model.pendingSend, model.pendingDraft, model.reply, model.composeState, model.abandonPrompt)
+	}
+	if !model.unlocking || !model.loading || model.view != replyConfirmView || model.status != "waiting for write approval" || model.statusError {
+		t.Errorf("send completion stole unlock surface: unlocking:%t loading:%t view:%v status:%q error:%t", model.unlocking, model.loading, model.view, model.status, model.statusError)
+	}
+	if !strings.Contains(model.View(), "waiting for write approval") {
+		t.Errorf("unlock surface no longer renders after send cleanup: %q", model.View())
+	}
+
+	model, _ = update(t, model, unlockDoneMsg{request: unlockRequest, class: auth.ClassWrite, err: errors.New("approval denied")})
+	if model.view != threadView {
+		t.Errorf("failed unrelated unlock left closed reply flow on view %v", model.view)
+	}
+}
+
+func TestDraftCompletionDuringUnrelatedUnlockCleansReplyFlowWithoutStealingSurface(t *testing.T) {
+	thread := replyThread()
+	model, _ := newTestApp([]*gmail.Thread{thread})
+	model.ctx.self = "me@example.test"
+	model = confirmWithBody(t, model, "Draft completion")
+
+	draftRequest := model.beginRequest(draftOperation)
+	unlockRequest := model.beginRequest(unlockOperation)
+	model.pendingDraft = &pendingDraft{mime: []byte("draft"), threadID: thread.ID}
+	model.unlocking = true
+	model.unlockClass = auth.ClassWrite
+	model.loading = true
+	model.status = "waiting for write approval"
+	model.statusError = false
+
+	model, command := update(t, model, draftSavedMsg{request: draftRequest, id: "draft-1"})
+	if command != nil {
+		t.Errorf("draft completion returned command %v while unlock owns the surface", command)
+	}
+	if model.pendingSend != nil || model.pendingDraft != nil || model.reply != (replyModel{}) || model.composeState != (composeState{}) || model.abandonPrompt {
+		t.Errorf("draft completion leaked compose flow: send:%#v draft:%#v reply:%#v compose:%#v prompt:%t", model.pendingSend, model.pendingDraft, model.reply, model.composeState, model.abandonPrompt)
+	}
+	if !model.unlocking || !model.loading || model.view != replyConfirmView || model.status != "waiting for write approval" || model.statusError {
+		t.Errorf("draft completion stole unlock surface: unlocking:%t loading:%t view:%v status:%q error:%t", model.unlocking, model.loading, model.view, model.status, model.statusError)
+	}
+	if !strings.Contains(model.View(), "waiting for write approval") {
+		t.Errorf("unlock surface no longer renders after draft cleanup: %q", model.View())
+	}
+
+	model, _ = update(t, model, unlockDoneMsg{request: unlockRequest, class: auth.ClassWrite, err: errors.New("approval denied")})
+	if model.view != threadView {
+		t.Errorf("failed unrelated unlock left closed reply flow on view %v", model.view)
 	}
 }
 

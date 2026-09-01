@@ -1253,7 +1253,7 @@ func TestArchiveMultiple(t *testing.T) {
 	}
 }
 
-func TestArchiveDuplicateExplicitIDsWritesItsReportedSelection(t *testing.T) {
+func TestArchiveDuplicateExplicitIDsDeduplicatesGmailWrite(t *testing.T) {
 	g := newGmailTestServer(t)
 	code, value, stderr := runJSON(t, g, "archive", "t1", "t1", "--json")
 	if code != 0 || stderr != "" {
@@ -1263,8 +1263,8 @@ func TestArchiveDuplicateExplicitIDsWritesItsReportedSelection(t *testing.T) {
 	if !ok || len(ids) != 2 || ids[0] != "t1" || ids[1] != "t1" {
 		t.Fatalf("reported thread ids = %#v, want [t1 t1]", value["threadIds"])
 	}
-	if len(g.batchWriteIDs) != 1 || strings.Join(g.batchWriteIDs[0], ",") != "t1,t1" {
-		t.Fatalf("Gmail write ids = %#v, want [[t1 t1]] to match the reported selection", g.batchWriteIDs)
+	if len(g.directRequests) != 1 || !strings.Contains(g.directRequests[0], "POST /gmail/v1/users/me/threads/t1/modify") || len(g.batchWriteIDs) != 0 {
+		t.Fatalf("Gmail write requests = direct %v, batch %v; want one direct t1 mutation", g.directRequests, g.batchWriteIDs)
 	}
 }
 

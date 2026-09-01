@@ -77,39 +77,17 @@ func (cc *cmdCtx) writeMachine(value any) error {
 }
 
 func normalizeRenderedThread(thread *render.RenderedThread) {
-	if thread.Participants == nil {
-		thread.Participants = []string{}
-	}
-	if thread.Messages == nil {
-		thread.Messages = []render.RenderedMessage{}
-	}
+	thread.Participants = normalizeSlice(thread.Participants)
+	thread.Messages = normalizeSlice(thread.Messages)
 	for index := range thread.Messages {
-		if thread.Messages[index].Links == nil {
-			thread.Messages[index].Links = []render.Link{}
-		}
-		if thread.Messages[index].Attachments == nil {
-			thread.Messages[index].Attachments = []render.Attachment{}
-		}
+		thread.Messages[index].Links = normalizeSlice(thread.Messages[index].Links)
+		thread.Messages[index].Attachments = normalizeSlice(thread.Messages[index].Attachments)
 	}
 }
 
-func normalizeAttachments(attachments []render.Attachment) []render.Attachment {
-	if attachments == nil {
-		return []render.Attachment{}
-	}
-	return attachments
-}
-
-func normalizeStrings(values []string) []string {
+func normalizeSlice[T any](values []T) []T {
 	if values == nil {
-		return []string{}
-	}
-	return values
-}
-
-func normalizeFailures(values []filterActionFailure) []filterActionFailure {
-	if values == nil {
-		return []filterActionFailure{}
+		return []T{}
 	}
 	return values
 }

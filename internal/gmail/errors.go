@@ -87,10 +87,6 @@ func decodeAPIError(resp *http.Response) error {
 	)
 }
 
-func decodeAPIErrorBody(status int, body io.Reader) error {
-	return decodeAPIErrorBodyWithRetryAfter(status, body, 0)
-}
-
 func decodeAPIErrorBodyWithRetryAfter(status int, body io.Reader, retryAfter time.Duration) error {
 	var decoded googleErrorResponse
 	if err := json.NewDecoder(body).Decode(&decoded); err != nil {

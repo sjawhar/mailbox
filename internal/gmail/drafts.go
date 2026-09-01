@@ -3,8 +3,6 @@ package gmail
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
-	"fmt"
 	"net/url"
 	"strconv"
 )
@@ -51,37 +49,14 @@ func (c *Client) GetDraft(ctx context.Context, id, format string) (*Draft, error
 
 // GetDraftsMetadata fetches draft metadata for ids in Gmail batch requests.
 func (c *Client) GetDraftsMetadata(ctx context.Context, ids []string) ([]*Draft, error) {
-	drafts := make([]*Draft, 0, len(ids))
-	for start := 0; start < len(ids); start += maxBatchParts {
-		end := min(start+maxBatchParts, len(ids))
-		items := make([]batchItem, 0, end-start)
-		for _, id := range ids[start:end] {
-			items = append(items, batchItem{
-				id:     id,
-				method: routes[opDraftsGet].method,
-				path:   routePath(opDraftsGet, []string{id}),
-				query:  url.Values{"format": {"metadata"}},
-			})
-		}
-		results, failures, err := c.doBatch(ctx, opDraftsGet, items)
-		if err != nil {
-			if len(failures) > 0 {
-				err = fmt.Errorf("%w; prior terminal batch failures: %s", err, newBatchFailure(failures))
-			}
-			return nil, err
-		}
-		if len(failures) > 0 {
-			return nil, c.batchScopeMapped(opDraftsGet, newBatchFailure(failures))
-		}
-		for _, result := range results {
-			var draft Draft
-			if err := json.Unmarshal(result.body, &draft); err != nil {
-				return nil, fmt.Errorf("gmail: decode batch draft metadata: %w", err)
-			}
-			drafts = append(drafts, &draft)
-		}
-	}
-	return drafts, nil
+	return batchFetch[Draft](
+		ctx,
+		c,
+		opDraftsGet,
+		ids,
+		url.Values{"format": {"metadata"}},
+		"gmail: decode batch draft metadata",
+	)
 }
 
 // CreateDraft stores raw as a Gmail draft, threading it when threadID is set.

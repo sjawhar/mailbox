@@ -11,86 +11,58 @@ import (
 // usable token. The surface owns the decision to unlock again.
 var ErrExpiredToken = errors.New("write token expired; a new unlock is required")
 
-type writeFlight struct {
-	done  chan struct{}
-	token Token
-	err   error
-}
-
 // WriteToken resolves a write credential. It uses an in-memory single flight
 // and never writes a write token to the read-token cache.
 func (s *Source) WriteToken(ctx context.Context, acq Acquirer) (string, error) {
 	if accessToken := os.Getenv("MAILBOX_TOKEN"); accessToken != "" {
-		s.wrMu.Lock()
-		s.wrRoute = RouteEnvToken
-		s.wrMu.Unlock()
+		s.write.mu.Lock()
+		s.write.route = RouteEnvToken
+		s.write.mu.Unlock()
 		return accessToken, nil
 	}
 
-	s.wrMu.Lock()
-	if token, ok := validToken(s.wrToken, time.Now()); ok {
-		s.wrRoute = token.Route
-		s.wrMu.Unlock()
+	s.write.mu.Lock()
+	if token, ok := validToken(s.write.token, time.Now()); ok {
+		s.write.route = token.Route
+		s.write.mu.Unlock()
 		return token.AccessToken, nil
 	}
-	if s.wrFlight != nil {
-		flight := s.wrFlight
-		s.wrMu.Unlock()
-		token, err := waitWriteFlight(ctx, flight)
+	if s.write.flight != nil {
+		flight := s.write.flight
+		s.write.mu.Unlock()
+		token, err := waitTokenFlight(ctx, flight)
 		if err != nil {
 			return "", err
 		}
 		return token.AccessToken, nil
 	}
-	flight := &writeFlight{done: make(chan struct{})}
-	s.wrFlight = flight
-	s.wrMu.Unlock()
+	flight := &tokenFlight{done: make(chan struct{})}
+	s.write.flight = flight
+	s.write.mu.Unlock()
 
 	acquired, err := acq.Acquire(ctx, s.acct, ClassWrite)
 	if err == nil && acquired.Token.Expiry.IsZero() {
 		acquired.Token.Expiry = time.Now().Add(time.Hour)
 	}
 
-	s.wrMu.Lock()
-	flight.err = err
-	if err == nil {
-		flight.token = acquired.Token
-		s.wrToken = &acquired.Token
-		s.wrRoute = acquired.Token.Route
-		s.wrDiagnostics = appendDiagnostic(s.wrDiagnostics, acquired.Diagnostic)
-	}
-	s.wrFlight = nil
-	close(flight.done)
-	s.wrMu.Unlock()
+	s.write.complete(flight, acquired, err, acquired.Diagnostic)
 	if err != nil {
 		return "", err
 	}
 	return acquired.Token.AccessToken, nil
 }
 
-func waitWriteFlight(ctx context.Context, flight *writeFlight) (Token, error) {
-	select {
-	case <-ctx.Done():
-		return Token{}, ctx.Err()
-	case <-flight.done:
-		if flight.err != nil {
-			return Token{}, flight.err
-		}
-		return flight.token, nil
-	}
-}
-
 // InvalidateWrite clears only the in-memory write slot. It never acquires.
 func (s *Source) InvalidateWrite() {
-	s.wrMu.Lock()
-	s.wrToken = nil
-	s.wrMu.Unlock()
+	s.write.mu.Lock()
+	s.write.token = nil
+	s.write.mu.Unlock()
 }
 
 func (s *Source) WriteRoute() Route {
-	s.wrMu.Lock()
-	defer s.wrMu.Unlock()
-	return s.wrRoute
+	s.write.mu.Lock()
+	defer s.write.mu.Unlock()
+	return s.write.route
 }
 
 func (s *Source) WriteCredentials() *WriteCredentials {
@@ -104,32 +76,13 @@ type WriteCredentials struct {
 
 func (w *WriteCredentials) AccessToken(ctx context.Context) (string, error) {
 	if accessToken := os.Getenv("MAILBOX_TOKEN"); accessToken != "" {
-		w.source.wrMu.Lock()
-		w.source.wrRoute = RouteEnvToken
-		w.source.wrMu.Unlock()
+		w.source.write.mu.Lock()
+		w.source.write.route = RouteEnvToken
+		w.source.write.mu.Unlock()
 		return accessToken, nil
 	}
 
-	s := w.source
-	s.wrMu.Lock()
-	if token, ok := validToken(s.wrToken, time.Now()); ok {
-		s.wrRoute = token.Route
-		s.wrMu.Unlock()
-		return token.AccessToken, nil
-	}
-	flight := s.wrFlight
-	s.wrMu.Unlock()
-	if flight == nil {
-		return "", ErrExpiredToken
-	}
-	token, err := waitWriteFlight(ctx, flight)
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		return "", ErrExpiredToken
-	}
-	return token.AccessToken, nil
+	return w.source.write.accessToken(ctx, ErrExpiredToken)
 }
 
 func (w *WriteCredentials) Invalidate(ctx context.Context) error {

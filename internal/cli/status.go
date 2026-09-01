@@ -47,13 +47,13 @@ func runStatus(cc *cmdCtx, args []string) int {
 			Pinned:  pinned,
 		}
 		source := auth.NewSource(next.cfg, acct)
-		row.Cache = cacheOutput(source.CacheState())
 		client := gmail.NewClient(gmail.ClientConfig{
 			Read:    source.ReadCredentials(auth.BatchAcquirer(next.cfg, acct, auth.ClassRead)),
 			Account: acct.Name,
 		})
 
 		if _, err := source.Resolve(context.Background(), auth.BatchAcquirer(next.cfg, acct, auth.ClassRead)); err != nil {
+			row.Cache = cacheOutput(source.CacheState())
 			row.Error = err.Error()
 			output.OK = false
 			next.writeStatusError(acct.Name, err)

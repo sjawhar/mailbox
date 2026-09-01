@@ -102,6 +102,40 @@ func (c *Client) doBatch(ctx context.Context, op operation, items []batchItem) (
 	}
 }
 
+func batchFetch[T any](ctx context.Context, c *Client, op operation, ids []string, query url.Values, decodeError string) ([]*T, error) {
+	values := make([]*T, 0, len(ids))
+	for start := 0; start < len(ids); start += maxBatchParts {
+		end := min(start+maxBatchParts, len(ids))
+		items := make([]batchItem, 0, end-start)
+		for _, id := range ids[start:end] {
+			items = append(items, batchItem{
+				id:     id,
+				method: routes[op].method,
+				path:   routePath(op, []string{id}),
+				query:  query,
+			})
+		}
+		results, failures, err := c.doBatch(ctx, op, items)
+		if err != nil {
+			if len(failures) > 0 {
+				err = fmt.Errorf("%w; prior terminal batch failures: %s", err, newBatchFailure(failures))
+			}
+			return nil, err
+		}
+		if len(failures) > 0 {
+			return nil, c.batchScopeMapped(op, newBatchFailure(failures))
+		}
+		for _, result := range results {
+			var value T
+			if err := json.Unmarshal(result.body, &value); err != nil {
+				return nil, fmt.Errorf("%s: %w", decodeError, err)
+			}
+			values = append(values, &value)
+		}
+	}
+	return values, nil
+}
+
 func mergeBatchResults(results []batchResult, pending []batchItem, current []batchResult) {
 	for index, result := range current {
 		results[pending[index].resultIndex] = result

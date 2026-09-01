@@ -330,16 +330,23 @@ func (cc *cmdCtx) loadConfig() error {
 	return nil
 }
 
-func (cc *cmdCtx) start() (string, *auth.Source, *gmail.Client, int) {
+func (cc *cmdCtx) resolveAccountSource() (*auth.AccountConfig, *auth.Source, int) {
 	if err := cc.loadConfig(); err != nil {
-		return "", nil, nil, cc.runtimeError("", nil, err)
+		return nil, nil, cc.runtimeError("", nil, err)
 	}
 	acct, err := cc.cfg.ResolveAccount(cc.accountFlag)
 	if err != nil {
-		return "", nil, nil, cc.runtimeError("", nil, err)
+		return nil, nil, cc.runtimeError("", nil, err)
 	}
 	cc.acct = acct
-	source := auth.NewSource(cc.cfg, acct)
+	return acct, auth.NewSource(cc.cfg, acct), 0
+}
+
+func (cc *cmdCtx) start() (string, *auth.Source, *gmail.Client, int) {
+	acct, source, code := cc.resolveAccountSource()
+	if code != 0 {
+		return "", nil, nil, code
+	}
 	client := gmail.NewClient(gmail.ClientConfig{Read: source.ReadCredentials(auth.BatchAcquirer(cc.cfg, acct, auth.ClassRead)), Account: acct.Name})
 	return acct.Name, source, client, 0
 }
@@ -356,15 +363,10 @@ func (cc *cmdCtx) acquireWrite(source *auth.Source) (*gmail.Client, int) {
 }
 
 func (cc *cmdCtx) startWrite() (string, *auth.Source, *gmail.Client, int) {
-	if err := cc.loadConfig(); err != nil {
-		return "", nil, nil, cc.runtimeError("", nil, err)
+	acct, source, code := cc.resolveAccountSource()
+	if code != 0 {
+		return "", nil, nil, code
 	}
-	acct, err := cc.cfg.ResolveAccount(cc.accountFlag)
-	if err != nil {
-		return "", nil, nil, cc.runtimeError("", nil, err)
-	}
-	cc.acct = acct
-	source := auth.NewSource(cc.cfg, acct)
 	if _, err := source.WriteToken(context.Background(), auth.BatchAcquirer(cc.cfg, acct, auth.ClassWrite)); err != nil {
 		return "", nil, nil, cc.runtimeError(acct.Name, source, err)
 	}
@@ -374,15 +376,10 @@ func (cc *cmdCtx) startWrite() (string, *auth.Source, *gmail.Client, int) {
 }
 
 func (cc *cmdCtx) startSend() (string, *auth.Source, *gmail.Client, int) {
-	if err := cc.loadConfig(); err != nil {
-		return "", nil, nil, cc.runtimeError("", nil, err)
+	acct, source, code := cc.resolveAccountSource()
+	if code != 0 {
+		return "", nil, nil, code
 	}
-	acct, err := cc.cfg.ResolveAccount(cc.accountFlag)
-	if err != nil {
-		return "", nil, nil, cc.runtimeError("", nil, err)
-	}
-	cc.acct = acct
-	source := auth.NewSource(cc.cfg, acct)
 	if _, err := source.SendToken(context.Background(), auth.BatchAcquirer(cc.cfg, acct, auth.ClassSend)); err != nil {
 		return "", nil, nil, cc.sendRuntimeError(acct.Name, source, err)
 	}

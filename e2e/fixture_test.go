@@ -155,6 +155,43 @@ func TestFixtureAttachmentBytesAndSendLevers(t *testing.T) {
 	}
 }
 
+func TestFakeGmailThreadMetadataOmitsMessageBodies(t *testing.T) {
+	g := newFakeGmail(t)
+	response, payload := fixtureGet(t, g.server.URL+"/gmail/v1/users/me/threads/t1?format=metadata", "Bearer read-token")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("threads.get metadata = %d: %s", response.StatusCode, payload)
+	}
+	if !json.Valid(payload) {
+		t.Fatalf("threads.get metadata payload is not JSON: %q", payload)
+	}
+	if bytes.Contains(payload, []byte(`"body"`)) {
+		t.Fatalf("threads.get metadata retained message body: %s", payload)
+	}
+}
+
+func TestFakeGmailThreadMetadataHonorsMetadataHeaders(t *testing.T) {
+	g := newFakeGmail(t)
+	response, payload := fixtureGet(t, g.server.URL+"/gmail/v1/users/me/threads/t1?format=metadata&metadataHeaders=Subject", "Bearer read-token")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("threads.get metadata = %d: %s", response.StatusCode, payload)
+	}
+	var thread struct {
+		Messages []struct {
+			Payload struct {
+				Headers []struct {
+					Name string `json:"name"`
+				} `json:"headers"`
+			} `json:"payload"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(payload, &thread); err != nil {
+		t.Fatalf("decode threads.get metadata: %v: %s", err, payload)
+	}
+	if len(thread.Messages) != 1 || len(thread.Messages[0].Payload.Headers) != 1 || thread.Messages[0].Payload.Headers[0].Name != "Subject" {
+		t.Fatalf("metadata headers = %+v, want only Subject", thread.Messages)
+	}
+}
+
 func callsUnderFixture(g *fakeGmail, prefix string) []recordedCall {
 	var out []recordedCall
 	for _, call := range g.recordedCalls() {

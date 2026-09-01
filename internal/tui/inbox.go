@@ -274,9 +274,8 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.filterIndex = (m.filterIndex + 1) % (len(m.cfg.Filters) + 1)
-		m.loading = true
-		request := m.beginListing()
-		return m, m.loadingCmd(listThreadsCmd(request, m.list.query, m.activeFilter()))
+		cmd := m.refreshListing()
+		return m, cmd
 	case keySelect:
 		m.list.selecting = true
 		return m, nil
@@ -296,19 +295,10 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case keyArchive:
-		if !m.listLoaded {
-			return m, nil
-		}
 		return m.startAction("archive", m.list.targetIDs(), nil, []string{"INBOX"}, false)
 	case keyTrash:
-		if !m.listLoaded {
-			return m, nil
-		}
 		return m.startAction("trash", m.list.targetIDs(), nil, nil, false)
 	case keyUnread:
-		if !m.listLoaded {
-			return m, nil
-		}
 		ids := m.list.targetIDs()
 		if len(ids) == 0 {
 			return m, nil
@@ -318,6 +308,7 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.startAction("mark", ids, []string{"UNREAD"}, nil, false)
 	case keyLabel:
+		// The picker changes views, so this guard cannot move into startAction.
 		if !m.listLoaded {
 			return m, nil
 		}
@@ -326,8 +317,8 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.labelCursor = 0
 		focus := m.label.Focus()
 		if m.ctx.labels == nil {
-			m.loading = true
-			labels := listLabelsCmd(m.beginRequest(labelOperation))
+			request := m.beginLoading(labelOperation)
+			labels := listLabelsCmd(request)
 			return m, tea.Batch(focus, labels, m.spinnerCmd())
 		}
 		return m, focus
@@ -343,13 +334,11 @@ func (m app) updateListKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !m.listLoaded || len(m.list.rows) == 0 {
 			return m, nil
 		}
-		m.loading = true
-		request := m.beginRequest(threadOperation)
+		request := m.beginLoading(threadOperation)
 		return m, m.loadingCmd(getThreadCmd(request, m.list.rows[m.list.cursor].ID))
 	case keyRefresh:
-		m.loading = true
-		request := m.beginListing()
-		return m, m.loadingCmd(listThreadsCmd(request, m.list.query, m.activeFilter()))
+		cmd := m.refreshListing()
+		return m, cmd
 	case keyQuit:
 		if m.deflectUnlock() {
 			return m, nil
@@ -364,10 +353,9 @@ func (m app) startAction(action string, ids, add, remove []string, advance bool)
 		m.deflectUnlock()
 		return m, nil
 	}
-	if len(ids) == 0 {
-		return m, nil
-	}
-	if m.pending != nil {
+	// Row actions target the loaded listing only, so the listingGeneration
+	// recorded below always names rows the user could actually see.
+	if !m.listLoaded || len(ids) == 0 || m.pending != nil {
 		return m, nil
 	}
 	m.pending = &pendingAction{

@@ -144,8 +144,8 @@ func (cc *cmdCtx) renderBulkFilter(account string, source *auth.Source, action, 
 		Action:    action,
 		Filter:    filterName,
 		Matched:   len(matched),
-		Succeeded: normalizeStrings(receipts.Succeeded),
-		Failed:    normalizeFailures(failed),
+		Succeeded: normalizeSlice(receipts.Succeeded),
+		Failed:    normalizeSlice(failed),
 	}
 	output.Attempted = len(output.Succeeded) + len(output.Failed)
 	output.OK = len(output.Failed) == 0 && output.Attempted == output.Matched

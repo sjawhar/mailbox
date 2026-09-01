@@ -32,10 +32,70 @@ type CacheState struct {
 	Expiry time.Time
 }
 
-type readFlight struct {
+type tokenFlight struct {
 	done  chan struct{}
 	token Token
 	err   error
+}
+
+type credentialSlot struct {
+	mu          sync.Mutex
+	token       *Token
+	route       Route
+	flight      *tokenFlight
+	diagnostics []string
+}
+
+func (slot *credentialSlot) accessToken(ctx context.Context, expiredErr error) (string, error) {
+	slot.mu.Lock()
+	if token, ok := validToken(slot.token, time.Now()); ok {
+		slot.route = token.Route
+		slot.mu.Unlock()
+		return token.AccessToken, nil
+	}
+	flight := slot.flight
+	slot.mu.Unlock()
+	if flight == nil {
+		return "", expiredErr
+	}
+	token, err := waitTokenFlight(ctx, flight)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", expiredErr
+	}
+	return token.AccessToken, nil
+}
+
+func (slot *credentialSlot) appendDiagnostic(diagnostic string) {
+	slot.diagnostics = appendDiagnostic(slot.diagnostics, diagnostic)
+}
+
+func (slot *credentialSlot) complete(flight *tokenFlight, acquired Acquired, err error, diagnostics ...string) {
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+
+	flight.err = err
+	if err == nil {
+		flight.token = acquired.Token
+		slot.token = &acquired.Token
+		slot.route = acquired.Token.Route
+		for _, diagnostic := range diagnostics {
+			slot.appendDiagnostic(diagnostic)
+		}
+	}
+	slot.flight = nil
+	close(flight.done)
+}
+
+func (slot *credentialSlot) takeDiagnostic() string {
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+
+	diagnostics := strings.Join(slot.diagnostics, "\n")
+	slot.diagnostics = nil
+	return diagnostics
 }
 
 const maxPendingDiagnostics = 32
@@ -46,23 +106,9 @@ type Source struct {
 	cfg  *Config
 	acct *AccountConfig
 
-	mu              sync.Mutex
-	mem             *Token
-	lastRoute       Route
-	readFlight      *readFlight
-	readDiagnostics []string
-
-	wrMu          sync.Mutex
-	wrToken       *Token
-	wrFlight      *writeFlight
-	wrRoute       Route
-	wrDiagnostics []string
-
-	sendMu          sync.Mutex
-	sendToken       *Token
-	sendFlight      *writeFlight
-	sendRoute       Route
-	sendDiagnostics []string
+	read  credentialSlot
+	write credentialSlot
+	send  credentialSlot
 }
 
 func NewSource(cfg *Config, acct *AccountConfig) *Source {
@@ -78,43 +124,43 @@ func (s *Source) Account() *AccountConfig {
 func (s *Source) Resolve(ctx context.Context, acq Acquirer) (Token, error) {
 	if accessToken := os.Getenv("MAILBOX_TOKEN"); accessToken != "" {
 		token := Token{AccessToken: accessToken, Route: RouteEnvToken}
-		s.mu.Lock()
-		s.lastRoute = token.Route
-		s.mu.Unlock()
+		s.read.mu.Lock()
+		s.read.route = token.Route
+		s.read.mu.Unlock()
 		return token, nil
 	}
 
-	s.mu.Lock()
-	if token, ok := validToken(s.mem, time.Now()); ok {
-		s.lastRoute = token.Route
-		s.mu.Unlock()
+	s.read.mu.Lock()
+	if token, ok := validToken(s.read.token, time.Now()); ok {
+		s.read.route = token.Route
+		s.read.mu.Unlock()
 		return token, nil
 	}
-	if s.readFlight != nil {
-		flight := s.readFlight
-		s.mu.Unlock()
-		return waitReadFlight(ctx, flight)
+	if s.read.flight != nil {
+		flight := s.read.flight
+		s.read.mu.Unlock()
+		return waitTokenFlight(ctx, flight)
 	}
 
 	fingerprint := sourceFingerprint(s.acct.Name, ClassRead, s.acct.Read)
 	if fingerprint != "" {
 		cached, err := readCache(s.acct.Name, fingerprint)
 		if err != nil {
-			s.mu.Unlock()
+			s.read.mu.Unlock()
 			return Token{}, err
 		}
 		if cached.valid(time.Now()) {
 			token := Token{AccessToken: cached.AccessToken, Route: RouteCache, Expiry: cached.Expiry}
-			s.mem = &token
-			s.lastRoute = token.Route
-			s.mu.Unlock()
+			s.read.token = &token
+			s.read.route = token.Route
+			s.read.mu.Unlock()
 			return token, nil
 		}
 	}
 
-	flight := &readFlight{done: make(chan struct{})}
-	s.readFlight = flight
-	s.mu.Unlock()
+	flight := &tokenFlight{done: make(chan struct{})}
+	s.read.flight = flight
+	s.read.mu.Unlock()
 
 	acquired, err := acq.Acquire(ctx, s.acct, ClassRead)
 	if err == nil {
@@ -130,17 +176,7 @@ func (s *Source) Resolve(ctx context.Context, acq Acquirer) (Token, error) {
 		}
 	}
 
-	s.mu.Lock()
-	flight.err = err
-	if err == nil {
-		flight.token = acquired.Token
-		s.mem = &acquired.Token
-		s.lastRoute = acquired.Token.Route
-		s.readDiagnostics = appendDiagnostic(s.readDiagnostics, acquired.Diagnostic)
-	}
-	s.readFlight = nil
-	close(flight.done)
-	s.mu.Unlock()
+	s.read.complete(flight, acquired, err, acquired.Diagnostic)
 	if err != nil {
 		return Token{}, err
 	}
@@ -154,7 +190,7 @@ func validToken(token *Token, now time.Time) (Token, bool) {
 	return *token, true
 }
 
-func waitReadFlight(ctx context.Context, flight *readFlight) (Token, error) {
+func waitTokenFlight(ctx context.Context, flight *tokenFlight) (Token, error) {
 	select {
 	case <-ctx.Done():
 		return Token{}, ctx.Err()
@@ -199,9 +235,9 @@ func (s *Source) Invalidate(ctx context.Context) error {
 		return nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.mem = nil
+	s.read.mu.Lock()
+	defer s.read.mu.Unlock()
+	s.read.token = nil
 	fingerprint := sourceFingerprint(s.acct.Name, ClassRead, s.acct.Read)
 	if fingerprint == "" {
 		return nil
@@ -217,8 +253,8 @@ func (s *Source) Invalidate(ctx context.Context) error {
 }
 
 func (s *Source) CacheState() CacheState {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.read.mu.Lock()
+	defer s.read.mu.Unlock()
 	fingerprint := sourceFingerprint(s.acct.Name, ClassRead, s.acct.Read)
 	if fingerprint == "" {
 		return CacheState{}
@@ -242,36 +278,32 @@ func (s *Source) CacheState() CacheState {
 }
 
 func (s *Source) LastRoute() Route {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lastRoute
+	s.read.mu.Lock()
+	defer s.read.mu.Unlock()
+	return s.read.route
 }
 
 // TakeDiagnostic drains queued credential-command completion notes for one
 // class in acquisition order. The queue is bounded; when full, oldest notes
 // are dropped before newer completed acquisitions are appended.
 func (s *Source) TakeDiagnostic(class Class) string {
+	slot := s.slotForClass(class)
+	if slot == nil {
+		return ""
+	}
+	return slot.takeDiagnostic()
+}
+
+func (s *Source) slotForClass(class Class) *credentialSlot {
 	switch class {
 	case ClassRead:
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		diagnostics := strings.Join(s.readDiagnostics, "\n")
-		s.readDiagnostics = nil
-		return diagnostics
+		return &s.read
 	case ClassWrite:
-		s.wrMu.Lock()
-		defer s.wrMu.Unlock()
-		diagnostics := strings.Join(s.wrDiagnostics, "\n")
-		s.wrDiagnostics = nil
-		return diagnostics
+		return &s.write
 	case ClassSend:
-		s.sendMu.Lock()
-		defer s.sendMu.Unlock()
-		diagnostics := strings.Join(s.sendDiagnostics, "\n")
-		s.sendDiagnostics = nil
-		return diagnostics
+		return &s.send
 	default:
-		return ""
+		return nil
 	}
 }
 

@@ -156,98 +156,61 @@ func (c *Client) GetMessageRaw(ctx context.Context, id string) (*Message, error)
 
 // GetThreadsMetadata fetches metadata for ids in Gmail batch requests.
 func (c *Client) GetThreadsMetadata(ctx context.Context, ids []string) ([]*Thread, error) {
-	threads := make([]*Thread, 0, len(ids))
-	for start := 0; start < len(ids); start += maxBatchParts {
-		end := min(start+maxBatchParts, len(ids))
-		items := make([]batchItem, 0, end-start)
-		for _, id := range ids[start:end] {
-			items = append(items, batchItem{
-				id:     id,
-				method: routes[opThreadsGet].method,
-				path:   routePath(opThreadsGet, []string{id}),
-				query: url.Values{
-					"format":          {"metadata"},
-					"metadataHeaders": {"From", "To", "Cc", "Subject", "Date", "List-ID"},
-				},
-			})
-		}
-		results, failures, err := c.doBatch(ctx, opThreadsGet, items)
-		if err != nil {
-			if len(failures) > 0 {
-				err = fmt.Errorf("%w; prior terminal batch failures: %s", err, newBatchFailure(failures))
-			}
-			return nil, err
-		}
-		if len(failures) > 0 {
-			return nil, c.batchScopeMapped(opThreadsGet, newBatchFailure(failures))
-		}
-		for _, result := range results {
-			var thread Thread
-			if err := json.Unmarshal(result.body, &thread); err != nil {
-				return nil, fmt.Errorf("gmail: decode batch thread metadata: %w", err)
-			}
-			threads = append(threads, &thread)
-		}
-	}
-	return threads, nil
+	return batchFetch[Thread](
+		ctx,
+		c,
+		opThreadsGet,
+		ids,
+		url.Values{
+			"format":          {"metadata"},
+			"metadataHeaders": {"From", "To", "Cc", "Subject", "Date", "List-ID"},
+		},
+		"gmail: decode batch thread metadata",
+	)
 }
 
 // ModifyThreads adds and removes labels from ids.
 func (c *Client) ModifyThreads(ctx context.Context, ids, addLabelIDs, removeLabelIDs []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
 	body := modifyThreadRequest{
 		AddLabelIDs:    nonNilStrings(addLabelIDs),
 		RemoveLabelIDs: nonNilStrings(removeLabelIDs),
 	}
-	if len(ids) == 1 {
-		return c.call(ctx, opThreadsModify, []string{ids[0]}, nil, body, nil)
+	result := c.writeThreads(ctx, opThreadsModify, ids, body)
+	if result.single {
+		return result.err
 	}
-	receipts, err := c.batchThreadReceipts(ctx, opThreadsModify, ids, body)
-	return c.batchScopeMapped(opThreadsModify, receiptsError(receipts, err))
+	return c.batchScopeMapped(opThreadsModify, receiptsError(result.receipts, result.err))
 }
 
 // TrashThreads moves ids to Gmail trash.
 func (c *Client) TrashThreads(ctx context.Context, ids []string) error {
-	if len(ids) == 0 {
-		return nil
+	result := c.writeThreads(ctx, opThreadsTrash, ids, nil)
+	if result.single {
+		return result.err
 	}
-	if len(ids) == 1 {
-		return c.call(ctx, opThreadsTrash, []string{ids[0]}, nil, nil, nil)
-	}
-	receipts, err := c.batchThreadReceipts(ctx, opThreadsTrash, ids, nil)
-	return c.batchScopeMapped(opThreadsTrash, receiptsError(receipts, err))
+	return c.batchScopeMapped(opThreadsTrash, receiptsError(result.receipts, result.err))
 }
 
 // ModifyThreadsReceipts adds and removes labels and returns per-thread outcomes.
 func (c *Client) ModifyThreadsReceipts(ctx context.Context, ids, addLabelIDs, removeLabelIDs []string) (WriteReceipts, error) {
-	if len(ids) == 0 {
-		return WriteReceipts{}, nil
-	}
 	body := modifyThreadRequest{
 		AddLabelIDs:    nonNilStrings(addLabelIDs),
 		RemoveLabelIDs: nonNilStrings(removeLabelIDs),
 	}
-	ids = uniqueIDs(ids)
-	if len(ids) == 1 {
-		return c.singleWriteReceipt(ids[0], c.call(ctx, opThreadsModify, []string{ids[0]}, nil, body, nil))
+	result := c.writeThreads(ctx, opThreadsModify, ids, body)
+	if result.single {
+		return c.singleWriteReceipt(result.singleID, result.err)
 	}
-	receipts, err := c.batchThreadReceipts(ctx, opThreadsModify, ids, body)
-	return receipts, err
+	return result.receipts, result.err
 }
 
 // TrashThreadsReceipts moves ids to Gmail trash and returns per-thread outcomes.
 func (c *Client) TrashThreadsReceipts(ctx context.Context, ids []string) (WriteReceipts, error) {
-	if len(ids) == 0 {
-		return WriteReceipts{}, nil
+	result := c.writeThreads(ctx, opThreadsTrash, ids, nil)
+	if result.single {
+		return c.singleWriteReceipt(result.singleID, result.err)
 	}
-	ids = uniqueIDs(ids)
-	if len(ids) == 1 {
-		return c.singleWriteReceipt(ids[0], c.call(ctx, opThreadsTrash, []string{ids[0]}, nil, nil, nil))
-	}
-	receipts, err := c.batchThreadReceipts(ctx, opThreadsTrash, ids, nil)
-	return receipts, err
+	return result.receipts, result.err
 }
 
 // SendMessage sends a base64url-encoded MIME message using the send credentials.
@@ -364,6 +327,29 @@ func uniqueIDs(ids []string) []string {
 		unique = append(unique, id)
 	}
 	return unique
+}
+
+type threadWriteResult struct {
+	receipts WriteReceipts
+	err      error
+	singleID string
+	single   bool
+}
+
+func (c *Client) writeThreads(ctx context.Context, op operation, ids []string, body any) threadWriteResult {
+	if len(ids) == 0 {
+		return threadWriteResult{}
+	}
+	ids = uniqueIDs(ids)
+	if len(ids) == 1 {
+		return threadWriteResult{
+			err:      c.call(ctx, op, []string{ids[0]}, nil, body, nil),
+			singleID: ids[0],
+			single:   true,
+		}
+	}
+	receipts, err := c.batchThreadReceipts(ctx, op, ids, body)
+	return threadWriteResult{receipts: receipts, err: err}
 }
 
 func (c *Client) batchThreadReceipts(ctx context.Context, op operation, ids []string, body any) (WriteReceipts, error) {
