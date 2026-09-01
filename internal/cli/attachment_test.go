@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/mailbox/internal/send"
 	"github.com/sjawhar/mailbox/internal/toon/toontest"
 )
 
@@ -321,5 +322,82 @@ func TestAttachmentDashOStreamsRawBytes(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "report.pdf") || !strings.Contains(stderr, "sha256=") {
 		t.Fatalf("status line = %q, want filename and sha256 on stderr", stderr)
+	}
+}
+
+func TestSendAttachDryRunReportsAttachmentsWithoutTouchingSendCustody(t *testing.T) {
+	g := newGmailTestServer(t)
+	configureSendMessages(g)
+	rig := newSendRig(t, g, nonInteractiveSendSource())
+	content := []byte("%PDF-1.4 fixture")
+	pdf := filepath.Join(t.TempDir(), "report.pdf")
+	if err := os.WriteFile(pdf, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := rig.run(t, "send", "--reply", "t1", "--body", "hi", "--attach", pdf, "--json")
+	if code != 0 {
+		t.Fatalf("dry-run exit = %d, stderr=%q", code, stderr)
+	}
+	var payload struct {
+		Sendable    bool `json:"sendable"`
+		Attachments []struct {
+			Filename string `json:"filename"`
+			Size     int64  `json:"size"`
+			MIMEType string `json:"mime_type"`
+			SHA256   string `json:"sha256"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("decode: %v: %q", err, stdout)
+	}
+	want := sha256.Sum256(content)
+	if !payload.Sendable || len(payload.Attachments) != 1 || payload.Attachments[0].Filename != "report.pdf" ||
+		payload.Attachments[0].Size != int64(len(content)) || payload.Attachments[0].SHA256 != hex.EncodeToString(want[:]) ||
+		payload.Attachments[0].MIMEType != "application/pdf" {
+		t.Fatalf("attachments = %+v", payload.Attachments)
+	}
+	if got := rig.spawns(t); got != "" || len(g.sentBodies) != 0 {
+		t.Fatalf("dry-run touched custody: spawns=%q sent=%v", got, g.sentBodies)
+	}
+}
+
+func TestSendAttachRefusalsRenderAsEnvelopes(t *testing.T) {
+	g := newGmailTestServer(t)
+	configureSendMessages(g)
+	rig := newSendRig(t, g, nonInteractiveSendSource())
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.bin")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tooLarge := filepath.Join(dir, "too-large.bin")
+	if err := os.WriteFile(tooLarge, bytes.Repeat([]byte("x"), send.MaxOutboundMessageBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name, path, code, rule string
+	}{
+		{name: "unreadable", path: filepath.Join(dir, "missing.bin"), code: "attachment_unreadable", rule: "R-A1"},
+		{name: "empty", path: empty, code: "attachment_empty", rule: "R-A2"},
+		{name: "too large", path: tooLarge, code: "attachment_too_large", rule: "R-A3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := rig.run(t, "send", "--reply", "t1", "--body", "hi", "--attach", tc.path, "--json")
+			if code != 1 {
+				t.Fatalf("exit = %d, stdout=%q stderr=%q, want 1", code, stdout, stderr)
+			}
+			var payload map[string]map[string]any
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["error"]["code"] != tc.code || payload["error"]["rule"] != tc.rule {
+				t.Fatalf("refusal = %#v", payload)
+			}
+			if got := rig.spawns(t); got != "" || len(g.sentBodies) != 0 {
+				t.Fatalf("refusal touched send custody: spawns=%q sent=%v", got, g.sentBodies)
+			}
+		})
 	}
 }
