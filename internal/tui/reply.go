@@ -40,8 +40,7 @@ func (m app) openReply() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.ctx.self == "" {
-		m.loading = true
-		request := m.beginRequest(profileOperation)
+		request := m.beginLoading(profileOperation)
 		return m, m.loadingCmd(getProfileCmd(request))
 	}
 
@@ -77,7 +76,7 @@ func (m app) replyRequest(target *gmail.Message, body string) send.Request {
 		Mode:   send.ModeReply,
 		Body:   body,
 		Self:   m.ctx.self,
-		Target: replyTargetHeaders(target),
+		Target: send.NewTargetHeaders(target),
 	}
 }
 
@@ -88,18 +87,6 @@ func finishReplyEnvelope(target *gmail.Message, threadID string, envelope *send.
 	envelope.ThreadID = threadID
 	envelope.TargetMessageID = target.ID
 	return envelope, nil
-}
-
-func replyTargetHeaders(target *gmail.Message) *send.TargetHeaders {
-	return &send.TargetHeaders{
-		From:       target.Header("From"),
-		ReplyTo:    target.Header("Reply-To"),
-		To:         target.Header("To"),
-		Cc:         target.Header("Cc"),
-		Subject:    target.Header("Subject"),
-		MessageID:  target.Header("Message-ID"),
-		References: target.Header("References"),
-	}
 }
 
 func (m *app) surfaceReplyRefusal(refusal *send.Refusal) {
@@ -150,12 +137,12 @@ func (m app) updateReplyConfirmKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !m.abandonPrompt {
 			return m, nil
 		}
-		mime, err := send.BuildMIME(m.reply.envelope, nil, "")
+		mime, refusal, err := send.Finalize(m.reply.envelope, nil, "")
 		if err != nil {
 			m.surfaceError(err)
 			return m, nil
 		}
-		if refusal := send.OutboundSizeRefusal(mime, m.reply.envelope.Attachments); refusal != nil {
+		if refusal != nil {
 			m.surfaceReplyRefusal(refusal)
 			return m, nil
 		}
@@ -172,12 +159,12 @@ func (m app) updateReplyConfirmKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.abandonPrompt {
 			return m, nil
 		}
-		mime, err := send.BuildMIME(m.reply.envelope, nil, "")
+		mime, refusal, err := send.Finalize(m.reply.envelope, nil, "")
 		if err != nil {
 			m.surfaceError(err)
 			return m, nil
 		}
-		if refusal := send.OutboundSizeRefusal(mime, m.reply.envelope.Attachments); refusal != nil {
+		if refusal != nil {
 			m.surfaceReplyRefusal(refusal)
 			return m, nil
 		}

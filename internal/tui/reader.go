@@ -134,8 +134,7 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.list.cursor++
 		m.clearStatus()
-		m.loading = true
-		request := m.beginRequest(threadOperation)
+		request := m.beginLoading(threadOperation)
 		return m, m.loadingCmd(getThreadCmd(request, m.list.rows[m.list.cursor].ID))
 	case keyPrevious:
 		if m.list.cursor-1 < 0 {
@@ -145,8 +144,7 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.list.cursor--
 		m.clearStatus()
-		m.loading = true
-		request := m.beginRequest(threadOperation)
+		request := m.beginLoading(threadOperation)
 		return m, m.loadingCmd(getThreadCmd(request, m.list.rows[m.list.cursor].ID))
 	case keyQuotes:
 		m.thread.keepQuotes = !m.thread.keepQuotes
@@ -188,8 +186,7 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.view = attachmentPickerView
 		return m, nil
 	case keyOpenHTML:
-		m.loading = true
-		request := m.beginRequest(openOperation)
+		request := m.beginLoading(openOperation)
 		return m, m.loadingCmd(openHTMLCmd(request, m.thread.thread))
 	}
 	if isLinkFirstDigit(value) && m.thread.rendered != nil {
@@ -210,7 +207,7 @@ func (m app) updateThreadKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m app) threadActionsCurrent() bool {
-	return m.listLoaded && m.thread.thread != nil && m.thread.listingGeneration == m.generations[listOperation]
+	return m.thread.thread != nil && m.currentRows(m.thread.listingGeneration)
 }
 
 func (m app) threadView() string {
@@ -242,8 +239,7 @@ func (m app) updateAttachmentKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.thread.attachmentCursor = max(0, m.thread.attachmentCursor-1)
 		return m, nil
 	case "enter":
-		m.loading = true
-		request := m.beginRequest(attachmentOperation)
+		request := m.beginLoading(attachmentOperation)
 		return m, m.loadingCmd(saveAttachmentCmd(request, m.thread.attachments[m.thread.attachmentCursor]))
 	}
 	return m, nil
