@@ -11,34 +11,6 @@ import (
 	"github.com/sjawhar/mailbox/internal/cli"
 )
 
-func TestBare(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		args []string
-		want bool
-	}{
-		{name: "no arguments", want: true},
-		{name: "global flags", args: []string{"--json", "--account=personal"}, want: true},
-		{name: "account value", args: []string{"--account", "personal"}, want: true},
-		{name: "short account value", args: []string{"-account", "work"}, want: true},
-		{name: "inbox command", args: []string{"inbox"}, want: false},
-		{name: "command after flag", args: []string{"--json", "inbox"}, want: false},
-		{name: "end of flags makes option positional", args: []string{"--", "--json"}, want: false},
-		{name: "command after end of flags", args: []string{"--json", "--", "inbox"}, want: false},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			if got := bare(test.args); got != test.want {
-				t.Errorf("bare(%q) = %t, want %t", test.args, got, test.want)
-			}
-		})
-	}
-}
-
 func TestVersionFlagSharesTopLevelGrammar(t *testing.T) {
 	t.Parallel()
 

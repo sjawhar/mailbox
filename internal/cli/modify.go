@@ -17,6 +17,7 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 	if done || code != 0 {
 		return code
 	}
+	verb, remove, trash := resolveBulkOp(action)
 	if next.filterFlag != "" {
 		if len(pos) > 0 {
 			return next.failUsage(fmt.Errorf("--filter and thread ids are mutually exclusive"))
@@ -25,10 +26,7 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 		if code != 0 {
 			return code
 		}
-		if action == "archive" {
-			return runBulkFilter(next, account, source, client, action, "archived", f, nil, []string{"INBOX"}, false)
-		}
-		return runBulkFilter(next, account, source, client, action, "trashed", f, nil, nil, true)
+		return runBulkFilter(next, account, source, client, action, verb, f, nil, remove, trash)
 	}
 	if err := requireArity(pos, 1, -1, action); err != nil {
 		return next.failUsage(err)
@@ -42,21 +40,17 @@ func runBulk(cc *cmdCtx, action string, args []string) int {
 	if err != nil {
 		return next.writeRuntimeError(account, source, err)
 	}
-	if action == "archive" {
+	if trash {
 		err = next.retryWrite(source, func() error {
-			return client.ModifyThreads(ctx, ids, nil, []string{"INBOX"})
+			return client.TrashThreads(ctx, ids)
 		})
 	} else {
 		err = next.retryWrite(source, func() error {
-			return client.TrashThreads(ctx, ids)
+			return client.ModifyThreads(ctx, ids, nil, remove)
 		})
 	}
 	if err != nil {
 		return next.writeRuntimeError(account, source, err)
-	}
-	verb := "trashed"
-	if action == "archive" {
-		verb = "archived"
 	}
 	return next.actionResult(account, source, action, verb, ids)
 }
@@ -67,35 +61,28 @@ func runMark(cc *cmdCtx, args []string) int {
 	if done || code != 0 {
 		return code
 	}
-	if next.filterFlag != "" {
+	filterMode := next.filterFlag != ""
+	if filterMode {
 		if len(pos) > 1 {
 			return next.failUsage(fmt.Errorf("--filter and thread ids are mutually exclusive"))
 		}
 		if err := requireArity(pos, 1, 1, "mark"); err != nil {
 			return next.failUsage(err)
 		}
-		mode := pos[0]
-		if mode != "read" && mode != "unread" {
-			return next.failUsage(fmt.Errorf("mark mode must be read or unread"))
-		}
-		var add, remove []string
-		if mode == "read" {
-			remove = []string{"UNREAD"}
-		} else {
-			add = []string{"UNREAD"}
-		}
+	} else if err := requireArity(pos, 2, -1, "mark"); err != nil {
+		return next.failUsage(err)
+	}
+	mode := pos[0]
+	verb, add, remove, ok := resolveMarkOp(mode)
+	if !ok {
+		return next.failUsage(fmt.Errorf("mark mode must be read or unread"))
+	}
+	if filterMode {
 		account, source, client, f, code := next.startBulkFilter()
 		if code != 0 {
 			return code
 		}
-		return runBulkFilter(next, account, source, client, "mark", "marked "+mode, f, add, remove, false)
-	}
-	if err := requireArity(pos, 2, -1, "mark"); err != nil {
-		return next.failUsage(err)
-	}
-	mode := pos[0]
-	if mode != "read" && mode != "unread" {
-		return next.failUsage(fmt.Errorf("mark mode must be read or unread"))
+		return runBulkFilter(next, account, source, client, "mark", verb, f, add, remove, false)
 	}
 	account, source, client, code := next.startWrite()
 	if code != 0 {
@@ -105,18 +92,12 @@ func runMark(cc *cmdCtx, args []string) int {
 	if err != nil {
 		return next.writeRuntimeError(account, source, err)
 	}
-	var add, remove []string
-	if mode == "read" {
-		remove = []string{"UNREAD"}
-	} else {
-		add = []string{"UNREAD"}
-	}
 	if err := next.retryWrite(source, func() error {
 		return client.ModifyThreads(context.Background(), ids, add, remove)
 	}); err != nil {
 		return next.writeRuntimeError(account, source, err)
 	}
-	return next.actionResult(account, source, "mark", "marked "+mode, ids)
+	return next.actionResult(account, source, "mark", verb, ids)
 }
 
 func runLabel(cc *cmdCtx, args []string) int {
@@ -125,17 +106,23 @@ func runLabel(cc *cmdCtx, args []string) int {
 	if done || code != 0 {
 		return code
 	}
-	if next.filterFlag != "" {
+	filterMode := next.filterFlag != ""
+	if filterMode {
 		if len(pos) > 2 {
 			return next.failUsage(fmt.Errorf("--filter and thread ids are mutually exclusive"))
 		}
 		if err := requireArity(pos, 2, 2, "label"); err != nil {
 			return next.failUsage(err)
 		}
-		mode := pos[0]
-		if mode != "add" && mode != "rm" {
-			return next.failUsage(fmt.Errorf("label mode must be add or rm"))
-		}
+	} else if err := requireArity(pos, 3, -1, "label"); err != nil {
+		return next.failUsage(err)
+	}
+	mode := pos[0]
+	verb, addLabel, ok := resolveLabelOp(mode)
+	if !ok {
+		return next.failUsage(fmt.Errorf("label mode must be add or rm"))
+	}
+	if filterMode {
 		account, source, client, f, code := next.startBulkFilter()
 		if code != 0 {
 			return code
@@ -144,24 +131,8 @@ func runLabel(cc *cmdCtx, args []string) int {
 		if err != nil {
 			return next.writeRuntimeError(account, source, err)
 		}
-		var add, remove []string
-		if mode == "add" {
-			add = []string{label.ID}
-		} else {
-			remove = []string{label.ID}
-		}
-		verb := "labeled"
-		if mode == "rm" {
-			verb = "unlabeled"
-		}
+		add, remove := labelLists(addLabel, label.ID)
 		return runBulkFilter(next, account, source, client, "label", verb, f, add, remove, false)
-	}
-	if err := requireArity(pos, 3, -1, "label"); err != nil {
-		return next.failUsage(err)
-	}
-	mode := pos[0]
-	if mode != "add" && mode != "rm" {
-		return next.failUsage(fmt.Errorf("label mode must be add or rm"))
 	}
 	account, source, client, code := next.startWrite()
 	if code != 0 {
@@ -175,22 +146,49 @@ func runLabel(cc *cmdCtx, args []string) int {
 	if err != nil {
 		return next.writeRuntimeError(account, source, err)
 	}
-	var add, remove []string
-	if mode == "add" {
-		add = []string{label.ID}
-	} else {
-		remove = []string{label.ID}
-	}
+	add, remove := labelLists(addLabel, label.ID)
 	if err := next.retryWrite(source, func() error {
 		return client.ModifyThreads(context.Background(), ids, add, remove)
 	}); err != nil {
 		return next.writeRuntimeError(account, source, err)
 	}
-	verb := "labeled"
-	if mode == "rm" {
-		verb = "unlabeled"
-	}
 	return next.actionResult(account, source, "label", verb, ids)
+}
+
+func resolveBulkOp(action string) (verb string, remove []string, trash bool) {
+	if action == "archive" {
+		return "archived", []string{"INBOX"}, false
+	}
+	return "trashed", nil, true
+}
+
+func resolveMarkOp(mode string) (verb string, add, remove []string, ok bool) {
+	switch mode {
+	case "read":
+		return "marked read", nil, []string{"UNREAD"}, true
+	case "unread":
+		return "marked unread", []string{"UNREAD"}, nil, true
+	default:
+		return "", nil, nil, false
+	}
+}
+
+func resolveLabelOp(mode string) (verb string, add bool, ok bool) {
+	switch mode {
+	case "add":
+		return "labeled", true, true
+	case "rm":
+		return "unlabeled", false, true
+	default:
+		return "", false, false
+	}
+}
+
+func labelLists(addLabel bool, labelID string) (add, remove []string) {
+	if addLabel {
+		return []string{labelID}, nil
+	}
+	return nil, []string{labelID}
 }
 
 type actionPayload struct {
