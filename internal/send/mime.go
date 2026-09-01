@@ -15,18 +15,8 @@ import (
 
 // BuildMIME assembles the outbound RFC 5322 message with CRLF line endings.
 func BuildMIME(env *Envelope, original []byte, boundary string) ([]byte, error) {
-	if env == nil {
-		return nil, errors.New("send: MIME envelope is required")
-	}
-	if err := validateHeaderValues(env); err != nil {
+	if err := validateEnvelopeForMIME(env, original); err != nil {
 		return nil, err
-	}
-	if env.Mode == ModeForward {
-		if original == nil {
-			return nil, errors.New("send: forward original is required")
-		}
-	} else if original != nil {
-		return nil, errors.New("send: original is only valid for forwards")
 	}
 	if len(env.Attachments) == 0 {
 		if env.Mode == ModeForward {
@@ -36,6 +26,23 @@ func BuildMIME(env *Envelope, original []byte, boundary string) ([]byte, error) 
 	}
 	message, _, err := buildMixedMIME(env, original, boundary, "")
 	return message, err
+}
+
+func validateEnvelopeForMIME(env *Envelope, original []byte) error {
+	if env == nil {
+		return errors.New("send: MIME envelope is required")
+	}
+	if err := validateHeaderValues(env); err != nil {
+		return err
+	}
+	if env.Mode == ModeForward {
+		if original == nil {
+			return errors.New("send: forward original is required")
+		}
+	} else if original != nil {
+		return errors.New("send: original is only valid for forwards")
+	}
+	return nil
 }
 
 func buildAlternativeMIME(env *Envelope, boundary string) ([]byte, error) {
@@ -174,18 +181,8 @@ func buildMixedMIME(env *Envelope, original []byte, boundary, alternativeBoundar
 }
 
 func buildMixedBase(env *Envelope, original []byte, boundary string) ([]byte, string, error) {
-	if env == nil {
-		return nil, "", errors.New("send: MIME envelope is required")
-	}
-	if err := validateHeaderValues(env); err != nil {
+	if err := validateEnvelopeForMIME(env, original); err != nil {
 		return nil, "", err
-	}
-	if env.Mode == ModeForward {
-		if original == nil {
-			return nil, "", errors.New("send: forward original is required")
-		}
-	} else if original != nil {
-		return nil, "", errors.New("send: original is only valid for forwards")
 	}
 	return buildMixedMIME(env, original, boundary, "")
 }

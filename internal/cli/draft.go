@@ -163,11 +163,11 @@ func applyDraftOverrides(request *send.Request, opts draftSendOptions) {
 }
 
 func (cc *cmdCtx) finishDraftSend(ctx context.Context, account string, source *auth.Source, envelope *send.Envelope, draftID string, opts draftSendOptions) int {
-	outbound, err := send.BuildMIME(envelope, nil, "")
+	outbound, refusal, err := send.Finalize(envelope, nil, "")
 	if err != nil {
 		return cc.runtimeError(account, source, err)
 	}
-	if refusal := send.OutboundSizeRefusal(outbound, envelope.Attachments); refusal != nil {
+	if refusal != nil {
 		return cc.renderSendRefusal(account, source, refusal)
 	}
 	if !opts.sendNow {

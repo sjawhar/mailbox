@@ -205,7 +205,7 @@ func runSend(cc *cmdCtx, args []string) int {
 		Self:    profile.EmailAddress,
 	}
 	if target != nil {
-		request.Target = messageHeaders(target)
+		request.Target = send.NewTargetHeaders(target)
 	}
 	envelope, refusal := send.Resolve(request)
 	if refusal != nil {
@@ -237,11 +237,11 @@ func runSend(cc *cmdCtx, args []string) int {
 		return next.renderSendRefusal(account, source, sizeRefusal)
 	}
 	envelope.Attachments = attachments
-	outbound, err := send.BuildMIME(envelope, original, "")
+	outbound, refusal, err := send.Finalize(envelope, original, "")
 	if err != nil {
 		return next.runtimeError(account, source, err)
 	}
-	if refusal := send.OutboundSizeRefusal(outbound, envelope.Attachments); refusal != nil {
+	if refusal != nil {
 		return next.renderSendRefusal(account, source, refusal)
 	}
 	if *saveDraft {
@@ -282,18 +282,6 @@ func runSend(cc *cmdCtx, args []string) int {
 	scope := sendSource.SendScope()
 	warning := auth.SendScopeWarning(scope, next.acct.Send.ConfigKey)
 	return next.renderSendResult(account, sendSource, auth.ClassSend, envelope, len(original), sent, scope, warning)
-}
-
-func messageHeaders(message *gmail.Message) *send.TargetHeaders {
-	return &send.TargetHeaders{
-		From:       message.Header("From"),
-		ReplyTo:    message.Header("Reply-To"),
-		To:         message.Header("To"),
-		Cc:         message.Header("Cc"),
-		Subject:    message.Header("Subject"),
-		MessageID:  message.Header("Message-ID"),
-		References: message.Header("References"),
-	}
 }
 
 func (cc *cmdCtx) renderSendRefusal(account string, source *auth.Source, refusal *send.Refusal) int {
