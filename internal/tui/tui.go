@@ -144,20 +144,24 @@ type app struct {
 	contexts map[string]*accountCtx
 	ctx      *accountCtx
 
-	view           viewState
-	list           inboxModel
-	thread         threadModel
-	reply          replyModel
-	composeState   composeState
-	composeOrigin  viewState
-	preview        previewModel
-	search         textinput.Model
-	label          textinput.Model
-	composeTo      textinput.Model
-	composeSubject textinput.Model
-	labelCursor    int
-	viewport       viewport.Model
-	spinner        spinner.Model
+	view   viewState
+	list   inboxModel
+	thread threadModel
+	reply  replyModel
+	// unlockReply keeps a confirmation renderable after an async completion
+	// tears down reply state while an unlock owns the surface.
+	unlockReply     *send.Envelope
+	unlockReplyView viewState
+	composeState    composeState
+	composeOrigin   viewState
+	preview         previewModel
+	search          textinput.Model
+	label           textinput.Model
+	composeTo       textinput.Model
+	composeSubject  textinput.Model
+	labelCursor     int
+	viewport        viewport.Model
+	spinner         spinner.Model
 
 	status      string
 	statusError bool
@@ -302,11 +306,11 @@ func (m app) spinnerCmd() tea.Cmd {
 
 func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 	var diagnostic string
-	if message, ok := msg.(asyncMessage); ok && !m.discardAsync(message) && !m.unlocking {
+	if message, ok := msg.(asyncMessage); ok && !m.discardAsync(message) && !m.unlockOwnsSurface() {
 		diagnostic = m.ctx.takeDiagnostic(auth.ClassRead)
 	}
 	defer func() {
-		if diagnostic == "" || m.unlocking {
+		if diagnostic == "" || m.unlockOwnsSurface() {
 			return
 		}
 		m.appendStatusNote(diagnostic)
@@ -358,9 +362,14 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		if m.discardAsync(message) || !m.currentRows(message.request.listingGeneration) {
 			return m, nil
 		}
+		// A thread fetch changes the action target and visible document together.
+		// It is reissuable, so discard it while an unlock owns the surface.
+		if m.unlockOwnsSurface() {
+			return m, nil
+		}
+		m.thread = threadModel{thread: message.thread, listingGeneration: message.request.listingGeneration}
 		m.loading = false
 		m.view = threadView
-		m.thread = threadModel{thread: message.thread, listingGeneration: message.request.listingGeneration}
 		if err := m.renderCurrentThread(); err != nil {
 			m.surfaceError(err)
 		}
@@ -417,33 +426,36 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		m.loading = false
 		m.ctx.self = message.email
+		if m.unlockOwnsSurface() {
+			return m, nil
+		}
+		m.loading = false
 		return m.openReply()
 	case draftSavedMsg:
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		m.pendingDraft = nil
+		if m.unlockOwnsSurface() {
+			m.deferReplyTeardown(m.replyReturnView())
+			return m, nil
+		}
 		m.loading = false
 		m.status = "draft saved — " + render.SanitizeTerminal(message.id)
 		m.statusError = false
-		if m.reply.envelope != nil && m.reply.envelope.Mode == send.ModeCompose {
-			m.view = listView
-		} else {
-			m.view = threadView
-		}
-		m.reply = replyModel{}
-		m.composeState = composeState{}
+		m.view = m.replyReturnView()
+		m.clearReplyFlow()
 		return m, nil
 	case sendDoneMsg:
 		if m.discardAsync(message) {
 			return m, nil
 		}
+		if m.unlockOwnsSurface() {
+			m.deferReplyTeardown(threadView)
+			return m, nil
+		}
 		m.loading = false
-		m.pendingSend = nil
-		m.reply = replyModel{}
-		m.composeState = composeState{}
+		m.clearReplyFlow()
 		m.status = "sent — thread updated"
 		m.statusError = false
 		m.appendStatusNote(auth.SendScopeWarning(m.ctx.sendScope(), m.credentialConfigKey(auth.ClassSend)))
@@ -458,7 +470,7 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.loading = false
 		return m.finishAction(message)
 	case attachmentSavedMsg:
-		if m.discardAsync(message) || m.unlocking {
+		if m.discardAsync(message) || m.unlockOwnsSurface() {
 			return m, nil
 		}
 		m.loading = false
@@ -467,7 +479,7 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.statusError = false
 		return m, nil
 	case openedMsg:
-		if m.discardAsync(message) || m.unlocking {
+		if m.discardAsync(message) || m.unlockOwnsSurface() {
 			return m, nil
 		}
 		if message.clearLoading {
@@ -488,6 +500,7 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		m.unlocking = false
 		m.unlockCtx = nil
 		m.unlockCancel = nil
+		m.finishDeferredReply()
 		if message.err != nil {
 			m.loading = false
 			m.clearPendingWrites(message.class)
@@ -524,7 +537,7 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		if m.unlocking {
+		if m.unlockOwnsSurface() {
 			return m, nil
 		}
 		if m.pendingSend != nil && errors.Is(message.err, auth.ErrExpiredSendToken) && !m.pendingSend.retried {
@@ -696,7 +709,13 @@ func (m app) unlockFailureStatus(class auth.Class, err error) string {
 		" (config: " + render.SanitizeTerminal(m.cfg.Path) + ")"
 }
 
-func (m app) canSurfaceStatus() bool { return !m.unlocking }
+// unlockOwnsSurface preserves the credential prompt's status, view, and spinner.
+// Async data that can remain useful without changing that surface is retained;
+// reissuable foreground work is discarded, while completed reply flows release
+// private state and defer their view transition until the unlock settles.
+func (m app) unlockOwnsSurface() bool { return m.unlocking }
+
+func (m app) canSurfaceStatus() bool { return !m.unlockOwnsSurface() }
 
 // deflectUnlock preserves the unlock attribution while the child command runs.
 func (m *app) deflectUnlock() bool {
@@ -753,6 +772,7 @@ func (m *app) abandonUnlock() {
 	m.unlockCtx = nil
 	m.unlockCancel = nil
 	m.loading = false
+	m.finishDeferredReply()
 	m.beginRequest(unlockOperation)
 }
 

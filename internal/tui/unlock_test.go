@@ -145,6 +145,70 @@ func resolveUnlock(t *testing.T, model app, fence tea.Cmd) (app, tea.Cmd) {
 	return update(t, model, done)
 }
 
+func TestThreadCompletionDuringUnlockIsDiscarded(t *testing.T) {
+	model, api, _, _ := newUnlockApp(1)
+	model.loading = true
+	model.unlocking = true
+	model.unlockClass = auth.ClassWrite
+	model.status = "waiting for credential approval"
+	request := model.currentRequest(threadOperation)
+
+	model, command := update(t, model, threadMsg{request: request, thread: api.threads[0]})
+
+	if command != nil {
+		t.Fatalf("thread completion returned command %v", command)
+	}
+	if !model.unlocking || !model.loading {
+		t.Fatalf("thread completion changed unlock spinner state: unlocking=%t loading=%t", model.unlocking, model.loading)
+	}
+	if model.view != listView {
+		t.Fatalf("thread completion changed view during unlock: %v", model.view)
+	}
+	if model.status != "waiting for credential approval" {
+		t.Fatalf("thread completion changed unlock status: %q", model.status)
+	}
+	if model.thread.thread != nil {
+		t.Fatalf("thread completion changed the hidden action target: %#v", model.thread.thread)
+	}
+}
+
+func TestThreadCompletionDuringFailedUnlockCannotRetargetArchive(t *testing.T) {
+	model, api, recorder, _ := newUnlockApp(2)
+	model.view = threadView
+	model, _ = update(t, model, threadMsg{
+		request: model.currentRequest(threadOperation),
+		thread:  api.threads[0],
+	})
+
+	model, fetch := update(t, model, key(keyNext))
+	if fetch == nil {
+		t.Fatal("next thread did not start a fetch")
+	}
+	fetchRequest := model.currentRequest(threadOperation)
+	recorder.err = errors.New("approval denied")
+	model, fence := update(t, model, key(keyArchive))
+	if !model.unlocking {
+		t.Fatal("archive did not start a write unlock")
+	}
+	model, _ = update(t, model, threadMsg{request: fetchRequest, thread: api.threads[1]})
+	model, _ = resolveUnlock(t, model, fence)
+
+	if model.pending != nil {
+		t.Fatalf("failed unlock left pending action %#v", model.pending)
+	}
+	recorder.err = nil
+	model, retryFence := update(t, model, key(keyArchive))
+	model, action := resolveUnlock(t, model, retryFence)
+	model, _ = update(t, model, runCmd(t, action))
+
+	if len(api.modifyCalls) != 1 {
+		t.Fatalf("archive calls = %#v, want one", api.modifyCalls)
+	}
+	if ids := api.modifyCalls[0].ids; len(ids) != 1 || ids[0] != api.threads[0].ID {
+		t.Fatalf("archive targeted %v, want rendered thread %q", ids, api.threads[0].ID)
+	}
+}
+
 func TestFirstWriteKeypressUnlocksBeforeActing(t *testing.T) {
 	model, api, recorder, invalidations := newUnlockApp(2)
 	model, fence := update(t, model, key("e"))
