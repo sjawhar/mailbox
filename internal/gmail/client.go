@@ -156,40 +156,17 @@ func (c *Client) GetMessageRaw(ctx context.Context, id string) (*Message, error)
 
 // GetThreadsMetadata fetches metadata for ids in Gmail batch requests.
 func (c *Client) GetThreadsMetadata(ctx context.Context, ids []string) ([]*Thread, error) {
-	threads := make([]*Thread, 0, len(ids))
-	for start := 0; start < len(ids); start += maxBatchParts {
-		end := min(start+maxBatchParts, len(ids))
-		items := make([]batchItem, 0, end-start)
-		for _, id := range ids[start:end] {
-			items = append(items, batchItem{
-				id:     id,
-				method: routes[opThreadsGet].method,
-				path:   routePath(opThreadsGet, []string{id}),
-				query: url.Values{
-					"format":          {"metadata"},
-					"metadataHeaders": {"From", "To", "Cc", "Subject", "Date", "List-ID"},
-				},
-			})
-		}
-		results, failures, err := c.doBatch(ctx, opThreadsGet, items)
-		if err != nil {
-			if len(failures) > 0 {
-				err = fmt.Errorf("%w; prior terminal batch failures: %s", err, newBatchFailure(failures))
-			}
-			return nil, err
-		}
-		if len(failures) > 0 {
-			return nil, c.batchScopeMapped(opThreadsGet, newBatchFailure(failures))
-		}
-		for _, result := range results {
-			var thread Thread
-			if err := json.Unmarshal(result.body, &thread); err != nil {
-				return nil, fmt.Errorf("gmail: decode batch thread metadata: %w", err)
-			}
-			threads = append(threads, &thread)
-		}
-	}
-	return threads, nil
+	return batchFetch[Thread](
+		ctx,
+		c,
+		opThreadsGet,
+		ids,
+		url.Values{
+			"format":          {"metadata"},
+			"metadataHeaders": {"From", "To", "Cc", "Subject", "Date", "List-ID"},
+		},
+		"gmail: decode batch thread metadata",
+	)
 }
 
 // ModifyThreads adds and removes labels from ids.
