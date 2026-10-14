@@ -46,7 +46,7 @@ type gmailAPI interface {
 	TrashThreads(ctx context.Context, ids []string) error
 	ListLabels(ctx context.Context) ([]gmail.Label, error)
 	GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error)
-	GetProfile(ctx context.Context) (*gmail.Profile, error)
+	SelfAddresses(ctx context.Context) ([]string, error)
 	SendMessage(ctx context.Context, raw []byte, threadID string) (*gmail.SentMessage, error)
 	CreateDraft(ctx context.Context, raw []byte, threadID string) (*gmail.Draft, error)
 }
@@ -56,7 +56,7 @@ type accountCtx struct {
 	acct            *auth.AccountConfig
 	account         string
 	api             gmailAPI
-	self            string
+	self            []string
 	lastRoute       func() auth.Route
 	writeRoute      func() auth.Route
 	sendRoute       func() auth.Route
@@ -422,11 +422,11 @@ func (m app) Update(msg tea.Msg) (model tea.Model, command tea.Cmd) {
 		return m, nil
 	case editorDoneMsg:
 		return m.finishEditor(message)
-	case profileMsg:
+	case selfMsg:
 		if m.discardAsync(message) {
 			return m, nil
 		}
-		m.ctx.self = message.email
+		m.ctx.self = message.self
 		if m.unlockOwnsSurface() {
 			return m, nil
 		}

@@ -2,6 +2,7 @@ package send
 
 import (
 	"net/mail"
+	"slices"
 	"strings"
 )
 
@@ -64,8 +65,9 @@ type Request struct {
 	To, Cc, Bcc []string
 	Subject     string
 	Body        string
-	Self        string
-	Target      *TargetHeaders
+	// Self is every address the account sends as (gmail.Client.SelfAddresses).
+	Self   []string
+	Target *TargetHeaders
 }
 
 type Envelope struct {
@@ -130,7 +132,12 @@ func resolveEnvelope(req Request, validateBody bool) (*Envelope, *Refusal) {
 		} else {
 			replyTo := parseHeader(target(req).ReplyTo, ProvenanceReplyTo)
 			from := parseHeader(target(req).From, ProvenanceFrom)
-			if len(replyTo) > 0 && !sameRecipientSet(replyTo, from) {
+			// The account's own message may carry a Reply-To naming another of
+			// its addresses; both are self, so the promotion below applies.
+			ownMessage := len(from) > 0 &&
+				len(subtractSelf(slices.Clone(from), req.Self)) == 0 &&
+				len(subtractSelf(slices.Clone(replyTo), req.Self)) == 0
+			if len(replyTo) > 0 && !ownMessage && !sameRecipientSet(replyTo, from) {
 				return nil, &Refusal{
 					Rule:    "R6",
 					Code:    "needs_explicit_recipient",
@@ -321,10 +328,10 @@ func sameRecipientSet(left, right []Recipient) bool {
 	return true
 }
 
-func subtractSelf(recipients []Recipient, self string) []Recipient {
+func subtractSelf(recipients []Recipient, self []string) []Recipient {
 	out := recipients[:0]
 	for _, recipient := range recipients {
-		if strings.EqualFold(recipient.Address, self) {
+		if slices.ContainsFunc(self, func(address string) bool { return strings.EqualFold(recipient.Address, address) }) {
 			continue
 		}
 		out = append(out, recipient)

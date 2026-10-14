@@ -10,7 +10,7 @@ const (
 	labelOperation
 	attachmentOperation
 	openOperation
-	profileOperation
+	selfOperation
 	sendOperation
 	unlockOperation
 	composeOperation

@@ -34,6 +34,8 @@ type gmailTestServer struct {
 	directRequests       []string
 	labels               []map[string]any
 	profile              map[string]any
+	sendAs               []map[string]any
+	sendAsStatus         int
 	thread               map[string]any
 	listPages            [][]string
 	listPageStatus       map[int]int
@@ -88,6 +90,7 @@ func newGmailTestServer(t *testing.T) *gmailTestServer {
 		listIDs:         []string{"t1", "t2"},
 		labels:          []map[string]any{{"id": "INBOX", "name": "INBOX"}, {"id": "Label_7", "name": "Newsletters"}},
 		profile:         map[string]any{"emailAddress": "user@example.com"},
+		sendAs:          []map[string]any{{"sendAsEmail": "user@example.com", "displayName": "", "isPrimary": true, "isDefault": true}},
 		thread:          testThread("t1", true, false),
 		attachmentBytes: map[string][]byte{},
 	}
@@ -285,6 +288,12 @@ func (g *gmailTestServer) handle(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/gmail/v1/users/me/profile":
 		g.profileCalls++
 		writeResponse(g.t, w, http.StatusOK, g.profile)
+	case r.URL.Path == "/gmail/v1/users/me/settings/sendAs":
+		if g.sendAsStatus != 0 {
+			writeResponse(g.t, w, g.sendAsStatus, googleError(g.sendAsStatus, "insufficientPermissions"))
+			return
+		}
+		writeResponse(g.t, w, http.StatusOK, map[string]any{"sendAs": g.sendAs})
 	case strings.HasSuffix(r.URL.Path, "/modify") || strings.HasSuffix(r.URL.Path, "/trash"):
 		body, err := io.ReadAll(r.Body)
 		if err != nil {

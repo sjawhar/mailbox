@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net/http"
 	"net/mail"
 	"os"
 	"path/filepath"
@@ -185,6 +186,120 @@ func targetHeaders() *send.TargetHeaders {
 		Subject:    "Re: Quarterly",
 		MessageID:  "<orig-1@example.test>",
 		References: "<root@example.test>",
+	}
+}
+
+// runReply runs a reply dry-run against a one-message thread.
+func runReply(t *testing.T, g *gmailTestServer, headers []map[string]string) (int, string, string) {
+	t.Helper()
+	message := sendFixtureMessage("m-t1", "t1", "1780000000000", headers)
+	g.messages = map[string]map[string]any{"m-t1": message}
+	g.thread = map[string]any{"id": "t1", "messages": []map[string]any{message}}
+	newSendRig(t, g, nonInteractiveSendSource())
+	return runConfiguredSend("send", "--reply=t1", "--body=x", "--json")
+}
+
+// replyPreview runs a reply dry-run that must succeed and returns its JSON
+// preview.
+func replyPreview(t *testing.T, g *gmailTestServer, headers []map[string]string) map[string]any {
+	t.Helper()
+	code, stdout, stderr := runReply(t, g, headers)
+	if code != 0 || stderr != "" {
+		t.Fatalf("reply preview = %d, stdout=%q, stderr=%q", code, stdout, stderr)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+// addresses lists the addr-specs of a preview recipient set; an absent set
+// is empty.
+func addresses(t *testing.T, value any) []string {
+	t.Helper()
+	list, _ := value.([]any)
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		entry, ok := item.(map[string]any)
+		address, isString := entry["address"].(string)
+		if !ok || !isString {
+			t.Fatalf("recipient %#v has no address", item)
+		}
+		out = append(out, address)
+	}
+	return out
+}
+
+// ownAliasHeaders is a message the account sent from its default send-as
+// alias (g.sendAs in the test below), as the newest message of a thread.
+func ownAliasHeaders(extra ...map[string]string) []map[string]string {
+	return append([]map[string]string{
+		{"name": "From", "value": "Me <alias@example.test>"},
+		{"name": "To", "value": "Bob <bob@example.test>"},
+		{"name": "Subject", "value": "Follow-up"},
+		{"name": "Message-ID", "value": "<orig-1@example.test>"},
+	}, extra...)
+}
+
+func aliasDefaultSendAs() []map[string]any {
+	return []map[string]any{
+		{"sendAsEmail": "user@example.com", "isPrimary": true},
+		{"sendAsEmail": "alias@example.test", "isDefault": true, "treatAsAlias": true, "verificationStatus": "accepted"},
+	}
+}
+
+// Gmail's API returns a folded Subject with the CRLF removed and the fold's
+// tab kept.
+func TestSendReplyAcceptsSubjectWithGmailFoldTab(t *testing.T) {
+	g := newGmailTestServer(t)
+	payload := replyPreview(t, g, []map[string]string{
+		{"name": "From", "value": "Alice <alice@example.test>"},
+		{"name": "To", "value": "user@example.com"},
+		{"name": "Subject", "value": "Re: Tour 100 Example St #1, Springfield, CA,\t 90000"},
+		{"name": "Message-ID", "value": "<orig-1@example.test>"},
+	})
+	if payload["subject"] != "Re: Tour 100 Example St #1, Springfield, CA, 90000" {
+		t.Fatalf("subject = %#v", payload["subject"])
+	}
+}
+
+// Gmail sends from the default send-as address, which need not be the
+// profile address, so the account's own message can name an alias in From.
+func TestSendReplyToOwnSendAsMessageAddressesOriginalRecipients(t *testing.T) {
+	for name, headers := range map[string][]map[string]string{
+		"no reply-to":             ownAliasHeaders(),
+		"reply-to is the profile": ownAliasHeaders(map[string]string{"name": "Reply-To", "value": "user@example.com"}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newGmailTestServer(t)
+			g.sendAs = aliasDefaultSendAs()
+			payload := replyPreview(t, g, headers)
+			if to, cc := addresses(t, payload["to"]), addresses(t, payload["cc"]); len(to) != 1 || to[0] != "bob@example.test" || len(cc) != 0 {
+				t.Fatalf("to=%v cc=%v, want to=[bob@example.test] and no cc", to, cc)
+			}
+		})
+	}
+}
+
+func TestSendReplyFailsWhenSendAsListFails(t *testing.T) {
+	g := newGmailTestServer(t)
+	g.sendAsStatus = http.StatusForbidden
+	code, stdout, stderr := runReply(t, g, ownAliasHeaders())
+	if code == 0 || strings.Contains(stdout, "bob@example.test") {
+		t.Fatalf("a send-as failure must abort the reply with no preview: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+// A new message never subtracts self, so it must not depend on the send-as
+// lookup.
+func TestSendComposeDoesNotNeedSendAs(t *testing.T) {
+	g := newGmailTestServer(t)
+	g.sendAsStatus = http.StatusForbidden
+	newSendRig(t, g, nonInteractiveSendSource())
+	code, stdout, stderr := runConfiguredSend("send", "--to=bob@example.test", "--subject=s", "--body=x", "--json")
+	if code != 0 || !strings.Contains(stdout, "bob@example.test") {
+		t.Fatalf("compose = %d, stdout=%q, stderr=%q", code, stdout, stderr)
 	}
 }
 

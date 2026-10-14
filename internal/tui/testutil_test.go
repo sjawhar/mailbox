@@ -19,7 +19,7 @@ type fakeAPI struct {
 	threads   []*gmail.Thread
 	labels    []gmail.Label
 	listedIDs map[string][]string
-	profile   *gmail.Profile
+	self      []string
 
 	listCalls     []gmail.ListOptions
 	metadataCalls [][]string
@@ -31,7 +31,7 @@ type fakeAPI struct {
 		raw      []byte
 		threadID string
 	}
-	profileCalls int
+	selfCalls int
 
 	listErr     error
 	metadataErr error
@@ -42,7 +42,7 @@ type fakeAPI struct {
 	trashErrs   []error
 	labelsErr   error
 	labelsErrs  []error
-	profileErr  error
+	selfErr     error
 	sendErr     error
 	sendErrs    []error
 	sent        *gmail.SentMessage
@@ -154,12 +154,12 @@ func (f *fakeAPI) GetAttachment(_ context.Context, messageID, attachmentID strin
 	return f.attachments[messageID+":"+attachmentID], nil
 }
 
-func (f *fakeAPI) GetProfile(_ context.Context) (*gmail.Profile, error) {
-	f.profileCalls++
-	if f.profileErr != nil {
-		return nil, f.profileErr
+func (f *fakeAPI) SelfAddresses(_ context.Context) ([]string, error) {
+	f.selfCalls++
+	if f.selfErr != nil {
+		return nil, f.selfErr
 	}
-	return f.profile, nil
+	return f.self, nil
 }
 
 func (f *fakeAPI) SendMessage(_ context.Context, raw []byte, threadID string) (*gmail.SentMessage, error) {

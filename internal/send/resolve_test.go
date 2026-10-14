@@ -15,7 +15,7 @@ func TestResolveRefusals(t *testing.T) {
 		assertRefusal(t, Request{
 			Mode: ModeReply,
 			Body: "update",
-			Self: "user@example.com",
+			Self: []string{"user@example.com"},
 			Target: &TargetHeaders{
 				ReplyTo: "USER@Example.COM",
 				From:    "USER@Example.COM",
@@ -30,7 +30,7 @@ func TestResolveRefusals(t *testing.T) {
 			Mode:   ModeReply,
 			To:     []string{"USER@Example.COM"},
 			Body:   "update",
-			Self:   "user@example.com",
+			Self:   []string{"user@example.com"},
 			Target: &TargetHeaders{From: "alice@example.com"},
 		}, "R2", "self_only_recipients")
 	})
@@ -40,7 +40,7 @@ func TestResolveRefusals(t *testing.T) {
 			Mode:   ModeReply,
 			To:     []string{"USER@Example.COM", "teammate@example.com"},
 			Body:   "update",
-			Self:   "user@example.com",
+			Self:   []string{"user@example.com"},
 			Target: &TargetHeaders{From: "alice@example.com"},
 		})
 		if refusal != nil {
@@ -172,12 +172,43 @@ func TestResolveRefusals(t *testing.T) {
 			t.Fatalf("Resolve() To = %#v, want %#v", env.To, want)
 		}
 	})
+
+	t.Run("R6 still rejects a stranger's message whose Reply-To names the account", func(t *testing.T) {
+		_, refusal := Resolve(Request{
+			Mode: ModeReply,
+			Body: "update",
+			Self: []string{"me@example.test", "alias@example.test"},
+			Target: &TargetHeaders{
+				ReplyTo: "me@example.test",
+				From:    "alice@corp.test",
+				To:      "alias@example.test",
+			},
+		})
+		if refusal == nil || refusal.Rule != "R6" {
+			t.Fatalf("Resolve() refusal = %#v, want R6 (only the account's own message skips it)", refusal)
+		}
+	})
+
+	t.Run("R6 still rejects a self Reply-To when From is missing", func(t *testing.T) {
+		_, refusal := Resolve(Request{
+			Mode: ModeReply,
+			Body: "update",
+			Self: []string{"me@example.test", "alias@example.test"},
+			Target: &TargetHeaders{
+				ReplyTo: "alias@example.test",
+				To:      "bob@corp.test",
+			},
+		})
+		if refusal == nil || refusal.Rule != "R6" {
+			t.Fatalf("Resolve() refusal = %#v, want R6 (no From, so not shown to be the account's own)", refusal)
+		}
+	})
 }
 
 func TestDeriveEnvelopeAllowsEmptyBody(t *testing.T) {
 	envelope, refusal := DeriveEnvelope(Request{
 		Mode: ModeReply,
-		Self: "me@example.test",
+		Self: []string{"me@example.test"},
 		Target: &TargetHeaders{
 			From:      "Sender <sender@example.test>",
 			To:        "Me <me@example.test>",
@@ -205,7 +236,7 @@ func TestResolveReplyDerivation(t *testing.T) {
 		env, refusal := Resolve(Request{
 			Mode: ModeReply,
 			Body: "update",
-			Self: "user@example.com",
+			Self: []string{"user@example.com"},
 			Target: &TargetHeaders{
 				From: "Alice <alice@example.com>",
 				To:   "USER@example.com, Bob <bob@example.com>, Duplicated <dupe@EXAMPLE.com>",
@@ -390,7 +421,7 @@ func assertRefusal(t *testing.T, req Request, wantRule, wantCode string) {
 func TestReplyToOwnMessagePromotesOriginalToRecipients(t *testing.T) {
 	env, ref := Resolve(Request{
 		Mode: ModeReply,
-		Self: "me@example.test",
+		Self: []string{"me@example.test"},
 		Body: "following up",
 		Target: &TargetHeaders{
 			From:    "Me <me@example.test>",
@@ -413,7 +444,7 @@ func TestReplyToOwnMessagePromotesOriginalToRecipients(t *testing.T) {
 func TestReplyToOwnMessageWithSelfOnlyToStaysUnpromoted(t *testing.T) {
 	env, ref := Resolve(Request{
 		Mode: ModeReply,
-		Self: "me@example.test",
+		Self: []string{"me@example.test"},
 		Body: "note",
 		Target: &TargetHeaders{
 			From:    "Me <me@example.test>",

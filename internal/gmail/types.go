@@ -59,7 +59,9 @@ var headerDecoder = &mime.WordDecoder{
 }
 
 // Header returns the first header with the given name, case-insensitively,
-// decoding RFC 2047 encoded words. It returns "" if the header is absent.
+// decoding RFC 2047 encoded words and unfolding it (see unfoldHeader), so a
+// run of spaces and tabs that holds a tab comes back as one space. It returns
+// "" if the header is absent.
 func (m *Message) Header(name string) string {
 	if m.Payload == nil {
 		return ""
@@ -238,6 +240,10 @@ func mojibakeScore(value string) int {
 	return strings.Count(value, "Ã") + strings.Count(value, "Â") + strings.Count(value, "â")
 }
 
+// unfoldHeader joins folded header lines (RFC 5322 §2.2.3) into one line.
+// Gmail's API returns many folded headers with the CRLF already removed but
+// the fold's tab kept ("a,\t b"), so a run of spaces and tabs that holds a
+// tab is fold residue and becomes one space; runs of plain spaces are kept.
 func unfoldHeader(value string) string {
 	var unfolded strings.Builder
 	for index := 0; index < len(value); {
@@ -255,6 +261,19 @@ func unfoldHeader(value string) string {
 				index++
 			}
 			unfolded.WriteByte(' ')
+			continue
+		}
+		if value[index] == ' ' || value[index] == '\t' {
+			end := index
+			for end < len(value) && (value[end] == ' ' || value[end] == '\t') {
+				end++
+			}
+			if strings.Contains(value[index:end], "\t") {
+				unfolded.WriteByte(' ')
+			} else {
+				unfolded.WriteString(value[index:end])
+			}
+			index = end
 			continue
 		}
 		unfolded.WriteByte(value[index])

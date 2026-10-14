@@ -39,9 +39,9 @@ func (m app) openReply() (tea.Model, tea.Cmd) {
 		m.surfaceError(errNoReplyTarget)
 		return m, nil
 	}
-	if m.ctx.self == "" {
-		request := m.beginLoading(profileOperation)
-		return m, m.loadingCmd(getProfileCmd(request))
+	if len(m.ctx.self) == 0 {
+		request := m.beginLoading(selfOperation)
+		return m, m.loadingCmd(getSelfCmd(request))
 	}
 
 	target := gmail.LatestMessage(m.thread.thread)
