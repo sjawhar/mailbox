@@ -157,15 +157,19 @@ func runSend(cc *cmdCtx, args []string) int {
 	if refusal != nil {
 		return next.renderSendRefusal(account, source, refusal)
 	}
-	profile, err := client.GetProfile(ctx)
-	if err != nil {
-		return next.runtimeError(account, source, err)
-	}
-
 	var (
+		self     []string
+		err      error
 		threadID string
 		target   *gmail.Message
 	)
+	// Only a reply subtracts the account's own addresses.
+	if mode == send.ModeReply {
+		self, err = client.SelfAddresses(ctx)
+		if err != nil {
+			return next.runtimeError(account, source, err)
+		}
+	}
 	if mode != send.ModeCompose {
 		threadID, err = resolveThreadRef(ctx, client, account, threadRef)
 		if err != nil {
@@ -202,7 +206,7 @@ func runSend(cc *cmdCtx, args []string) int {
 		Bcc:     blindCarbonCopy,
 		Subject: subject,
 		Body:    body,
-		Self:    profile.EmailAddress,
+		Self:    self,
 	}
 	if target != nil {
 		request.Target = send.NewTargetHeaders(target)

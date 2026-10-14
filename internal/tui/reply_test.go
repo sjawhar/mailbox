@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestReplyOpensEditorWithDerivedRecipients(t *testing.T) {
 	t.Setenv("VISUAL", "true")
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model.view = threadView
 	model.thread = threadModel{thread: thread}
 
@@ -51,7 +52,7 @@ func TestReplyOpensEditorWithDerivedRecipients(t *testing.T) {
 func TestReplyConfirmRendersSharedEnvelope(t *testing.T) {
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, "Rendered body")
 
 	var want strings.Builder
@@ -76,25 +77,67 @@ func TestReplyFetchesSelfBeforeResolving(t *testing.T) {
 	t.Setenv("VISUAL", "true")
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	api.profile = &gmail.Profile{EmailAddress: "me@example.test"}
+	api.self = []string{"me@example.test", "alias@example.test"}
 	model.view = threadView
 	model.thread = threadModel{thread: thread}
 
 	model, command := update(t, model, key(keyReply))
 	if !model.loading || model.view != threadView {
-		t.Fatalf("profile lookup state = loading:%t view:%v", model.loading, model.view)
+		t.Fatalf("self lookup state = loading:%t view:%v", model.loading, model.view)
 	}
 	model, _ = update(t, model, runCmd(t, command))
 
-	if api.profileCalls != 1 || model.ctx.self != "me@example.test" || model.composeState.draftPath == "" {
-		t.Fatalf("profile calls:%d self:%q draft=%q", api.profileCalls, model.ctx.self, model.composeState.draftPath)
+	if api.selfCalls != 1 || !slices.Equal(model.ctx.self, []string{"me@example.test", "alias@example.test"}) || model.composeState.draftPath == "" {
+		t.Fatalf("self calls:%d self:%q draft=%q", api.selfCalls, model.ctx.self, model.composeState.draftPath)
+	}
+}
+
+func TestReplyToOwnAliasMessageAddressesOriginalRecipients(t *testing.T) {
+	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+	t.Setenv("VISUAL", "true")
+	threadID := "thread-alias"
+	thread := &gmail.Thread{ID: threadID, Messages: []*gmail.Message{
+		replyMessage("own", threadID, 1, "Me <alias@example.test>", "Bob <bob@example.test>", "", "Follow-up", "<own@example.test>", ""),
+	}}
+	model, api := newTestApp([]*gmail.Thread{thread})
+	api.self = []string{"me@example.test", "alias@example.test"}
+	model.view = threadView
+	model.thread = threadModel{thread: thread}
+
+	model, command := update(t, model, key(keyReply))
+	model, _ = update(t, model, runCmd(t, command))
+	if model.composeState.draftPath == "" {
+		t.Fatalf("no draft: status=%q", model.status)
+	}
+	content, err := os.ReadFile(model.composeState.draftPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "to  bob@example.test") || strings.Contains(string(content), "alias@example.test") {
+		t.Fatalf("draft must address Bob and omit the alias:\n%s", content)
+	}
+}
+
+func TestReplySurfacesSelfLookupFailure(t *testing.T) {
+	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
+	t.Setenv("VISUAL", "true")
+	thread := replyThread()
+	model, api := newTestApp([]*gmail.Thread{thread})
+	api.selfErr = errors.New("sendAs list failed")
+	model.view = threadView
+	model.thread = threadModel{thread: thread}
+
+	model, command := update(t, model, key(keyReply))
+	model, _ = update(t, model, runCmd(t, command))
+	if api.selfCalls != 1 || model.composeState.draftPath != "" || !model.statusError || len(model.ctx.self) != 0 {
+		t.Fatalf("self failure: calls=%d draft=%q statusError=%t self=%q status=%q", api.selfCalls, model.composeState.draftPath, model.statusError, model.ctx.self, model.status)
 	}
 }
 
 func TestReplyPinsMessageAtOpenTime(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, "Pinned reply body")
 	thread.Messages = append(thread.Messages, replyMessage(
 		"newer-message", thread.ID, 3,
@@ -132,7 +175,7 @@ func TestReplyRefusalPreventsDraftCreation(t *testing.T) {
 		"Me <me@example.test>", "Me <me@example.test>", "", "target subject", "<target@example.test>", "",
 	)
 	model, _ := newTestApp([]*gmail.Thread{selfOnly})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model.view = threadView
 	model.thread = threadModel{thread: selfOnly}
 
@@ -159,7 +202,7 @@ func TestReplyDivergentReplyToRefusalPreventsDraftCreation(t *testing.T) {
 		"Sender <sender@example.test>", "Me <me@example.test>", "", "target subject", "<target@example.test>", "Reply target <reply-to@example.test>",
 	)
 	model, _ := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model.view = threadView
 	model.thread = threadModel{thread: thread}
 
@@ -180,7 +223,7 @@ func TestReplyDivergentReplyToRefusalPreventsDraftCreation(t *testing.T) {
 func TestConfirmSendRunsThroughClassSendUnlock(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model.ctx.acct.Send = &auth.CredentialSource{
 		Class:     auth.ClassSend,
 		Kind:      auth.SourceCmd,
@@ -226,7 +269,7 @@ func TestConfirmSendRunsThroughClassSendUnlock(t *testing.T) {
 func TestConfirmSendIgnoresSecondYWhileFirstSendInFlight(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, "Send only once")
 
 	model, fence := update(t, model, key(keyConfirmSend))
@@ -261,7 +304,7 @@ func TestConfirmSendIgnoresSecondYWhileFirstSendInFlight(t *testing.T) {
 func TestSendInFlightKeepsConfirmControlsInert(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, "Send only once")
 
 	model, fence := update(t, model, key(keyConfirmSend))
@@ -288,7 +331,7 @@ func TestSendInFlightKeepsConfirmControlsInert(t *testing.T) {
 func TestSendCompletionDuringUnrelatedUnlockCleansReplyFlowWithoutStealingSurface(t *testing.T) {
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, "Send completion")
 
 	model, fence := update(t, model, key(keyConfirmSend))
@@ -326,7 +369,7 @@ func TestSendCompletionDuringUnrelatedUnlockCleansReplyFlowWithoutStealingSurfac
 func TestDraftCompletionDuringUnrelatedUnlockCleansReplyFlowWithoutStealingSurface(t *testing.T) {
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, "Draft completion")
 
 	draftRequest := model.beginRequest(draftOperation)
@@ -361,7 +404,7 @@ func TestDraftCompletionDuringUnrelatedUnlockCleansReplyFlowWithoutStealingSurfa
 func TestEscAbandonsWithoutTransmit(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	unlockCalls := 0
 	model.ctx.unlock = func(context.Context, auth.Class) (string, error) {
 		unlockCalls++
@@ -381,7 +424,7 @@ func TestEscAbandonsWithoutTransmit(t *testing.T) {
 func TestEscAfterConfirmAbandonsPendingSend(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, "Abandon body")
 
 	model, fence := update(t, model, key(keyConfirmSend))
@@ -418,7 +461,7 @@ func TestEscAfterConfirmAbandonsPendingSend(t *testing.T) {
 func TestMidflightAbandonNeverTransmits(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, "Abandon body")
 	model, _ = update(t, model, key(keyConfirmSend))
 	request := model.currentRequest(unlockOperation)
@@ -446,7 +489,7 @@ func TestMidflightAbandonNeverTransmits(t *testing.T) {
 func TestAbandonSaveRefusesOversizedMIMEBeforeWriteUnlock(t *testing.T) {
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, strings.Repeat("x", send.MaxOutboundMessageBytes))
 
 	model, _ = update(t, model, key("esc"))
@@ -462,7 +505,7 @@ func TestAbandonSaveRefusesOversizedMIMEBeforeWriteUnlock(t *testing.T) {
 func TestConfirmSendRefusesOversizedMIMEBeforeSendUnlock(t *testing.T) {
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, strings.Repeat("x", send.MaxOutboundMessageBytes))
 
 	model, command := update(t, model, key(keyConfirmSend))
@@ -477,7 +520,7 @@ func TestConfirmSendRefusesOversizedMIMEBeforeSendUnlock(t *testing.T) {
 func TestSendExpiryRetriesOnce(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	invalidations := 0
 	unlockCalls := 0
 	model.ctx.invalidateSend = func() { invalidations++ }
@@ -501,7 +544,7 @@ func TestSendExpiryRetriesOnce(t *testing.T) {
 	}
 
 	model, api = newTestApp([]*gmail.Thread{replyThread()})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model.ctx.invalidateSend = func() { invalidations++ }
 	api.sendErrs = []error{auth.ErrExpiredSendToken, auth.ErrExpiredSendToken}
 	model = confirmWithBody(t, model, "Second expiry")
@@ -515,7 +558,7 @@ func TestSendExpiryRetriesOnce(t *testing.T) {
 func TestTUISendSurfacesBroadScopeWarning(t *testing.T) {
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model.ctx.acct.Send = &auth.CredentialSource{Class: auth.ClassSend, ConfigKey: "accounts.work.send_credential_cmd"}
 	model.ctx.sendScope = func() string {
 		return "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly"
@@ -527,7 +570,7 @@ func TestTUISendSurfacesBroadScopeWarning(t *testing.T) {
 
 	thread = replyThread()
 	model, _ = newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model.ctx.acct.Send = &auth.CredentialSource{Class: auth.ClassSend, ConfigKey: "accounts.work.send_credential_cmd"}
 	model.ctx.sendScope = func() string { return "https://www.googleapis.com/auth/gmail.send" }
 	model = finishConfirmedSend(t, confirmWithBody(t, model, "Exact scope"))
@@ -538,7 +581,7 @@ func TestTUISendSurfacesBroadScopeWarning(t *testing.T) {
 func TestTUISendScopeFailureNamesSendCredentialConfig(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model.ctx.acct.Send = &auth.CredentialSource{
 		Class:     auth.ClassSend,
 		Kind:      auth.SourceCmd,
@@ -649,7 +692,7 @@ func replyMessage(id, threadID string, internalDate int64, from, to, cc, subject
 func TestEscAtConfirmOffersAbandonPromptInsteadOfSilentShred(t *testing.T) {
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, "keep me")
 	model, _ = update(t, model, key("esc"))
 	if !model.abandonPrompt || model.view != replyConfirmView || model.reply.envelope == nil {
@@ -667,7 +710,7 @@ func TestAbandonPromptEscEnterAndDDiscardWithoutServerWrites(t *testing.T) {
 	for _, discard := range []string{"esc", "enter", "d"} {
 		thread := replyThread()
 		model, api := newTestApp([]*gmail.Thread{thread})
-		model.ctx.self = "me@example.test"
+		model.ctx.self = []string{"me@example.test"}
 		model = confirmWithBody(t, model, "discard me")
 		model, _ = update(t, model, key("esc"))
 		model, _ = update(t, model, key(discard))
@@ -683,7 +726,7 @@ func TestAbandonPromptEscEnterAndDDiscardWithoutServerWrites(t *testing.T) {
 func TestAbandonPromptSavesDraftThroughWriteUnlockFence(t *testing.T) {
 	thread := replyThread()
 	model, api := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	unlocked := []auth.Class(nil)
 	model.ctx.unlock = func(_ context.Context, class auth.Class) (string, error) {
 		unlocked = append(unlocked, class)
@@ -715,7 +758,7 @@ func TestAbandonPromptEditReopensSeededEditor(t *testing.T) {
 	t.Setenv("VISUAL", "true")
 	thread := replyThread()
 	model, _ := newTestApp([]*gmail.Thread{thread})
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model = confirmWithBody(t, model, "seed body")
 	model, _ = update(t, model, key("esc"))
 	model, _ = update(t, model, key("e"))

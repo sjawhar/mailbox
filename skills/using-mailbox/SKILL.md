@@ -88,11 +88,11 @@ A dry-run is the default: resolve the envelope first. Start with the dry run, co
 
 Refusal rules:
   R1 (empty_recipients): No recipients remain after resolution.
-  R2 (self_only_recipients): A reply's recipients contain only the account's primary address after self-subtraction.
+  R2 (self_only_recipients): A reply's recipients contain only the account's own addresses (profile and default send-as) after self-subtraction.
   R3 (invalid_address): A recipient does not parse as an email address.
   R4 (header_injection): A subject or recipient contains CR or LF.
   R5 (empty_body): The message body is empty.
-  R6 (needs_explicit_recipient): Reply-To differs from From; provide --to or --cc.
+  R6 (needs_explicit_recipient): Reply-To differs from From, unless both are the account's own addresses; provide --to or --cc.
   R-A1 (attachment_unreadable): An --attach path does not exist or cannot be read.
   R-A2 (attachment_empty): An --attach file is empty.
   R-A3 (attachment_too_large): The final MIME message exceeds 25,000,000 bytes.
@@ -118,11 +118,11 @@ Start with the dry run, copy its `--message` value, then add `--send` to transmi
 | Rule | Code | Refusal |
 | --- | --- | --- |
 | R1 | empty_recipients | No recipients remain after resolution. |
-| R2 | self_only_recipients | A reply's recipients contain only the account's primary address after self-subtraction. |
+| R2 | self_only_recipients | A reply's recipients contain only the account's own addresses (profile and default send-as) after self-subtraction. |
 | R3 | invalid_address | A recipient does not parse as an email address. |
 | R4 | header_injection | A subject or recipient contains CR or LF. |
 | R5 | empty_body | The message body is empty. |
-| R6 | needs_explicit_recipient | Reply-To differs from From; provide --to or --cc. |
+| R6 | needs_explicit_recipient | Reply-To differs from From, unless both are the account's own addresses; provide --to or --cc. |
 | R-A1 | attachment_unreadable | An --attach path does not exist or cannot be read. |
 | R-A2 | attachment_empty | An --attach file is empty. |
 | R-A3 | attachment_too_large | The final MIME message exceeds 25,000,000 bytes. |

@@ -60,12 +60,12 @@ type actionDoneMsg struct {
 
 func (message actionDoneMsg) requestRef() asyncRequest { return message.request }
 
-type profileMsg struct {
+type selfMsg struct {
 	request asyncRequest
-	email   string
+	self    []string
 }
 
-func (message profileMsg) requestRef() asyncRequest { return message.request }
+func (message selfMsg) requestRef() asyncRequest { return message.request }
 
 type sendDoneMsg struct {
 	request asyncRequest
@@ -167,13 +167,13 @@ func getThreadCmd(request asyncRequest, id string) tea.Cmd {
 	}
 }
 
-func getProfileCmd(request asyncRequest) tea.Cmd {
+func getSelfCmd(request asyncRequest) tea.Cmd {
 	return func() tea.Msg {
-		profile, err := request.ctx.api.GetProfile(context.Background())
+		self, err := request.ctx.api.SelfAddresses(context.Background())
 		if err != nil {
 			return errMsg{request: request, err: err}
 		}
-		return profileMsg{request: request, email: profile.EmailAddress}
+		return selfMsg{request: request, self: self}
 	}
 }
 

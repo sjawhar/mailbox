@@ -75,11 +75,11 @@ type RefusalPayload struct {
 func RuleDocs() []struct{ Rule, Code, Doc string } {
 	return []struct{ Rule, Code, Doc string }{
 		{Rule: "R1", Code: "empty_recipients", Doc: "No recipients remain after resolution."},
-		{Rule: "R2", Code: "self_only_recipients", Doc: "A reply's recipients contain only the account's primary address after self-subtraction."},
+		{Rule: "R2", Code: "self_only_recipients", Doc: "A reply's recipients contain only the account's own addresses (profile and default send-as) after self-subtraction."},
 		{Rule: "R3", Code: "invalid_address", Doc: "A recipient does not parse as an email address."},
 		{Rule: "R4", Code: "header_injection", Doc: "A subject or recipient contains CR or LF."},
 		{Rule: "R5", Code: "empty_body", Doc: "The message body is empty."},
-		{Rule: "R6", Code: "needs_explicit_recipient", Doc: "Reply-To differs from From; provide --to or --cc."},
+		{Rule: "R6", Code: "needs_explicit_recipient", Doc: "Reply-To differs from From, unless both are the account's own addresses; provide --to or --cc."},
 		{Rule: "R-A1", Code: "attachment_unreadable", Doc: "An --attach path does not exist or cannot be read."},
 		{Rule: "R-A2", Code: "attachment_empty", Doc: "An --attach file is empty."},
 		{Rule: "R-A3", Code: "attachment_too_large", Doc: "The final MIME message exceeds 25,000,000 bytes."},

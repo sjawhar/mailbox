@@ -269,6 +269,37 @@ func (c *Client) GetProfile(ctx context.Context) (*Profile, error) {
 	return &profile, nil
 }
 
+// SelfAddresses returns the addresses a message from this account comes
+// from: the profile address and the default send-as address, which is what
+// Gmail sends from when no From header is set and need not be the profile
+// address. Other send-as addresses (often shared or group addresses) are not
+// included, so reply-all still addresses them.
+func (c *Client) SelfAddresses(ctx context.Context) ([]string, error) {
+	profile, err := c.GetProfile(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if profile.EmailAddress == "" {
+		return nil, fmt.Errorf("gmail profile has no email address")
+	}
+	var response struct {
+		SendAs []struct {
+			SendAsEmail string `json:"sendAsEmail"`
+			IsDefault   bool   `json:"isDefault"`
+		} `json:"sendAs"`
+	}
+	if err := c.call(ctx, opSendAsList, nil, nil, nil, &response); err != nil {
+		return nil, err
+	}
+	addresses := []string{profile.EmailAddress}
+	for _, alias := range response.SendAs {
+		if alias.IsDefault && alias.SendAsEmail != "" && !strings.EqualFold(alias.SendAsEmail, profile.EmailAddress) {
+			addresses = append(addresses, alias.SendAsEmail)
+		}
+	}
+	return addresses, nil
+}
+
 // ResolveThreadID returns id when it names a thread, or its parent thread when it names a message.
 func (c *Client) ResolveThreadID(ctx context.Context, id string) (string, error) {
 	if _, err := c.GetThread(ctx, id, "minimal"); err == nil {

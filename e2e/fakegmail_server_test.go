@@ -89,6 +89,10 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 		g.recordReadAuth(request)
 		fmt.Fprint(w, `{"emailAddress":"work@example.test"}`)
 	})
+	mux.HandleFunc("/gmail/v1/users/me/settings/sendAs", func(w http.ResponseWriter, request *http.Request) {
+		g.recordReadAuth(request)
+		fmt.Fprint(w, `{"sendAs":[{"sendAsEmail":"work@example.test","displayName":"","isPrimary":true,"isDefault":true}]}`)
+	})
 	mux.HandleFunc("/gmail/v1/users/me/messages/send", g.serveMessageSend)
 	mux.HandleFunc("/gmail/v1/users/me/messages/", g.serveMessage)
 	mux.HandleFunc("/gmail/v1/users/me/drafts", g.serveDrafts)

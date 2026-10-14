@@ -17,6 +17,7 @@ func TestRouteMapIsCompleteAndExact(t *testing.T) {
 		opAttachmentsGet:  {http.MethodGet, "/gmail/v1/users/me/messages/%s/attachments/%s", classRead, "gmail.readonly"},
 		opLabelsList:      {http.MethodGet, "/gmail/v1/users/me/labels", classRead, "gmail.readonly"},
 		opProfileGet:      {http.MethodGet, "/gmail/v1/users/me/profile", classRead, "gmail.readonly"},
+		opSendAsList:      {http.MethodGet, "/gmail/v1/users/me/settings/sendAs", classRead, "gmail.readonly"},
 		opMessagesSend:    {http.MethodPost, "/gmail/v1/users/me/messages/send", classSend, "gmail.send"},
 		opDraftsList:      {http.MethodGet, "/gmail/v1/users/me/drafts", classRead, "gmail.readonly"},
 		opDraftsGet:       {http.MethodGet, "/gmail/v1/users/me/drafts/%s", classRead, "gmail.readonly"},

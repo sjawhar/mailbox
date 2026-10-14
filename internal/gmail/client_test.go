@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -235,6 +236,89 @@ func TestGetProfile(t *testing.T) {
 	}
 	if profile.EmailAddress != "user@example.com" {
 		t.Fatalf("EmailAddress = %q, want user@example.com", profile.EmailAddress)
+	}
+}
+
+func sendAsTestClient(t *testing.T, profile map[string]any, sendAs []map[string]any) *Client {
+	t.Helper()
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gmail/v1/users/me/profile":
+			requireRequest(t, r, http.MethodGet, "/gmail/v1/users/me/profile", "token")
+			writeJSON(t, w, http.StatusOK, profile)
+		case "/gmail/v1/users/me/settings/sendAs":
+			requireRequest(t, r, http.MethodGet, "/gmail/v1/users/me/settings/sendAs", "token")
+			writeJSON(t, w, http.StatusOK, map[string]any{"sendAs": sendAs})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}, "token")
+	return client
+}
+
+// Real responses: the primary entry carries no verificationStatus; custom
+// aliases carry "accepted" or "pending". Gmail sends from the isDefault entry.
+func TestSelfAddressesAreProfileAndDefaultSendAs(t *testing.T) {
+	cases := []struct {
+		name   string
+		sendAs []map[string]any
+		want   []string
+	}{
+		{
+			name: "default is a custom alias",
+			sendAs: []map[string]any{
+				{"sendAsEmail": "User@Example.com", "displayName": "", "isPrimary": true},
+				{"sendAsEmail": "alias@example.test", "displayName": "Me", "isDefault": true, "treatAsAlias": true, "verificationStatus": "accepted"},
+				{"sendAsEmail": "team@example.test", "displayName": "", "treatAsAlias": true, "verificationStatus": "accepted"},
+			},
+			want: []string{"user@example.com", "alias@example.test"},
+		},
+		{
+			name: "default is the primary",
+			sendAs: []map[string]any{
+				{"sendAsEmail": "user@example.com", "displayName": "", "isPrimary": true, "isDefault": true},
+				{"sendAsEmail": "team@example.test", "displayName": "", "treatAsAlias": true, "verificationStatus": "accepted"},
+			},
+			want: []string{"user@example.com"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := sendAsTestClient(t, map[string]any{"emailAddress": "user@example.com", "messagesTotal": 3, "threadsTotal": 2}, tc.sendAs)
+			got, err := client.SelfAddresses(context.Background())
+			if err != nil {
+				t.Fatalf("SelfAddresses: %v", err)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("SelfAddresses = %q, want %q (a non-default alias such as a group address is not self)", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSelfAddressesRejectsEmptyProfileAddress(t *testing.T) {
+	client := sendAsTestClient(t, map[string]any{"messagesTotal": 3}, []map[string]any{
+		{"sendAsEmail": "", "isPrimary": true, "isDefault": true},
+	})
+	if got, err := client.SelfAddresses(context.Background()); err == nil {
+		t.Fatalf("SelfAddresses = %q, want an error for a profile with no address", got)
+	}
+}
+
+func TestSelfAddressesFailsWhenSendAsListFails(t *testing.T) {
+	client, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gmail/v1/users/me/profile":
+			writeJSON(t, w, http.StatusOK, map[string]any{"emailAddress": "user@example.com"})
+		case "/gmail/v1/users/me/settings/sendAs":
+			writeJSON(t, w, http.StatusForbidden, googleError(http.StatusForbidden, "insufficientPermissions", "denied"))
+		default:
+			t.Fatalf("unexpected request %s", r.URL.Path)
+		}
+	}, "token")
+	got, err := client.SelfAddresses(context.Background())
+	if !IsInsufficientScope(err) || got != nil {
+		t.Fatalf("SelfAddresses = %q, %v; want nil and the insufficient-scope error", got, err)
 	}
 }
 

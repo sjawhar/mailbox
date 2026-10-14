@@ -260,16 +260,16 @@ Every body sourceâ€”`--body`, standard input, `--body-file`, and editor composeâ
 
 For replies and forwards, `--message` selects the message within the named thread. `--send` requires that pin so the inspected envelope and sent message cannot diverge; without `--message`, a preview selects the newest message.
 
-For replies, mailbox derives recipients from `Reply-To` or `From`, plus the original `To` and `Cc`, then subtracts the account primary address from every final `To`, `Cc`, and `Bcc` set before evaluating refusals. Primary-address comparison is case-insensitive on the addr-spec; aliases, plus-tags, and dot variants are intentionally not treated as self.
+For replies, mailbox derives recipients from `Reply-To` or `From`, plus the original `To` and `Cc`, then subtracts the account's own addresses from every final `To`, `Cc`, and `Bcc` set before evaluating refusals. The account's own addresses are its profile address and its default send-as address, which is the address Gmail sends from and need not be the profile address. Other send-as addresses (often shared or group addresses), plus-tags and dot variants are not treated as self, so reply-all still addresses them. Comparison is case-insensitive on the addr-spec. When the replied-to message is the account's own, its original `To` recipients become the reply's `To`, even when its `Reply-To` names another of the account's own addresses.
 
 | Rule | Refusal |
 | --- | --- |
 | R1 | No recipients remain after resolution. |
-| R2 | A reply's recipients contain only the account primary address after self-subtraction. |
+| R2 | A reply's recipients contain only the account's own addresses (profile and default send-as) after self-subtraction. |
 | R3 | A recipient does not parse as an email address. |
 | R4 | A subject or recipient contains a carriage return or line feed. |
 | R5 | The message body is empty. |
-| R6 | `Reply-To` differs from `From`; provide explicit `--to` or `--cc`. |
+| R6 | `Reply-To` differs from `From`, unless both are the account's own addresses; provide explicit `--to` or `--cc`. |
 | R-A1 | An attachment path cannot be read. |
 | R-A2 | An attachment file is empty. |
 | R-A3 | The final RFC 5322/MIME message exceeds 25,000,000 bytes. |

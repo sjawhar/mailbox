@@ -16,7 +16,7 @@ func TestReplyKeyCreatesDraftAndSuspends(t *testing.T) {
 	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
 	t.Setenv("VISUAL", "true")
 	model := newThreadModel(t, replyThread())
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 
 	model, cmd := press(t, model, keyReply)
 	if cmd == nil || model.composeState.draftPath == "" {
@@ -35,7 +35,7 @@ func TestComposePromptsToAndSubjectBeforeEditor(t *testing.T) {
 	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
 	t.Setenv("VISUAL", "true")
 	model, _ := newTestApp(testThreads(1))
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 
 	model, cmd := press(t, model, keyCompose)
 	if model.view != composeToView || !model.composeTo.Focused() {
@@ -67,7 +67,7 @@ func TestInvalidEditorDoesNotCreateDraft(t *testing.T) {
 	t.Setenv("MAILBOX_CACHE_DIR", cacheDir)
 	t.Setenv("VISUAL", "'")
 	model := newThreadModel(t, replyThread())
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 
 	model, cmd := press(t, model, keyReply)
 	if cmd != nil || model.composeState.draftPath != "" || !model.statusError {
@@ -182,7 +182,7 @@ func TestEditorGuardsBlockDuringUnlockPendingAndSend(t *testing.T) {
 		func(m *app) { m.pendingDraft = &pendingDraft{} },
 	} {
 		model := newThreadModel(t, replyThread())
-		model.ctx.self = "me@example.test"
+		model.ctx.self = []string{"me@example.test"}
 		arm(&model)
 		model, cmd := press(t, model, keyReply)
 		if cmd != nil || model.composeState.draftPath != "" {
@@ -196,7 +196,7 @@ func modelMidCompose(t *testing.T, body string) app {
 	t.Setenv("MAILBOX_CACHE_DIR", t.TempDir())
 	t.Setenv("VISUAL", "true")
 	model := newThreadModel(t, replyThread())
-	model.ctx.self = "me@example.test"
+	model.ctx.self = []string{"me@example.test"}
 	model, _ = press(t, model, keyReply)
 	if model.composeState.draftPath == "" {
 		t.Fatalf("reply did not create a draft: status=%q", model.status)

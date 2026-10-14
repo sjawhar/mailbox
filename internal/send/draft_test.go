@@ -3,7 +3,7 @@ package send
 import "testing"
 
 func draftTestRequest(body string) Request {
-	return Request{To: []string{"a@example.test"}, Subject: "s", Body: body, Self: "work@example.test"}
+	return Request{To: []string{"a@example.test"}, Subject: "s", Body: body, Self: []string{"work@example.test"}}
 }
 
 func TestResolveDraftComposeRulesApply(t *testing.T) {
@@ -56,7 +56,7 @@ func TestResolveDraftThreadingHostileRows(t *testing.T) {
 }
 
 func TestResolveDraftExplicitSetsCannotFireR2R6(t *testing.T) {
-	env, refusal := ResolveDraft(Request{To: []string{"work@example.test"}, Subject: "s", Body: "b", Self: "work@example.test"}, DraftThreading{})
+	env, refusal := ResolveDraft(Request{To: []string{"work@example.test"}, Subject: "s", Body: "b", Self: []string{"work@example.test"}}, DraftThreading{})
 	if refusal != nil || len(env.To) != 1 {
 		t.Fatalf("self-addressed explicit draft = %+v, %+v; explicit sets never self-subtract (compose semantics)", env, refusal)
 	}

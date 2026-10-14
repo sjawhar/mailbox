@@ -116,6 +116,20 @@ func TestHeaderPreservesOrdinaryWhitespaceWhileUnfolding(t *testing.T) {
 	}
 }
 
+func TestHeaderCollapsesFoldTabResidue(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"a,\t b", "a, b"},
+		{"a,\tb", "a, b"},
+		{"a, \tb", "a, b"},
+		{"a  b", "a  b"},
+	} {
+		message := &Message{Payload: &MessagePart{Headers: []Header{{Name: "Subject", Value: tc.in}}}}
+		if got := message.Header("Subject"); got != tc.want {
+			t.Errorf("Header(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestSenderDoesNotDecodeAnAlreadyDecodedLiteral(t *testing.T) {
 	literal := "=?UTF-8?Q?literal?="
 	decoded := literal + " <sender@example.test>"
