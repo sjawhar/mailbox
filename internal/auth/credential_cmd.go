@@ -20,10 +20,12 @@ import (
 const (
 	mintStderrLimit = 8 << 10
 	diagnosticLimit = 2048
+	maxBareTokenLen = 4096
 )
 
 var (
 	bareTokenPattern     = regexp.MustCompile(`^[A-Za-z0-9._~+/=-]{20,}$`)
+	errInvalidBareToken  = errors.New("credential output is not a valid bare token")
 	ErrCredentialTimeout = errors.New("credential command timed out")
 )
 
@@ -101,10 +103,17 @@ func parseBareCredential(value []byte, route Route) (Token, error) {
 }
 
 func parseBareToken(value []byte, route Route) (Token, error) {
-	if len(value) > 4096 || !bareTokenPattern.Match(value) {
-		return Token{}, errors.New("credential output is not a valid bare token")
+	if len(value) > maxBareTokenLen || !bareTokenPattern.Match(value) {
+		return Token{}, errInvalidBareToken
 	}
 	return Token{AccessToken: string(value), Route: route}, nil
+}
+
+func validateBareToken(value string) error {
+	if len(value) > maxBareTokenLen || !bareTokenPattern.MatchString(value) {
+		return errInvalidBareToken
+	}
+	return nil
 }
 
 // cappedBuffer fails the command when stdout exceeds its strict contract cap.
