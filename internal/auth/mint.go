@@ -26,11 +26,20 @@ func RunMintChild(ctx context.Context, envVar string, stdout io.Writer) error {
 		return fmt.Errorf("invalid __mint --env value %q", envVar)
 	}
 	if os.Getenv("MAILBOX_TOKEN") != "" {
-		return fmt.Errorf("MAILBOX_TOKEN must not be set in a __mint child; the mint contract refreshes %s only", envVar)
+		return fmt.Errorf("MAILBOX_TOKEN must not be set in a __mint child; the mint contract reads %s only", envVar)
 	}
 	raw := os.Getenv(envVar)
 	if raw == "" {
 		return fmt.Errorf("%s is unset", envVar)
+	}
+	if raw[0] != '{' {
+		if err := validateBareToken(raw); err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(mintOutput{
+			AccessToken: raw,
+			Expiry:      time.Now().Add(50 * time.Minute).UTC().Format(time.RFC3339Nano),
+		})
 	}
 	accessToken, scope, expiry, err := refreshAccessToken(ctx, envVar, raw)
 	if err != nil {

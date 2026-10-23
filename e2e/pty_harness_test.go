@@ -17,15 +17,115 @@ import (
 
 func findTmux(t *testing.T) string {
 	t.Helper()
-	if path, err := exec.LookPath("tmux"); err == nil {
-		return path
-	}
-	path := filepath.Join(os.Getenv("HOME"), ".mise/installs/github-tmux-tmux-builds/3.7b/tmux")
-	if _, err := os.Stat(path); err == nil {
+	fallback := filepath.Join(os.Getenv("HOME"), ".mise/installs/github-tmux-tmux-builds/3.7b/tmux")
+	if path, ok := selectTmux(os.Getenv("PATH"), fallback); ok {
 		return path
 	}
 	t.Skip("tmux not available; PTY e2e skipped")
 	return ""
+}
+
+func selectTmux(paths, fallback string) (string, bool) {
+	for _, directory := range filepath.SplitList(paths) {
+		if directory == "" {
+			continue
+		}
+		if path, ok := tmuxExecutable(filepath.Join(directory, "tmux")); ok {
+			return path, true
+		}
+	}
+	return tmuxExecutable(fallback)
+}
+
+func tmuxExecutable(path string) (string, bool) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 || tmuxScriptWrapper(path) {
+		return "", false
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	return absolute, true
+}
+
+func tmuxScriptWrapper(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	var header [2]byte
+	_, _ = file.Read(header[:])
+	return header == [2]byte{'#', '!'}
+}
+
+func TestFindTmuxSkipsScriptWrapper(t *testing.T) {
+	shimDir := t.TempDir()
+	actualDir := t.TempDir()
+	writeExecutable(t, filepath.Join(shimDir, "tmux"), "#!/bin/sh\nexit 1\n")
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := filepath.Join(actualDir, "tmux")
+	if err := os.Symlink(testBinary, actual); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shimDir+string(os.PathListSeparator)+actualDir)
+
+	want, err := filepath.Abs(actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findTmux(t); got != want {
+		t.Fatalf("findTmux = %q, want executable after wrapper %q", got, want)
+	}
+}
+
+func TestSelectTmuxRejectsScriptFallback(t *testing.T) {
+	fallback := filepath.Join(t.TempDir(), "tmux")
+	writeExecutable(t, fallback, "#!/bin/sh\nexit 1\n")
+
+	if path, ok := selectTmux("", fallback); ok {
+		t.Fatalf("selectTmux chose script fallback %q", path)
+	}
+}
+
+func TestSelectTmuxUsesExecutableFallback(t *testing.T) {
+	fallback, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(fallback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := selectTmux("", fallback)
+	if !ok || got != want {
+		t.Fatalf("selectTmux fallback = (%q, %t), want (%q, true)", got, ok, want)
+	}
+}
+
+func TestSelectTmuxSkipsEmptyPathEntries(t *testing.T) {
+	directory := t.TempDir()
+	t.Chdir(directory)
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(testBinary, filepath.Join(directory, "tmux")); err != nil {
+		t.Fatal(err)
+	}
+	fallback, err := filepath.Abs(testBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := selectTmux(string(os.PathListSeparator), fallback)
+	if !ok || got != fallback {
+		t.Fatalf("selectTmux empty PATH = (%q, %t), want fallback (%q, true)", got, ok, fallback)
+	}
 }
 
 type tmuxSession struct {

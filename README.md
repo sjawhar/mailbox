@@ -159,10 +159,11 @@ Each `[accounts.NAME]` table needs a read source. Write and send sources are opt
 For each class, choose exactly one of `_credential_env` and
 `_credential_cmd`; an environment source holds either an `authorized_user`
 JSON value or a bare access token. A command source is an argv array resolved
-when the configuration loads. Its stdout is either the strict
-`{"access_token": ..., "expiry": ...}` object emitted by `__mint`, or a bare
-token: a leading `{` selects the JSON form, and invalid JSON is an error rather
-than a fallback to a bare token.
+when the configuration loads. Its stdout is either a mint object from `__mint`
+or a bare token: a bare-token mint has exactly `{"access_token": ..., "expiry":
+...}`, while a refreshed JSON value may also include `scope`. A leading `{`
+selects the JSON form, and invalid JSON is an error rather than a fallback to a
+bare token.
 
 | Key | Meaning |
 | --- | --- |
@@ -249,8 +250,11 @@ The read analogue uses `needs_read_credential` and the configured read key.
 The send analogue uses `needs_send_credential` and the configured send key.
 
 `mailbox __mint --env VAR` is an internal credential-helper child: it refuses
-`MAILBOX_TOKEN`, reads only `VAR`, prints one JSON object to standard output,
-writes nothing to disk, and does not load configuration.
+`MAILBOX_TOKEN`, reads only `VAR`, writes nothing to disk, and does not load
+configuration. A value beginning with `{` must be authorized-user JSON and is
+refreshed. Any other value must be a valid bare access token; it passes through
+in the strict `{"access_token", "expiry"}` object with an RFC 3339 expiry 50
+minutes after the invocation. Invalid values produce no mint output.
 
 ## Send
 

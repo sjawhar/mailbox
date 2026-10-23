@@ -7,11 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func mintProbeMain() {
@@ -76,6 +80,107 @@ func TestRunMintChildContract(t *testing.T) {
 			t.Fatalf("RunMintChild error, stdout = %v, %q; want loud failure with no output", err, stdout.String())
 		}
 	})
+}
+
+func TestRunMintChildPassesThroughBareAccessToken(t *testing.T) {
+	const accessToken = "abcdefghijklmnopqrstuvwxyz0123456789"
+	var refreshes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		refreshes.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("MAILBOX_TOKEN", "")
+
+	t.Setenv("MINT_ACCESS_TOKEN", accessToken)
+	t.Setenv("MAILBOX_TOKEN_URL", server.URL)
+	start := time.Now()
+	var stdout bytes.Buffer
+	if err := RunMintChild(context.Background(), "MINT_ACCESS_TOKEN", &stdout); err != nil {
+		t.Fatal(err)
+	}
+	end := time.Now()
+
+	if got := refreshes.Load(); got != 0 {
+		t.Fatalf("bare access token made %d refresh requests, want none", got)
+	}
+	var output map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("decode mint output: %v", err)
+	}
+	if len(output) != 2 {
+		t.Fatalf("mint output fields = %v, want access_token and expiry only", output)
+	}
+	var gotToken, gotExpiry string
+	if err := json.Unmarshal(output["access_token"], &gotToken); err != nil {
+		t.Fatalf("decode access_token: %v", err)
+	}
+	if err := json.Unmarshal(output["expiry"], &gotExpiry); err != nil {
+		t.Fatalf("decode expiry: %v", err)
+	}
+	if gotToken != accessToken {
+		t.Fatalf("access_token = %q, want bare access token", gotToken)
+	}
+	expiry, err := time.Parse(time.RFC3339, gotExpiry)
+	if err != nil {
+		t.Fatalf("expiry = %q, want RFC 3339 time: %v", gotExpiry, err)
+	}
+	if expiry.Before(start.Add(50*time.Minute)) || expiry.After(end.Add(50*time.Minute)) {
+		t.Fatalf("expiry = %s, want now plus 50 minutes", expiry)
+	}
+}
+
+func TestRunMintChildAcceptsBareTokenLengthBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "minimum", value: "abcdefghijklmnopqrs+"},
+		{name: "maximum", value: strings.Repeat("a", maxBareTokenLen)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MAILBOX_TOKEN", "")
+			t.Setenv("MINT_ACCESS_TOKEN", tc.value)
+			var stdout bytes.Buffer
+			if err := RunMintChild(context.Background(), "MINT_ACCESS_TOKEN", &stdout); err != nil {
+				t.Fatal(err)
+			}
+			var output mintOutput
+			if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+				t.Fatalf("decode mint output: %v", err)
+			}
+			if output.AccessToken != tc.value {
+				t.Fatal("mint output did not preserve the bare access token")
+			}
+		})
+	}
+}
+
+func TestRunMintChildRejectsInvalidBareTokenWithoutEcho(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{name: "whitespace", value: "not a valid access token"},
+		{name: "too short", value: strings.Repeat("a", 19)},
+		{name: "too long", value: strings.Repeat("a", maxBareTokenLen+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MAILBOX_TOKEN", "")
+			t.Setenv("MINT_ACCESS_TOKEN", tc.value)
+			var stdout bytes.Buffer
+			err := RunMintChild(context.Background(), "MINT_ACCESS_TOKEN", &stdout)
+			if err == nil {
+				t.Fatal("RunMintChild accepted an invalid bare token")
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("invalid bare token wrote stdout %q", stdout.String())
+			}
+			if strings.Contains(err.Error(), tc.value) {
+				t.Fatalf("invalid bare token appeared in error %q", err)
+			}
+		})
+	}
 }
 
 func TestMintProbeUsesEnvContract(t *testing.T) {

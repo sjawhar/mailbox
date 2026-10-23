@@ -121,7 +121,15 @@ GWS_ACCOUNT=<gws account> gws auth status 2>/dev/null | jq -r '.scopes[]? | sele
 
 If one it needs is missing, the account was logged in with other scopes: gws-accounts' own **Read and write** grants `gmail.modify` alone. Log it in again by following gws-accounts' step 7 (`~/.local/share/gws-accounts/INSTALL.md`) with the matching `--scopes` from step 2 above; the new login replaces the old one in the account's directory.
 
-**An account marked `tiers`:** it has no login of its own, and mailbox cannot narrow a tier's token: `mailbox __mint` hands over every scope the tier's credential holds. So each class the person chose needs a tier of its own whose only Gmail scope is that class's: `gmail.readonly` for read, `gmail.modify` for write, `gmail.send` for send. Pick a candidate for each from the tier descriptions in `accounts.json`, then list its Gmail scopes:
+**An account marked `tiers`:** it has no login of its own. Its tier runner can
+release authorized-user JSON, which `mailbox __mint` refreshes, or a fresh bare
+access token, which `__mint` passes through with a 50-minute expiry. mailbox
+cannot narrow either value's token scopes, so each class the person chose needs
+a tier of its own whose only Gmail scope is that class's: `gmail.readonly` for
+read, `gmail.modify` for write, `gmail.send` for send. Pick a candidate for
+each from the tier descriptions in `accounts.json`, then query Google's
+token-info endpoint for the released token's Gmail scopes. The token stays in
+the pipeline: it is not printed or placed in an argument.
 
 ```bash
 gws_account='<gws account>'
@@ -129,7 +137,9 @@ tier='<tier>'
 eval "$(jq -r --arg a "$gws_account" --arg t "$tier" '
   def tok: ascii_upcase | gsub("[^A-Z0-9]"; "_");
   (.[$a].tiers[$t].command // error("no tier \($t) on \($a)")) + [env.HOME + "/.local/bin/mailbox", "__mint", "--env", "GWS_\($a | tok)_\($t | tok)_OAUTH"] | @sh' ~/.config/gws/accounts.json)" |
-  jq -r '.scope | split(" ") | map(select(test("mail"))) | join(" ")'
+  jq -jer '.access_token' |
+  curl -fsS -G --data-urlencode 'access_token@-' https://oauth2.googleapis.com/tokeninfo |
+  jq -er '.scope | split(" ") | map(select(startswith("https://www.googleapis.com/auth/gmail.") or . == "https://mail.google.com/")) | join(" ")'
 ```
 
 When no tier's list is exactly one class's scope, tell the person which class lacks a tier and ask whether to add one (the gws-accounts skill's "Mint a credential for a tier" shows how) or to drop that class.
@@ -232,7 +242,12 @@ else
 fi
 ```
 
-It prints `added`, or `already as it should be` on a second run. On `exists and differs`, do what the person chose in step 1: leave the table, or replace its lines with the ones the block would write (`printf '%s\n' "$table"` shows them; they hold no secret). A `tiers` account's commands run its tier's command around `mailbox __mint`, which reads the credential the tier releases.
+It prints `added`, or `already as it should be` on a second run. On `exists and
+differs`, do what the person chose in step 1: leave the table, or replace its
+lines with the ones the block would write (`printf '%s\n' "$table"` shows them;
+they hold no secret). A `tiers` account's commands run its tier's command around
+`mailbox __mint`, which accepts either the JSON login or bare access token that
+the tier releases.
 
 Last, with more than one account in the file, a `default_account` line must come before the first table. If the file has none, add the one the person chose:
 
