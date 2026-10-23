@@ -6,6 +6,8 @@ Use one-shot commands with `--json` in scripts, or launch `mailbox` in a termina
 
 ## Install
 
+For an agent setting this up for you: [INSTALL.md](INSTALL.md).
+
 Download the release asset for your platform, unpack it, then install the binary:
 
 ```bash
