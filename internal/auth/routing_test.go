@@ -121,12 +121,14 @@ bad) printf '%s\n' 'short' ;;
 chatter) printf 'chatter\nnoise\n' ;;
 malformed) printf '%s\n' '{"access_token": broken' ;;
 diag) printf '%s\n' 'diagnostic.command.token-1234567890'; printf 'grant expires in 7d\033]52;c;steal\a\n' >&2 ;;
-# 96KiB of TOP-LEVEL builtin writes > capture cap (16KiB) + kernel pipe
-# buffer (64KiB). The cap-tripped copier closes its read end, so the shell
-# either blocks on the full pipe or dies of SIGPIPE mid-flood — it can never
-# reach the completion write. (A smaller flood fits the pipe buffer and can
-# finish before the trip; a pipeline moves the SIGPIPE to a child.)
-oversize) i=0; while [ "$i" -lt 96 ]; do printf '%01024d' 0; i=$((i + 1)); done; printf completed > "${PROBE_COMPLETED_FILE:-/dev/null}" ;;
+# 256KiB of TOP-LEVEL builtin writes. Before the cap-tripped copier closes its
+# read end it can have taken the 16KiB capture cap plus the one 32KiB read
+# (io.Copy's buffer) that trips the cap, and the kernel pipe buffer holds 64KiB
+# more: 112KiB in all. A flood that fits in that can finish before the close
+# lands; this one cannot, so the shell blocks on the full pipe or dies of
+# SIGPIPE mid-flood and never reaches the completion write. (A pipeline moves
+# the SIGPIPE to a child.)
+oversize) i=0; while [ "$i" -lt 256 ]; do printf '%01024d' 0; i=$((i + 1)); done; printf completed > "${PROBE_COMPLETED_FILE:-/dev/null}" ;;
 sleep) sleep 30 ;;
 descendant) (sleep 30 >&1 &) ;;
 *) echo "unknown stub mode" >&2; exit 64 ;;

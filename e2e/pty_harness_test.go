@@ -15,31 +15,55 @@ import (
 	"time"
 )
 
+// findTmux returns the tmux the PTY scenarios run, preferring a native binary.
+// When the only tmux is a script wrapper, the scenarios use it if it works from
+// their scrubbed environment; otherwise the test fails and names the wrapper.
+// Only a missing tmux skips.
 func findTmux(t *testing.T) string {
 	t.Helper()
-	fallback := filepath.Join(os.Getenv("HOME"), ".mise/installs/github-tmux-tmux-builds/3.7b/tmux")
-	if path, ok := selectTmux(os.Getenv("PATH"), fallback); ok {
-		return path
+	native, wrapper := selectTmux(os.Getenv("PATH"), pinnedTmux())
+	if native != "" {
+		return native
 	}
-	t.Skip("tmux not available; PTY e2e skipped")
-	return ""
+	if wrapper == "" {
+		t.Skip("tmux not available; PTY e2e skipped")
+	}
+	if err := tmuxWrapperProblem(wrapper); err != nil {
+		t.Fatal(err)
+	}
+	return wrapper
 }
 
-func selectTmux(paths, fallback string) (string, bool) {
+// pinnedTmux is where the pinned tmux install lives when it is not on PATH.
+func pinnedTmux() string {
+	return filepath.Join(os.Getenv("HOME"), ".mise/installs/github-tmux-tmux-builds/3.7b/tmux")
+}
+
+// selectTmux returns the first native tmux binary on paths or at fallback, or,
+// when there is none, the first script wrapper among them.
+func selectTmux(paths, fallback string) (native, wrapper string) {
+	var candidates []string
 	for _, directory := range filepath.SplitList(paths) {
-		if directory == "" {
-			continue
-		}
-		if path, ok := tmuxExecutable(filepath.Join(directory, "tmux")); ok {
-			return path, true
+		if directory != "" {
+			candidates = append(candidates, filepath.Join(directory, "tmux"))
 		}
 	}
-	return tmuxExecutable(fallback)
+	for _, candidate := range append(candidates, fallback) {
+		path, ok := tmuxExecutable(candidate)
+		switch {
+		case !ok:
+		case !tmuxScriptWrapper(path):
+			return path, ""
+		case wrapper == "":
+			wrapper = path
+		}
+	}
+	return "", wrapper
 }
 
 func tmuxExecutable(path string) (string, bool) {
 	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 || tmuxScriptWrapper(path) {
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
 		return "", false
 	}
 	absolute, err := filepath.Abs(path)
@@ -61,7 +85,49 @@ func tmuxScriptWrapper(path string) bool {
 	return header == [2]byte{'#', '!'}
 }
 
-func TestFindTmuxSkipsScriptWrapper(t *testing.T) {
+// scrubbedPath is the system part of the PATH the PTY scenarios give mailbox.
+// Its credential helpers run tmux from that environment through PTY_TMUX_BIN.
+const scrubbedPath = "/usr/bin:/bin"
+
+// tmuxWrapperProblem reports why a tmux script wrapper cannot run the PTY
+// scenarios. A server the wrapper starts from the test's environment must
+// answer a client the wrapper starts from the credential helpers' scrubbed
+// environment. A wrapper that picks another tmux there, as a version manager
+// with no version for that environment does, fails mid-scenario with "server
+// exited unexpectedly" instead.
+func tmuxWrapperProblem(wrapper string) error {
+	dir, err := os.MkdirTemp("", "tmux-probe-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	socket := filepath.Join(dir, "probe.sock")
+	if output, err := exec.Command(wrapper, "-S", socket, "new-session", "-d", "-s", "probe", "read line").CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux wrapper %s cannot start a server for the PTY e2e tests: %v: %s", wrapper, err, strings.TrimSpace(string(output)))
+	}
+	defer exec.Command(wrapper, "-S", socket, "kill-server").Run()
+	client := exec.Command(wrapper, "-S", socket, "capture-pane", "-p", "-t", "probe")
+	client.Env = []string{"HOME=" + os.Getenv("HOME"), "TERM=xterm-256color", "PATH=" + scrubbedPath}
+	if output, err := client.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux wrapper %s does not work from the PTY e2e tests' scrubbed environment (PATH=%s): a client started there cannot reach the server it started: %v: %s; put a native tmux binary on PATH, or make the wrapper run the same tmux from that environment", wrapper, scrubbedPath, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func TestFindTmuxSkipsWithoutTmux(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	var skipped bool
+	t.Run("find", func(t *testing.T) {
+		defer func() { skipped = t.Skipped() }()
+		findTmux(t)
+	})
+	if !skipped {
+		t.Fatal("findTmux did not skip with no tmux on PATH or at the pinned install")
+	}
+}
+
+func TestFindTmuxPrefersNativeBinaryOverEarlierWrapper(t *testing.T) {
 	shimDir := t.TempDir()
 	actualDir := t.TempDir()
 	writeExecutable(t, filepath.Join(shimDir, "tmux"), "#!/bin/sh\nexit 1\n")
@@ -84,12 +150,12 @@ func TestFindTmuxSkipsScriptWrapper(t *testing.T) {
 	}
 }
 
-func TestSelectTmuxRejectsScriptFallback(t *testing.T) {
+func TestSelectTmuxReturnsScriptFallbackAsWrapper(t *testing.T) {
 	fallback := filepath.Join(t.TempDir(), "tmux")
 	writeExecutable(t, fallback, "#!/bin/sh\nexit 1\n")
 
-	if path, ok := selectTmux("", fallback); ok {
-		t.Fatalf("selectTmux chose script fallback %q", path)
+	if native, wrapper := selectTmux("", fallback); native != "" || wrapper != fallback {
+		t.Fatalf("selectTmux script fallback = (%q, %q), want (\"\", %q)", native, wrapper, fallback)
 	}
 }
 
@@ -102,9 +168,8 @@ func TestSelectTmuxUsesExecutableFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, ok := selectTmux("", fallback)
-	if !ok || got != want {
-		t.Fatalf("selectTmux fallback = (%q, %t), want (%q, true)", got, ok, want)
+	if got, wrapper := selectTmux("", fallback); got != want || wrapper != "" {
+		t.Fatalf("selectTmux fallback = (%q, %q), want (%q, \"\")", got, wrapper, want)
 	}
 }
 
@@ -122,10 +187,84 @@ func TestSelectTmuxSkipsEmptyPathEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, ok := selectTmux(string(os.PathListSeparator), fallback)
-	if !ok || got != fallback {
-		t.Fatalf("selectTmux empty PATH = (%q, %t), want fallback (%q, true)", got, ok, fallback)
+	if got, wrapper := selectTmux(string(os.PathListSeparator), fallback); got != fallback || wrapper != "" {
+		t.Fatalf("selectTmux empty PATH = (%q, %q), want fallback (%q, \"\")", got, wrapper, fallback)
 	}
+}
+
+// TestTmuxWrapperRunsPTY runs a real PTY scenario when the only tmux on PATH is
+// a working script wrapper: the scenario must run, never skip. The short name
+// keeps the scenario's temporary paths within the pane width.
+func TestTmuxWrapperRunsPTY(t *testing.T) {
+	native := wrappableTmux(t)
+	bin := t.TempDir()
+	for _, tool := range []string{"env", "pgrep"} {
+		path, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatalf("PTY scenarios need %s: %v", tool, err)
+		}
+		if err := os.Symlink(path, filepath.Join(bin, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := filepath.Join(t.TempDir(), "wrapper-calls")
+	writeExecutable(t, filepath.Join(bin, "tmux"), fmt.Sprintf("#!/bin/sh\nprintf '%%s %%s\\n' \"$3\" \"$PTY_TMUX_SESSION\" >> %s\nexec %s \"$@\"\n", shellQuote(calls), shellQuote(native)))
+	// Build first: go build needs the caller's PATH and HOME (its cache).
+	buildMailbox(t)
+	t.Setenv("PATH", bin)
+	// A fresh HOME hides the pinned fallback install, leaving only the wrapper.
+	t.Setenv("HOME", t.TempDir())
+
+	var skipped bool
+	t.Run("flow", func(t *testing.T) {
+		defer func() { skipped = t.Skipped() }()
+		TestTUIUnlockFlowInRealPTY(t)
+	})
+	if skipped {
+		t.Fatal("the PTY scenario skipped although a working tmux wrapper was the only tmux on PATH")
+	}
+	for _, line := range fileLines(t, calls) {
+		if strings.HasPrefix(line, "capture-pane mailbox-e2e-") {
+			return
+		}
+	}
+	t.Fatalf("the scrubbed credential helper never ran tmux through the wrapper; wrapper calls: %q", fileLines(t, calls))
+}
+
+func TestTmuxWrapperProblemNamesWrapperThatMissesFromScrubbedEnvironment(t *testing.T) {
+	native := wrappableTmux(t)
+	wrapper := filepath.Join(t.TempDir(), "tmux")
+	// Works from the test's environment; finds no tmux from the helpers' one.
+	writeExecutable(t, wrapper, fmt.Sprintf("#!/bin/sh\n[ \"$PATH\" = %s ] && exit 127\nexec %s \"$@\"\n", shellQuote(scrubbedPath), shellQuote(native)))
+	err := tmuxWrapperProblem(wrapper)
+	if err == nil {
+		t.Fatal("tmuxWrapperProblem accepted a wrapper that misses from the scrubbed environment")
+	}
+	if !strings.Contains(err.Error(), wrapper) {
+		t.Fatalf("tmuxWrapperProblem error = %q, want it to name the wrapper %s", err, wrapper)
+	}
+}
+
+// wrappableTmux returns a native tmux binary that behaves the same in any
+// environment, for a test wrapper to exec. It passes over a version manager's
+// dispatcher (mise's shim is its own binary under the name tmux), whose choice
+// of tmux depends on HOME and PATH.
+func wrappableTmux(t *testing.T) string {
+	t.Helper()
+	for _, candidate := range append(filepath.SplitList(os.Getenv("PATH")), filepath.Dir(pinnedTmux())) {
+		if candidate == "" {
+			continue
+		}
+		path, ok := tmuxExecutable(filepath.Join(candidate, "tmux"))
+		if !ok || tmuxScriptWrapper(path) {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(path); err == nil && filepath.Base(resolved) == "tmux" {
+			return resolved
+		}
+	}
+	t.Skip("no native tmux binary to wrap; PTY e2e skipped")
+	return ""
 }
 
 type tmuxSession struct {

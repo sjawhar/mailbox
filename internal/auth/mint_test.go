@@ -130,6 +130,129 @@ func TestRunMintChildPassesThroughBareAccessToken(t *testing.T) {
 	}
 }
 
+// jsonLeadingWhitespace lists the whitespace JSON permits before a value.
+var jsonLeadingWhitespace = []struct{ name, prefix string }{
+	{name: "space", prefix: " "},
+	{name: "tab", prefix: "\t"},
+	{name: "newline", prefix: "\n"},
+	{name: "CRLF", prefix: "\r\n"},
+}
+
+// countingTokenServer is a loopback token endpoint that counts refreshes and
+// checks each refresh form against oauthJSON's fields.
+func countingTokenServer(t *testing.T, refreshes *atomic.Int32) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		refreshes.Add(1)
+		if err := request.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+		}
+		for field, want := range map[string]string{"client_id": "client", "client_secret": "secret", "refresh_token": "refresh", "grant_type": "refresh_token"} {
+			if request.Form.Get(field) != want {
+				t.Errorf("refresh form field %s does not match the authorized_user fixture", field)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"minted-token","expires_in":3600}`))
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+func TestRunMintChildRefreshesJSONWithLeadingWhitespace(t *testing.T) {
+	for _, tc := range jsonLeadingWhitespace {
+		t.Run(tc.name, func(t *testing.T) {
+			var refreshes atomic.Int32
+			t.Setenv("MAILBOX_TOKEN", "")
+			t.Setenv("MINT_OAUTH", tc.prefix+oauthJSON())
+			t.Setenv("MAILBOX_TOKEN_URL", countingTokenServer(t, &refreshes))
+			var stdout bytes.Buffer
+			if err := RunMintChild(context.Background(), "MINT_OAUTH", &stdout); err != nil {
+				t.Fatalf("RunMintChild refused authorized_user JSON with leading %s: %v", tc.name, err)
+			}
+			if got := refreshes.Load(); got != 1 {
+				t.Fatalf("refresh requests = %d, want 1", got)
+			}
+			token, err := parseMintOutput(stdout.Bytes())
+			if err != nil || token.AccessToken != "minted-token" {
+				t.Fatalf("strict mint output = %+v, %v", token, err)
+			}
+		})
+	}
+}
+
+func TestAcquireEnvRefreshesJSONWithLeadingWhitespace(t *testing.T) {
+	for _, tc := range jsonLeadingWhitespace {
+		t.Run(tc.name, func(t *testing.T) {
+			var refreshes atomic.Int32
+			acct := &AccountConfig{Name: "work"}
+			source := &CredentialSource{Class: ClassRead, Kind: SourceEnv, EnvVar: "READ_OAUTH", ConfigKey: "accounts.work.read_credential_env"}
+			acct.Read = source
+			cfg := &Config{Path: "/test/config.toml", Accounts: []*AccountConfig{acct}}
+			t.Setenv("READ_OAUTH", tc.prefix+oauthJSON())
+			t.Setenv("MAILBOX_TOKEN_URL", countingTokenServer(t, &refreshes))
+
+			acquired, err := acquireEnv(context.Background(), cfg, acct, source)
+			if err != nil {
+				t.Fatalf("acquireEnv refused authorized_user JSON with leading %s: %v", tc.name, err)
+			}
+			if got := refreshes.Load(); got != 1 {
+				t.Fatalf("refresh requests = %d, want 1", got)
+			}
+			if acquired.Token.AccessToken != "minted-token" || acquired.Token.Route != RouteEnv {
+				t.Fatalf("acquired token = %+v, want refreshed environment token", acquired.Token)
+			}
+		})
+	}
+}
+
+func TestAcquireEnvRejectsBareTokenWithLeadingWhitespace(t *testing.T) {
+	const token = "abcdefghijklmnopqrstuvwxyz0123456789"
+	for _, tc := range jsonLeadingWhitespace {
+		t.Run(tc.name, func(t *testing.T) {
+			var refreshes atomic.Int32
+			acct := &AccountConfig{Name: "work"}
+			source := &CredentialSource{Class: ClassRead, Kind: SourceEnv, EnvVar: "READ_OAUTH", ConfigKey: "accounts.work.read_credential_env"}
+			acct.Read = source
+			cfg := &Config{Path: "/test/config.toml", Accounts: []*AccountConfig{acct}}
+			t.Setenv("READ_OAUTH", tc.prefix+token)
+			t.Setenv("MAILBOX_TOKEN_URL", countingTokenServer(t, &refreshes))
+
+			_, err := acquireEnv(context.Background(), cfg, acct, source)
+			if !errors.Is(err, errInvalidBareToken) {
+				t.Fatalf("acquireEnv error = %v, want invalid bare token", err)
+			}
+			if strings.Contains(err.Error(), token) {
+				t.Fatalf("bare token appeared in error %q", err)
+			}
+			if got := refreshes.Load(); got != 0 {
+				t.Fatalf("bare token made %d refresh requests, want none", got)
+			}
+		})
+	}
+}
+
+func TestParseCredentialOutputParsesMintObjectAfterLeadingWhitespace(t *testing.T) {
+	for _, tc := range jsonLeadingWhitespace {
+		t.Run(tc.name, func(t *testing.T) {
+			token, err := parseCredentialOutput([]byte(tc.prefix + `{"access_token":"token","expiry":"2099-01-01T00:00:00Z"}` + "\n"))
+			if err != nil || token.AccessToken != "token" || token.Route != RouteCmd {
+				t.Fatalf("parseCredentialOutput = %+v, %v; want the mint object", token, err)
+			}
+		})
+	}
+}
+
+func TestParseCredentialOutputRejectsBareTokenWithLeadingWhitespace(t *testing.T) {
+	for _, tc := range jsonLeadingWhitespace {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseCredentialOutput([]byte(tc.prefix + "bare.command.token-value-1234567890\n")); !errors.Is(err, errInvalidBareToken) {
+				t.Fatalf("parseCredentialOutput error = %v, want invalid bare token", err)
+			}
+		})
+	}
+}
+
 func TestRunMintChildAcceptsBareTokenLengthBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -164,6 +287,10 @@ func TestRunMintChildRejectsInvalidBareTokenWithoutEcho(t *testing.T) {
 		{name: "whitespace", value: "not a valid access token"},
 		{name: "too short", value: strings.Repeat("a", 19)},
 		{name: "too long", value: strings.Repeat("a", maxBareTokenLen+1)},
+		{name: "leading space", value: " abcdefghijklmnopqrstuvwxyz0123456789"},
+		{name: "leading tab", value: "\tabcdefghijklmnopqrstuvwxyz0123456789"},
+		{name: "leading newline", value: "\nabcdefghijklmnopqrstuvwxyz0123456789"},
+		{name: "leading CRLF", value: "\r\nabcdefghijklmnopqrstuvwxyz0123456789"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("MAILBOX_TOKEN", "")
@@ -176,7 +303,7 @@ func TestRunMintChildRejectsInvalidBareTokenWithoutEcho(t *testing.T) {
 			if stdout.Len() != 0 {
 				t.Fatalf("invalid bare token wrote stdout %q", stdout.String())
 			}
-			if strings.Contains(err.Error(), tc.value) {
+			if strings.Contains(err.Error(), strings.TrimSpace(tc.value)) {
 				t.Fatalf("invalid bare token appeared in error %q", err)
 			}
 		})

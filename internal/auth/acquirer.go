@@ -77,7 +77,7 @@ func acquireEnv(ctx context.Context, cfg *Config, acct *AccountConfig, src *Cred
 	if raw == "" {
 		return Acquired{}, credentialError(cfg, acct, src.Class, src, ReasonEnvUnset)
 	}
-	if raw[0] == '{' {
+	if startsJSONObject(raw) {
 		accessToken, scope, expiry, err := refreshAccessToken(ctx, src.ConfigKey, raw)
 		if err != nil {
 			return Acquired{}, err
