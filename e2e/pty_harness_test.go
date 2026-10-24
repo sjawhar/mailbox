@@ -39,16 +39,22 @@ func pinnedTmux() string {
 	return filepath.Join(os.Getenv("HOME"), ".mise/installs/github-tmux-tmux-builds/3.7b/tmux")
 }
 
-// selectTmux returns the first native tmux binary on paths or at fallback, or,
-// when there is none, the first script wrapper among them.
-func selectTmux(paths, fallback string) (native, wrapper string) {
+// tmuxCandidates lists the tmux paths to try, in order: tmux in each non-empty
+// directory on paths, then fallback.
+func tmuxCandidates(paths, fallback string) []string {
 	var candidates []string
 	for _, directory := range filepath.SplitList(paths) {
 		if directory != "" {
 			candidates = append(candidates, filepath.Join(directory, "tmux"))
 		}
 	}
-	for _, candidate := range append(candidates, fallback) {
+	return append(candidates, fallback)
+}
+
+// selectTmux returns the first native tmux binary on paths or at fallback, or,
+// when there is none, the first script wrapper among them.
+func selectTmux(paths, fallback string) (native, wrapper string) {
+	for _, candidate := range tmuxCandidates(paths, fallback) {
 		path, ok := tmuxExecutable(candidate)
 		switch {
 		case !ok:
@@ -251,11 +257,8 @@ func TestTmuxWrapperProblemNamesWrapperThatMissesFromScrubbedEnvironment(t *test
 // of tmux depends on HOME and PATH.
 func wrappableTmux(t *testing.T) string {
 	t.Helper()
-	for _, candidate := range append(filepath.SplitList(os.Getenv("PATH")), filepath.Dir(pinnedTmux())) {
-		if candidate == "" {
-			continue
-		}
-		path, ok := tmuxExecutable(filepath.Join(candidate, "tmux"))
+	for _, candidate := range tmuxCandidates(os.Getenv("PATH"), pinnedTmux()) {
+		path, ok := tmuxExecutable(candidate)
 		if !ok || tmuxScriptWrapper(path) {
 			continue
 		}
@@ -588,7 +591,7 @@ write_label = "Q"
 	env := map[string]string{
 		"HOME":                   os.Getenv("HOME"),
 		"TERM":                   "xterm-256color",
-		"PATH":                   stubs + ":/usr/bin:/bin",
+		"PATH":                   stubs + ":" + scrubbedPath,
 		"MAILBOX_CONFIG":         config,
 		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
 		"MAILBOX_CACHE_DIR":      cache,
