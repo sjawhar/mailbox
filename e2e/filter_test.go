@@ -42,7 +42,7 @@ write_credential_env_passthrough = ["WRITE_CANARY"]
 	env := map[string]string{
 		"HOME":                   os.Getenv("HOME"),
 		"TERM":                   "xterm-256color",
-		"PATH":                   stubs + ":/usr/bin:/bin",
+		"PATH":                   stubs + ":" + scrubbedPath,
 		"MAILBOX_CONFIG":         config,
 		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
 		"MAILBOX_CACHE_DIR":      cache,

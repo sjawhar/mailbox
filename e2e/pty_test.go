@@ -48,7 +48,7 @@ credential_env_passthrough = ["STUB_TOKEN_URL", "PTY_TMUX_BIN", "PTY_TMUX_SOCKET
 	env := map[string]string{
 		"HOME":                   os.Getenv("HOME"),
 		"TERM":                   "xterm-256color",
-		"PATH":                   stubs + ":/usr/bin:/bin",
+		"PATH":                   stubs + ":" + scrubbedPath,
 		"MAILBOX_CONFIG":         config,
 		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
 		"MAILBOX_CACHE_DIR":      cache,
@@ -280,7 +280,7 @@ credential_env_passthrough = ["STUB_TOKEN_URL"]
 	env := map[string]string{
 		"HOME":                   os.Getenv("HOME"),
 		"TERM":                   "xterm-256color",
-		"PATH":                   stubs + ":/usr/bin:/bin",
+		"PATH":                   stubs + ":" + scrubbedPath,
 		"MAILBOX_CONFIG":         config,
 		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
 		"MAILBOX_CACHE_DIR":      cache,
@@ -359,7 +359,7 @@ credential_env_passthrough = ["STUB_TOKEN_URL", "PTY_TMUX_BIN", "PTY_TMUX_SOCKET
 	session := newTmuxSession(t, map[string]string{
 		"HOME":                   os.Getenv("HOME"),
 		"TERM":                   "xterm-256color",
-		"PATH":                   stubs + ":/usr/bin:/bin",
+		"PATH":                   stubs + ":" + scrubbedPath,
 		"MAILBOX_CONFIG":         config,
 		"MAILBOX_GMAIL_BASE_URL": gmail.server.URL,
 		"MAILBOX_CACHE_DIR":      cache,

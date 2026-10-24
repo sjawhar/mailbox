@@ -103,17 +103,29 @@ func parseBareCredential(value []byte, route Route) (Token, error) {
 }
 
 func parseBareToken(value []byte, route Route) (Token, error) {
-	if len(value) > maxBareTokenLen || !bareTokenPattern.Match(value) {
-		return Token{}, errInvalidBareToken
+	if err := validateBareToken(value); err != nil {
+		return Token{}, err
 	}
 	return Token{AccessToken: string(value), Route: route}, nil
 }
 
-func validateBareToken(value string) error {
-	if len(value) > maxBareTokenLen || !bareTokenPattern.MatchString(value) {
-		return errInvalidBareToken
+// validateBareToken is the one bare-token rule: at most maxBareTokenLen bytes
+// that match bareTokenPattern. It takes either form, so no caller copies the
+// token to check it.
+func validateBareToken[T string | []byte](value T) error {
+	if len(value) <= maxBareTokenLen {
+		switch v := any(value).(type) {
+		case string:
+			if bareTokenPattern.MatchString(v) {
+				return nil
+			}
+		case []byte:
+			if bareTokenPattern.Match(v) {
+				return nil
+			}
+		}
 	}
-	return nil
+	return errInvalidBareToken
 }
 
 // startsJSONObject reports whether value takes the JSON route: its first byte
