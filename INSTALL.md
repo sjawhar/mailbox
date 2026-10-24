@@ -142,7 +142,7 @@ eval "$(jq -r --arg a "$gws_account" --arg t "$tier" '
   jq -er '.scope | split(" ") | map(select(startswith("https://www.googleapis.com/auth/gmail.") or . == "https://mail.google.com/")) | join(" ")'
 ```
 
-When no tier's list is exactly one class's scope, tell the person which class lacks a tier and ask whether to add one (the gws-accounts skill's "Mint a credential for a tier" shows how) or to drop that class.
+When no tier's list is exactly one class's scope, tell the person which class lacks a tier and ask whether to add one (the gws-accounts skill's "Mint a JSON credential for a tier" shows how) or to drop that class.
 
 **Check:** every `login` account's list holds every scope it needs, and every class of a `tiers` account has a tier whose list is exactly that class's one scope.
 
