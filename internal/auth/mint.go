@@ -32,7 +32,7 @@ func RunMintChild(ctx context.Context, envVar string, stdout io.Writer) error {
 	if raw == "" {
 		return fmt.Errorf("%s is unset", envVar)
 	}
-	if raw[0] != '{' {
+	if !startsJSONObject(raw) {
 		if err := validateBareToken(raw); err != nil {
 			return err
 		}

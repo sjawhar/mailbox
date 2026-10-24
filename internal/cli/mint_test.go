@@ -36,6 +36,47 @@ func TestMintSubcommandUsesEnvWithoutLoadingConfig(t *testing.T) {
 	}
 }
 
+func TestMintSubcommandRefreshesJSONWithLeadingWhitespace(t *testing.T) {
+	const oauth = `{"client_id":"c","client_secret":"s","refresh_token":"r"}`
+	for _, tc := range []struct{ name, prefix string }{
+		{name: "space", prefix: " "},
+		{name: "tab", prefix: "\t"},
+		{name: "newline", prefix: "\n"},
+		{name: "CRLF", prefix: "\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var refreshes atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				refreshes.Add(1)
+				if err := r.ParseForm(); err != nil || r.Form.Get("refresh_token") != "r" || r.Form.Get("grant_type") != "refresh_token" {
+					t.Errorf("refresh form does not match the authorized_user fixture (parse error %v)", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"access_token":"minted","expires_in":3600}`)
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("MAILBOX_TOKEN", "")
+			t.Setenv("MAILBOX_TOKEN_URL", server.URL)
+			t.Setenv("CLI_MINT_OAUTH", tc.prefix+oauth)
+			t.Setenv("MAILBOX_CONFIG", t.TempDir()+"/missing.toml")
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"__mint", "--env", "CLI_MINT_OAUTH"}, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit = %d, stderr = %q", code, stderr.String())
+			}
+			if got := refreshes.Load(); got != 1 {
+				t.Fatalf("refresh requests = %d, want 1", got)
+			}
+			var output struct {
+				AccessToken string `json:"access_token"`
+				Expiry      string `json:"expiry"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &output); err != nil || output.AccessToken != "minted" || output.Expiry == "" {
+				t.Fatalf("stdout = %q, output = %+v, error = %v", stdout.String(), output, err)
+			}
+		})
+	}
+}
+
 func TestMintSubcommandPassesThroughBareAccessToken(t *testing.T) {
 	const accessToken = "abcdefghijklmnopqrstuvwxyz0123456789"
 	var refreshes atomic.Int32
@@ -95,6 +136,39 @@ func TestMintSubcommandRejectsInvalidBareTokenWithoutEcho(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), invalid) {
 		t.Fatalf("invalid bare token appeared in stderr %q", stderr.String())
+	}
+}
+
+func TestMintSubcommandRejectsBareTokenWithLeadingWhitespaceWithoutEcho(t *testing.T) {
+	const token = "abcdefghijklmnopqrstuvwxyz0123456789"
+	for _, tc := range []struct{ name, prefix string }{
+		{name: "space", prefix: " "},
+		{name: "tab", prefix: "\t"},
+		{name: "newline", prefix: "\n"},
+		{name: "CRLF", prefix: "\r\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var refreshes atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				refreshes.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("MAILBOX_TOKEN", "")
+			t.Setenv("MAILBOX_TOKEN_URL", server.URL)
+			t.Setenv("CLI_MINT_ACCESS_TOKEN", tc.prefix+token)
+			var stdout, stderr bytes.Buffer
+			code := Run([]string{"__mint", "--env", "CLI_MINT_ACCESS_TOKEN"}, &stdout, &stderr)
+			if code != 1 || stdout.Len() != 0 {
+				t.Fatalf("bare token with leading whitespace result = (%d, %q, %q), want (1, empty stdout, stderr)", code, stdout.String(), stderr.String())
+			}
+			if strings.Contains(stderr.String(), token) {
+				t.Fatalf("bare token appeared in stderr %q", stderr.String())
+			}
+			if got := refreshes.Load(); got != 0 {
+				t.Fatalf("bare token made %d refresh requests, want none", got)
+			}
+		})
 	}
 }
 

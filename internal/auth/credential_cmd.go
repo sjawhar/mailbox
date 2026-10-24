@@ -89,7 +89,7 @@ func parseCredentialOutput(output []byte) (Token, error) {
 	if len(output) == 0 {
 		return Token{}, errors.New("credential command returned empty stdout")
 	}
-	if output[0] == '{' {
+	if startsJSONObject(output) {
 		return parseMintOutput(output)
 	}
 	return parseBareCredential(output, RouteCmd)
@@ -114,6 +114,22 @@ func validateBareToken(value string) error {
 		return errInvalidBareToken
 	}
 	return nil
+}
+
+// startsJSONObject reports whether value takes the JSON route: its first byte
+// after JSON whitespace (space, tab, CR, LF) is '{'. Callers pass the original
+// value on, so leading whitespace never turns a bare token valid.
+func startsJSONObject[T ~string | ~[]byte](value T) bool {
+	for i := range len(value) {
+		switch value[i] {
+		case ' ', '\t', '\r', '\n':
+		case '{':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // cappedBuffer fails the command when stdout exceeds its strict contract cap.
