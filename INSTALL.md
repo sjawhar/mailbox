@@ -22,8 +22,8 @@ command -v sha256sum || command -v shasum
 
 If curl or jq is missing:
 
-- **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq curl ca-certificates` (or their distribution's equivalent). `sha256sum` comes with coreutils.
-- **macOS:** run `brew install jq curl`. If `brew` is missing, ask the person before installing Homebrew from <https://brew.sh>: its installer asks for their password. Then put it on PATH with `eval "$(/opt/homebrew/bin/brew shellenv)"` (`/usr/local/bin/brew` on an Intel Mac), as the installer's last lines say. macOS ships `shasum`.
+- **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq curl ca-certificates` (or their distribution's equivalent; as root, as in a container, leave out `sudo`). `sha256sum` comes with coreutils.
+- **macOS:** if `brew` is missing, ask the person before installing Homebrew from <https://brew.sh> (its installer asks for their password), then put it on PATH in this shell with `eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv)"` (Apple silicon, else Intel), as the installer's last lines say. Then run `brew install jq curl`. macOS ships `shasum`.
 
 **Check:** every command prints a version or a path.
 
@@ -45,7 +45,7 @@ jq -r 'to_entries[] | "\(.key)\t\(.value.description // "")\t\(if .value | has("
 - `helper: someone else's` means `~/.local/bin/mailbox-gws-token` is not this guide's: ask the person in the same message for another absolute path to put the helper at. Later blocks write the helper's absolute path (`$HOME/.local/bin/mailbox-gws-token` expanded, or the one the person gave) in place of `<helper path>`.
 - gws-accounts is installed when `type -a gws` lists a file under `.local/share/gws-accounts/bin` first and `~/.config/gws/accounts.json` exists. Its accounts are the lines the `jq` command prints. An account marked `login` runs on a login gws keeps in its directory; one marked `tiers` gets its credentials from the commands its tiers name (the gws-accounts README's Tiers section).
 
-Then ask the person these questions in one message, and work without asking again until step 2 or 4 needs their browser, or step 3 finds no release for this platform and needs their approval to install Go:
+Then ask the person these questions in one message, and work without asking again until step 2 or 4 needs their browser, gws-accounts' step 0 needs their approval to install a missing tool, or step 3 finds no release for this platform and needs their approval to install Go:
 
 1. Which Gmail accounts should mailbox use? For each: the gws-accounts account it already has (list them), or, for one gws-accounts does not have yet, a short name such as `work`, its email address, and a few words on who it is (such as "Example Corp Workspace" or "personal Gmail"). If there are several, which one does `mailbox` use when no account is named?
 2. What may agents do with each account through mailbox?
@@ -112,7 +112,14 @@ Install the latest release into `~/.local/bin`, checking it against the release'
 )
 ```
 
-If it prints `no mailbox release`, build it instead with Go 1.27 or later: `GOBIN="$HOME/.local/bin" go install github.com/sjawhar/mailbox/cmd/mailbox@latest`. That build reports its version as `dev`. If `go version` is older or missing (Ubuntu 24.04's `golang-go` is 1.22), ask the person before installing Go, then install the current release from <https://go.dev/dl/> as its install page says (on macOS, `brew install go` also works), and run the build with `PATH="/usr/local/go/bin:$PATH"`.
+If it prints `no mailbox release`, build the latest release's commit instead with Go 1.27 or later (the module path has no `/v2`, so `@latest` would resolve to an old v1 tag):
+
+```bash
+commit="$(git ls-remote --tags --refs --sort=-v:refname https://github.com/sjawhar/mailbox 'v*' | head -n 1 | cut -f 1)"
+GOBIN="$HOME/.local/bin" go install "github.com/sjawhar/mailbox/cmd/mailbox@$commit"
+```
+
+That build reports its version as `dev`. If `go version` is older or missing (Ubuntu 24.04's `golang-go` is 1.22), ask the person before installing Go, then install the current release from <https://go.dev/dl/> as its install page says (on macOS, `brew install go` also works), and run the build with `PATH="/usr/local/go/bin:$PATH"`.
 
 **Check:** the checksum line says `OK` (or `go install` succeeded), `~/.local/bin/mailbox --version` prints `mailbox <version>`, and a new login shell finds it:
 
