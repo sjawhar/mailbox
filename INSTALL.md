@@ -10,11 +10,47 @@ Never print a credential: no client secret, refresh token or access token, and n
 
 The [README](README.md) is the reference for mailbox's commands and its configuration file.
 
+## 0. Prerequisites
+
+mailbox needs [gws-accounts](https://github.com/sjawhar/gws-accounts) first; step 2 installs it with its own guide when it is missing. This guide's commands also need curl, jq and a SHA-256 tool:
+
+```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
+curl --version | head -n 1
+jq --version                    # 1.6 or later
+command -v sha256sum || command -v shasum
+```
+
+If curl or jq is missing:
+
+- **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq curl ca-certificates` (or their distribution's equivalent; as root, as in a container, leave out `sudo`). `sha256sum` comes with coreutils.
+- **macOS:** curl and `shasum` ship with macOS, and so does jq from macOS 15. If jq is missing: with Homebrew, run `brew install jq`; without it, put jq 1.7.1's release binary (macOS 13 or later) in `~/.local/bin`, checked against the release's `sha256sum.txt`:
+
+  ```bash
+  (
+    set -e
+    asset="jq-macos-$(uname -m | sed 's/x86_64/amd64/')"
+    base=https://github.com/jqlang/jq/releases/download/jq-1.7.1
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    cd "$tmp"
+    curl -fsSLO "$base/$asset"
+    curl -fsSL "$base/sha256sum.txt" | grep " $asset\$" | shasum -a 256 -c
+    mkdir -p "$HOME/.local/bin"
+    install -m 0755 "$asset" "$HOME/.local/bin/jq"
+  )
+  ```
+
+From here on, start every command that runs jq, gws or mailbox with `export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH";`, since your shell may not have these on PATH yet.
+
+**Check:** after that PATH line, every command above prints a version or a path.
+
 ## 1. Ask once
 
 First look at what is already here. Print no credential, and from the config file only its account names and default:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 command -v mailbox && mailbox --version
 cfg="${MAILBOX_CONFIG-${XDG_CONFIG_HOME:-$HOME/.config}/mailbox/config.toml}"
 case "$cfg" in "") echo "MAILBOX_CONFIG is set but empty: ask the person to unset it or name a file" ;; /*) ;; *) cfg="$PWD/$cfg" ;; esac
@@ -28,7 +64,7 @@ jq -r 'to_entries[] | "\(.key)\t\(.value.description // "")\t\(if .value | has("
 - `helper: someone else's` means `~/.local/bin/mailbox-gws-token` is not this guide's: ask the person in the same message for another absolute path to put the helper at. Later blocks write the helper's absolute path (`$HOME/.local/bin/mailbox-gws-token` expanded, or the one the person gave) in place of `<helper path>`.
 - gws-accounts is installed when `type -a gws` lists a file under `.local/share/gws-accounts/bin` first and `~/.config/gws/accounts.json` exists. Its accounts are the lines the `jq` command prints. An account marked `login` runs on a login gws keeps in its directory; one marked `tiers` gets its credentials from the commands its tiers name (the gws-accounts README's Tiers section).
 
-Then ask the person these questions in one message, and work without asking again until step 2 or 4 needs their browser, or step 3 finds no release for this platform and needs their approval to install Go:
+Then ask the person these questions in one message, and work without asking again until step 2 or 4 needs their browser, gws-accounts' step 0 needs their approval to install a missing tool, or step 3 finds no release for this platform and needs their approval to install Go:
 
 1. Which Gmail accounts should mailbox use? For each: the gws-accounts account it already has (list them), or, for one gws-accounts does not have yet, a short name such as `work`, its email address, and a few words on who it is (such as "Example Corp Workspace" or "personal Gmail"). If there are several, which one does `mailbox` use when no account is named?
 2. What may agents do with each account through mailbox?
@@ -64,6 +100,7 @@ From here on, start every command that runs gws or mailbox with `export PATH="$H
 **Check**, for every account marked `login`:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 GWS_ACCOUNT=<gws account> gws gmail users getProfile --params '{"userId":"me"}' | jq -r .emailAddress
 ```
 
@@ -95,7 +132,14 @@ Install the latest release into `~/.local/bin`, checking it against the release'
 )
 ```
 
-If it prints `no mailbox release`, build it instead with Go 1.27 or later (ask the person before installing Go): `GOBIN="$HOME/.local/bin" go install github.com/sjawhar/mailbox/cmd/mailbox@latest`. That build reports its version as `dev`.
+If it prints `no mailbox release`, build the latest release's commit instead with Go 1.27 or later (the module path has no `/v2`, so `@latest` would resolve to an old v1 tag):
+
+```bash
+commit="$(git ls-remote --tags --refs --sort=-v:refname https://github.com/sjawhar/mailbox 'v*' | head -n 1 | cut -f 1)"
+GOBIN="$HOME/.local/bin" go install "github.com/sjawhar/mailbox/cmd/mailbox@$commit"
+```
+
+That build reports its version as `dev`. If `go version` is older or missing (Ubuntu 24.04's `golang-go` is 1.22), ask the person before installing Go, then install the current release from <https://go.dev/dl/> as its install page says (on macOS, `brew install go` also works), and run the build with `PATH="/usr/local/go/bin:$PATH"`.
 
 **Check:** the checksum line says `OK` (or `go install` succeeded), `~/.local/bin/mailbox --version` prints `mailbox <version>`, and a new login shell finds it:
 
@@ -116,6 +160,7 @@ mailbox gives each class of command its own token with one Gmail scope: `gmail.r
 **An account marked `login`:** list the Gmail scopes its login holds.
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 GWS_ACCOUNT=<gws account> gws auth status 2>/dev/null | jq -r '.scopes[]? | select(startswith("https://www.googleapis.com/auth/gmail"))'
 ```
 
@@ -132,6 +177,7 @@ token-info endpoint for the released token's Gmail scopes. The token stays in
 the pipeline: it is not printed or placed in an argument.
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 gws_account='<gws account>'
 tier='<tier>'
 eval "$(jq -r --arg a "$gws_account" --arg t "$tier" '
@@ -153,6 +199,7 @@ When no tier's list is exactly one class's scope, tell the person which class la
 Write it at `<helper path>`. A file there that this guide did not write stops the block:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 helper='<helper path>'
 if [ -e "$helper" ] && [ "$(sed -n 2p "$helper")" != "# mailbox-gws-token: written by mailbox's INSTALL.md" ]; then echo "$helper is someone else's: ask the person for another path" >&2; false; else
 mkdir -p "$(dirname "$helper")"
@@ -183,6 +230,7 @@ fi
 **Check**, for every `login` account and every scope it needs, printing only the fields that are not the token:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 '<helper path>' <gws account> gmail.readonly | jq -c '{token: (.access_token | length > 0), expiry, scope}'
 ```
 
@@ -205,6 +253,7 @@ It prints `existing:` or `created:`. If it prints nothing, `$cfg` is not a regul
 Add a table for each account, once per account. A mailbox account name must match `[A-Za-z0-9_-]+`, and two may not differ only in case: use the gws-accounts name when it fits, and otherwise a short name such as `personal` (for a gws account named `alice@gmail.com`). Set `access` to `read`, `organize` or `send` from question 2. For an account marked `tiers`, also set the tiers step 4 chose for its classes; the block ignores them for a `login` account, whose commands run the helper.
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 cfg='<config path>'
 helper='<helper path>'
 mailbox_name='<mailbox account>'
@@ -252,6 +301,7 @@ the tier releases.
 Last, with more than one account in the file, a `default_account` line must come before the first table. If the file has none, add the one the person chose:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 cfg='<config path>'
 default='<default mailbox account>'
 if grep -qE '^default_account[[:space:]]*=' "$cfg"; then grep -E '^default_account[[:space:]]*=' "$cfg"
@@ -280,6 +330,7 @@ When this step's check passes, tell the person, in one line, how they use it: `m
 Run the commands an agent will, with no terminal attached, for every account:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 mailbox --account <mailbox account> status --json </dev/null | jq -r '.accounts[] | "\(.name): \(.profile.email) \(.error)"'
 mailbox --account <mailbox account> inbox --max 5 --json </dev/null | jq -r '"\(.threads | length) threads", (.threads[] | .subject)'
 ```
