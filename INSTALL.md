@@ -10,6 +10,19 @@ Never print a credential: no client secret, refresh token or access token, and n
 
 The [README](README.md) is the reference for mailbox's commands and its configuration file.
 
+## 0. Prerequisites
+
+mailbox needs [gws-accounts](https://github.com/sjawhar/gws-accounts) first; step 2 installs it with its own guide when it is missing. This guide's commands also need curl and jq:
+
+```bash
+curl --version | head -n 1
+jq --version                    # 1.6 or later
+```
+
+If curl or jq is missing: on macOS, `brew install jq curl`; on Linux, ask the person before running `sudo apt-get update && sudo apt-get install -y jq curl ca-certificates` (or their distribution's equivalent).
+
+**Check:** both commands print a version.
+
 ## 1. Ask once
 
 First look at what is already here. Print no credential, and from the config file only its account names and default:
