@@ -15,6 +15,7 @@ The [README](README.md) is the reference for mailbox's commands and its configur
 mailbox needs [gws-accounts](https://github.com/sjawhar/gws-accounts) first; step 2 installs it with its own guide when it is missing. This guide's commands also need curl, jq and a SHA-256 tool:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 curl --version | head -n 1
 jq --version                    # 1.6 or later
 command -v sha256sum || command -v shasum
