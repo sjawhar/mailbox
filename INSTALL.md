@@ -23,7 +23,7 @@ command -v sha256sum || command -v shasum
 If curl or jq is missing:
 
 - **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq curl ca-certificates` (or their distribution's equivalent). `sha256sum` comes with coreutils.
-- **macOS:** run `brew install jq curl`. If `brew` is missing, ask the person before installing Homebrew from <https://brew.sh>. macOS ships `shasum`.
+- **macOS:** run `brew install jq curl`. If `brew` is missing, ask the person before installing Homebrew from <https://brew.sh>: its installer asks for their password. Then put it on PATH with `eval "$(/opt/homebrew/bin/brew shellenv)"` (`/usr/local/bin/brew` on an Intel Mac), as the installer's last lines say. macOS ships `shasum`.
 
 **Check:** every command prints a version or a path.
 
@@ -112,7 +112,7 @@ Install the latest release into `~/.local/bin`, checking it against the release'
 )
 ```
 
-If it prints `no mailbox release`, build it instead with Go 1.27 or later (ask the person before installing Go): `GOBIN="$HOME/.local/bin" go install github.com/sjawhar/mailbox/cmd/mailbox@latest`. That build reports its version as `dev`.
+If it prints `no mailbox release`, build it instead with Go 1.27 or later: `GOBIN="$HOME/.local/bin" go install github.com/sjawhar/mailbox/cmd/mailbox@latest`. That build reports its version as `dev`. If `go version` is older or missing (Ubuntu 24.04's `golang-go` is 1.22), ask the person before installing Go, then install the current release from <https://go.dev/dl/> as its install page says (on macOS, `brew install go` also works), and run the build with `PATH="/usr/local/go/bin:$PATH"`.
 
 **Check:** the checksum line says `OK` (or `go install` succeeded), `~/.local/bin/mailbox --version` prints `mailbox <version>`, and a new login shell finds it:
 
