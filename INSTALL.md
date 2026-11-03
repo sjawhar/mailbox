@@ -23,13 +23,26 @@ command -v sha256sum || command -v shasum
 If curl or jq is missing:
 
 - **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq curl ca-certificates` (or their distribution's equivalent; as root, as in a container, leave out `sudo`). `sha256sum` comes with coreutils.
-- **macOS:** curl and `shasum` ship with macOS, and so does jq from macOS 15. If jq is missing: with Homebrew, run `brew install jq`; without it, put jq's release binary in `~/.local/bin`:
+- **macOS:** curl and `shasum` ship with macOS, and so does jq from macOS 15. If jq is missing: with Homebrew, run `brew install jq`; without it, put jq 1.7.1's release binary (macOS 13 or later) in `~/.local/bin`, checked against the release's `sha256sum.txt`:
 
   ```bash
-  mkdir -p ~/.local/bin && curl -fsSL -o ~/.local/bin/jq "https://github.com/jqlang/jq/releases/latest/download/jq-macos-$(uname -m | sed 's/x86_64/amd64/')" && chmod +x ~/.local/bin/jq && export PATH="$HOME/.local/bin:$PATH" && jq --version
+  (
+    set -e
+    asset="jq-macos-$(uname -m | sed 's/x86_64/amd64/')"
+    base=https://github.com/jqlang/jq/releases/download/jq-1.7.1
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    cd "$tmp"
+    curl -fsSLO "$base/$asset"
+    curl -fsSL "$base/sha256sum.txt" | grep " $asset\$" | shasum -a 256 -c
+    mkdir -p "$HOME/.local/bin"
+    install -m 0755 "$asset" "$HOME/.local/bin/jq"
+  )
   ```
 
-**Check:** every command prints a version or a path.
+From here on, start every command that runs jq, gws or mailbox with `export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH";`, since your shell may not have these on PATH yet.
+
+**Check:** after that PATH line, every command above prints a version or a path.
 
 ## 1. Ask once
 
