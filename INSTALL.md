@@ -12,16 +12,20 @@ The [README](README.md) is the reference for mailbox's commands and its configur
 
 ## 0. Prerequisites
 
-mailbox needs [gws-accounts](https://github.com/sjawhar/gws-accounts) first; step 2 installs it with its own guide when it is missing. This guide's commands also need curl and jq:
+mailbox needs [gws-accounts](https://github.com/sjawhar/gws-accounts) first; step 2 installs it with its own guide when it is missing. This guide's commands also need curl, jq and a SHA-256 tool:
 
 ```bash
 curl --version | head -n 1
 jq --version                    # 1.6 or later
+command -v sha256sum || command -v shasum
 ```
 
-If curl or jq is missing: on macOS, `brew install jq curl`; on Linux, ask the person before running `sudo apt-get update && sudo apt-get install -y jq curl ca-certificates` (or their distribution's equivalent).
+If curl or jq is missing:
 
-**Check:** both commands print a version.
+- **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq curl ca-certificates` (or their distribution's equivalent). `sha256sum` comes with coreutils.
+- **macOS:** run `brew install jq curl`. If `brew` is missing, ask the person before installing Homebrew from <https://brew.sh>. macOS ships `shasum`.
+
+**Check:** every command prints a version or a path.
 
 ## 1. Ask once
 
