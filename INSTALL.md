@@ -49,6 +49,7 @@ From here on, start every command that runs jq, gws or mailbox with `export PATH
 First look at what is already here. Print no credential, and from the config file only its account names and default:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 command -v mailbox && mailbox --version
 cfg="${MAILBOX_CONFIG-${XDG_CONFIG_HOME:-$HOME/.config}/mailbox/config.toml}"
 case "$cfg" in "") echo "MAILBOX_CONFIG is set but empty: ask the person to unset it or name a file" ;; /*) ;; *) cfg="$PWD/$cfg" ;; esac
@@ -98,6 +99,7 @@ From here on, start every command that runs gws or mailbox with `export PATH="$H
 **Check**, for every account marked `login`:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 GWS_ACCOUNT=<gws account> gws gmail users getProfile --params '{"userId":"me"}' | jq -r .emailAddress
 ```
 
@@ -157,6 +159,7 @@ mailbox gives each class of command its own token with one Gmail scope: `gmail.r
 **An account marked `login`:** list the Gmail scopes its login holds.
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 GWS_ACCOUNT=<gws account> gws auth status 2>/dev/null | jq -r '.scopes[]? | select(startswith("https://www.googleapis.com/auth/gmail"))'
 ```
 
@@ -173,6 +176,7 @@ token-info endpoint for the released token's Gmail scopes. The token stays in
 the pipeline: it is not printed or placed in an argument.
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 gws_account='<gws account>'
 tier='<tier>'
 eval "$(jq -r --arg a "$gws_account" --arg t "$tier" '
@@ -194,6 +198,7 @@ When no tier's list is exactly one class's scope, tell the person which class la
 Write it at `<helper path>`. A file there that this guide did not write stops the block:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 helper='<helper path>'
 if [ -e "$helper" ] && [ "$(sed -n 2p "$helper")" != "# mailbox-gws-token: written by mailbox's INSTALL.md" ]; then echo "$helper is someone else's: ask the person for another path" >&2; false; else
 mkdir -p "$(dirname "$helper")"
@@ -224,6 +229,7 @@ fi
 **Check**, for every `login` account and every scope it needs, printing only the fields that are not the token:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 '<helper path>' <gws account> gmail.readonly | jq -c '{token: (.access_token | length > 0), expiry, scope}'
 ```
 
@@ -246,6 +252,7 @@ It prints `existing:` or `created:`. If it prints nothing, `$cfg` is not a regul
 Add a table for each account, once per account. A mailbox account name must match `[A-Za-z0-9_-]+`, and two may not differ only in case: use the gws-accounts name when it fits, and otherwise a short name such as `personal` (for a gws account named `alice@gmail.com`). Set `access` to `read`, `organize` or `send` from question 2. For an account marked `tiers`, also set the tiers step 4 chose for its classes; the block ignores them for a `login` account, whose commands run the helper.
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 cfg='<config path>'
 helper='<helper path>'
 mailbox_name='<mailbox account>'
@@ -293,6 +300,7 @@ the tier releases.
 Last, with more than one account in the file, a `default_account` line must come before the first table. If the file has none, add the one the person chose:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 cfg='<config path>'
 default='<default mailbox account>'
 if grep -qE '^default_account[[:space:]]*=' "$cfg"; then grep -E '^default_account[[:space:]]*=' "$cfg"
@@ -321,6 +329,7 @@ When this step's check passes, tell the person, in one line, how they use it: `m
 Run the commands an agent will, with no terminal attached, for every account:
 
 ```bash
+export PATH="$HOME/.local/share/gws-accounts/bin:$HOME/.local/bin:$PATH"
 mailbox --account <mailbox account> status --json </dev/null | jq -r '.accounts[] | "\(.name): \(.profile.email) \(.error)"'
 mailbox --account <mailbox account> inbox --max 5 --json </dev/null | jq -r '"\(.threads | length) threads", (.threads[] | .subject)'
 ```
