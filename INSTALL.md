@@ -23,7 +23,11 @@ command -v sha256sum || command -v shasum
 If curl or jq is missing:
 
 - **Linux:** ask the person before running `sudo apt-get update && sudo apt-get install -y jq curl ca-certificates` (or their distribution's equivalent; as root, as in a container, leave out `sudo`). `sha256sum` comes with coreutils.
-- **macOS:** if `brew` is missing, ask the person before installing Homebrew from <https://brew.sh> (its installer asks for their password), then put it on PATH in this shell with `eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv)"` (Apple silicon, else Intel), as the installer's last lines say. Then run `brew install jq curl`. macOS ships `shasum`.
+- **macOS:** curl and `shasum` ship with macOS, and so does jq from macOS 15. If jq is missing: with Homebrew, run `brew install jq`; without it, put jq's release binary in `~/.local/bin`:
+
+  ```bash
+  mkdir -p ~/.local/bin && curl -fsSL -o ~/.local/bin/jq "https://github.com/jqlang/jq/releases/latest/download/jq-macos-$(uname -m | sed 's/x86_64/amd64/')" && chmod +x ~/.local/bin/jq && export PATH="$HOME/.local/bin:$PATH" && jq --version
+  ```
 
 **Check:** every command prints a version or a path.
 
